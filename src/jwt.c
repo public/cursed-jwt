@@ -134,10 +134,55 @@ static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]);
 #undef MB_STORE8
 #undef MB_MIN_LANES
 
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+/* ---- single-stream x86-64: OpenSSL's sha256_block_data_order, extracted (src/sha256_x86_64_ossl.S) ----
+ * Batch 1 and the lanes a vector group leaves over run one message at a time, where OpenSSL's hand-scheduled
+ * AVX2+BMI2 code (2 blocks interleaved, rorx) beats the compiled scalar template: 763 vs 1,015 ns per HMAC on a
+ * Xeon Platinum 8260.  It dispatches on jwt_ossl_ia32cap_P, laid out like OpenSSL's OPENSSL_ia32cap_P for the bits
+ * that code reads: word 0 bit 30 "Intel CPU", word 1 = CPUID.1:ECX (SSSE3, AVX), word 2 = CPUID.7.0:EBX (BMI1,
+ * AVX2, BMI2, SHA).  AVX and AVX2 are cleared unless the OS saves ymm state (XCR0). */
+#include <cpuid.h>
+void jwt_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
+__attribute__((visibility("hidden"))) unsigned int jwt_ossl_ia32cap_P[4];
+__attribute__((constructor)) static void jwt_ossl_cap_init(void) {
+    unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0;
+    if (__get_cpuid(0, &a, &b, &c, &d) && b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e) w0 |= 1u << 30;
+    if (__get_cpuid(1, &a, &b, &c, &d)) w1 = c;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) w2 = b;
+    int ymm = 0;
+    if (w1 & (1u << 27)) { /* OSXSAVE: XCR0 bits 1 (SSE) and 2 (AVX) */
+        unsigned lo, hi;
+        __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        ymm = (lo & 6) == 6;
+    }
+    if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5);
+    jwt_ossl_ia32cap_P[0] = w0, jwt_ossl_ia32cap_P[1] = w1, jwt_ossl_ia32cap_P[2] = w2;
+}
+static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
+    uint32_t st[8];
+    uint8_t ob[64] = {0};
+    memcpy(st, k->ih, 32);
+    if (p->nf) jwt_ossl_sha256_block(st, p->m, (size_t)p->nf);
+    jwt_ossl_sha256_block(st, p->tail, (size_t)(p->nb - p->nf));
+    for (int i = 0; i < 8; i++) ob[4 * i] = st[i] >> 24, ob[4 * i + 1] = st[i] >> 16, ob[4 * i + 2] = st[i] >> 8, ob[4 * i + 3] = st[i];
+    ob[32] = 0x80, ob[62] = ((64 + 32) * 8) >> 8, ob[63] = (uint8_t)((64 + 32) * 8);
+    memcpy(mac, k->oh, 32);
+    jwt_ossl_sha256_block(mac, ob, 1);
+}
+/* every message one at a time through the extracted block function (tests, benchmarks) */
+void jwt_hmac_ossl(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    for (int i = 0; i < n; i++) {
+        hplan_t p;
+        hplan_init(&p, msg[i], len[i]);
+        hmac1_scalar(k, &p, mac[i]);
+    }
+}
+#else
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
     const hplan_t *pp = p;
     lanes_scalar(k, 1, &pp, (uint32_t(*)[8])mac);
 }
+#endif
 
 void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
     uint8_t key[64] = {0}, blk[64];
@@ -284,7 +329,16 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #ifndef JWT_AVX_MIN_LANES
 #define JWT_AVX_MIN_LANES 2
 #endif
-#define MB_MIN_LANES JWT_AVX_MIN_LANES
+/* AVX2 alone: with OpenSSL's single-stream code for leftovers, 2 messages one at a time (2 x 753 ns) beat one
+ * 2-lane AVX2 group (822 ns) on a Xeon Platinum 8260; from 3 lanes the vector wins (555 ns) */
+#ifndef JWT_AVX2_MIN_LANES
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+#define JWT_AVX2_MIN_LANES 3
+#else
+#define JWT_AVX2_MIN_LANES JWT_AVX_MIN_LANES
+#endif
+#endif
+#define MB_MIN_LANES JWT_AVX2_MIN_LANES
 
 #define MB(name) name##_avx2
 #define VROR(x, n) _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
@@ -307,6 +361,8 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
  * vpternlogd immediates (truth table index = a<<2 | b<<1 | c):
  *   0x96 = a^b^c, 0xCA = a ? b : c (Ch, and the lane select), 0xE8 = majority.
  * tests/test_jwt.c runs the template with a scalar ternlog emulation using these same constants. */
+#undef MB_MIN_LANES
+#define MB_MIN_LANES JWT_AVX_MIN_LANES
 #define MB(name) name##_avx512
 #define VROR(x, n) _mm256_ror_epi32(x, n) /* vprord */
 #define VXOR3(a, b, c) _mm256_ternarylogic_epi32(a, b, c, JWT_TL_XOR3)

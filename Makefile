@@ -24,6 +24,16 @@ ARCHFLAGS ?= -march=armv8.2-a+crypto+sha3
 else ifeq ($(UNAME_M),arm64)
 ARCHFLAGS ?= -mcpu=native
 endif
+# x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
+# ELF only).  `make OSSL_SHA=` builds without it.
+ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
+OSSL_SHA ?= 1
+endif
+ifeq ($(OSSL_SHA),1)
+SHAFLAG := -DJWT_OSSL_SHA256
+X86SHA := -DJWT_OSSL_SHA256 $(B)/sha256_x86_64_ossl.o
+SHAOBJ := $(B)/sha256_x86_64_ossl.o
+endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
 SSLINC := -I$(SSLDIR)/include
@@ -32,7 +42,7 @@ endif
 CFLAGS ?= -O3
 WARN := -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function
 INC := -Iinclude -Isrc -Itests
-SRC := src/jwt.c src/jwt_mb.inc include/jwt.h
+SRC := src/jwt.c src/jwt_mb.inc include/jwt.h $(SHAOBJ)
 SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TEST_SECRET := cursed-jwt-test-secret
 NTOKENS ?= 20000
@@ -42,9 +52,11 @@ all: $(B)/libcursedjwt.a $(B)/verify
 $(B):
 	mkdir -p $(B)
 $(B)/jwt.o: $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) -Iinclude -c src/jwt.c -o $@
-$(B)/libcursedjwt.a: $(B)/jwt.o
-	ar rcs $@ $<
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
+$(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
+	rm -f $@ && ar rcs $@ $^
 $(B)/verify: examples/verify.c $(B)/libcursedjwt.a
 	$(CC) $(CFLAGS) $(WARN) -Iinclude $< $(B)/libcursedjwt.a -o $@
 
@@ -53,11 +65,11 @@ $(B)/tokens.json: tests/gen_tokens.py | $(B)
 	$(PYTHON) tests/gen_tokens.py $(TEST_SECRET) $(NTOKENS) > $@
 
 $(B)/test_jwt: tests/test_jwt.c tests/ossl_min.h $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 $(B)/asan_jwt: tests/test_jwt.c tests/ossl_min.h $(SRC) | $(B)
-	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
+	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 $(B)/bench_jwt: bench/bench_jwt.c tests/ossl_min.h $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 
 # the example must accept a generated token and reject a tampered one
 example-check: $(B)/verify $(B)/tokens.json
@@ -90,8 +102,8 @@ bench: $(B)/bench_jwt $(B)/tokens.json
 CXX ?= c++
 compare: $(B)/tokens.json $(SRC) | $(B)
 	./scripts/fetch-compare.sh
-	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) bench/compare/e2e.c -o $(B)/compare_e2e
-	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) -DJWT_NO_SHAPE_JSON bench/compare/e2e.c -o $(B)/compare_e2e_strict
+	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) bench/compare/e2e.c $(X86SHA) -o $(B)/compare_e2e
+	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) -DJWT_NO_SHAPE_JSON bench/compare/e2e.c $(X86SHA) -o $(B)/compare_e2e_strict
 	$(CXX) -O3 $(ARCHFLAGS) -std=c++17 -w -Ithird_party/jwt-cpp/include $(SSLINC) bench/compare/jwtcpp_bench.cpp $(SSLLIB) -lcrypto -o $(B)/compare_jwtcpp
 	./$(B)/compare_e2e $(B)/tokens.json
 	./$(B)/compare_e2e_strict $(B)/tokens.json
@@ -101,11 +113,11 @@ compare: $(B)/tokens.json $(SRC) | $(B)
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) -include stdarg.h $(SSLINC) tests/test_jwt.c $(SSLLIB) -lcrypto -o $(B)/test_jwt_avx512
-	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $(SSLINC) bench/bench_jwt.c $(SSLLIB) -lcrypto -o $(B)/bench_jwt_avx512
+	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) -include stdarg.h $(SSLINC) tests/test_jwt.c $(SSLLIB) -lcrypto $(X86SHA) -o $(B)/test_jwt_avx512
+	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $(SSLINC) bench/bench_jwt.c $(SSLLIB) -lcrypto $(X86SHA) -o $(B)/bench_jwt_avx512
 	@echo "vprord/vpternlogd in the test binary: $$(objdump -d $(B)/test_jwt_avx512 | grep -c -E 'vprord|vpternlogd')"
 licence: bench/licence_probe.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< -o $(B)/licence_probe && ./$(B)/licence_probe
+	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< $(X86SHA) -o $(B)/licence_probe && ./$(B)/licence_probe
 
 # RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
 PK := -DJWT_PK -Ithird_party/fiat

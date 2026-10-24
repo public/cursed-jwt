@@ -9,7 +9,7 @@ The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JS
 fast path. Every signature is recomputed on every call; nothing is cached except the key's HMAC ipad/opad
 midstates.
 
-On a Xeon Platinum 8260 (no SHA-NI), a full verify costs **277 ns per token at batch 8** and 1,178 ns for a lone
+On a Xeon Platinum 8260 (no SHA-NI), a full verify costs **277 ns per token at batch 8** and 938 ns for a lone
 token. On the same box, jwt-cpp takes 6,201 ns and golang-jwt v5 8,739 ns per token: **5–24× faster**.
 
 ### Benchmark comparison at a glance
@@ -20,17 +20,21 @@ one. Method and full tables are under [Benchmarks](#benchmarks).
 
 | implementation | batch 1 | batch 3 | batch 8 |
 |---|---|---|---|
-| **cursed-jwt** (AVX-512VL ymm, shape-matched JSON) | **1,178** | **508** | **277** |
-| cursed-jwt, strict JSON only | 1,276 | 617 | 376 |
+| **cursed-jwt** (AVX-512VL ymm, shape-matched JSON) | **938** | **508** | **277** |
+| cursed-jwt, strict JSON only | 1,276* | 617 | 376 |
 | [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,201 | 6,201 | 6,201 |
 | [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,739 | 8,739 | 8,739 |
 
 | HMAC-SHA256 only, ns/token | batch 1 | batch 8 |
 |---|---|---|
-| **cursed-jwt AVX-512VL ymm ×8** | 1,014 | **155** |
-| cursed-jwt AVX2 ×8 | 1,015 | 222 |
+| **cursed-jwt AVX-512VL ymm ×8** | **763** | **155** |
+| cursed-jwt AVX2 ×8 | 763 | 222 |
 | OpenSSL, precomputed ipad/opad midstates | 764 | 763 |
 | OpenSSL `HMAC()` | 2,878 | 2,870 |
+
+- **Batch 1 runs OpenSSL's own x86-64 SHA-256 code**, extracted into `src/sha256_x86_64_ossl.S` (Apache-2.0, see
+  [THIRD_PARTY.md](THIRD_PARTY.md)). That's why it ties OpenSSL there: the compiled scalar template took 1,015 ns.
+- \* The strict-JSON batch-1 figure was measured before that change. Expect ~1,040.
 
 On an Apple M5 Pro (`make compare`): cursed-jwt 116 ns/token at batch 8, jwt-cpp 2,521.
 
@@ -136,7 +140,14 @@ The engine is chosen at compile time. Every engine the target can run is also ex
 | AArch64 without SHA2 | `-march=armv8-a` | NEON, 4 lanes |
 | anything else | — | scalar |
 
-A batch of 1 runs the scalar engine, because one token through an 8-lane block costs the same.
+A batch of 1 runs one message at a time, because one token through an 8-lane block costs the same as 8. So do
+the leftover lanes of a group too small for a vector.
+- **On x86-64 Linux**, that single-stream path is OpenSSL's `sha256_block_data_order`, extracted and vendored as
+  `src/sha256_x86_64_ossl.S`. It dispatches at run time to SHA-NI, AVX2+BMI2, AVX, SSSE3 or plain x86-64 code.
+  The Makefile builds it with `-DJWT_OSSL_SHA256`; `make OSSL_SHA=` turns it off.
+- **Everywhere else** it's the compiled scalar template, or one stream of the SHA2 instructions on ARM.
+- **With it, the AVX2-only engine starts using vectors at 3 messages, not 2.** Two single streams (2 × 753 ns)
+  beat a 2-lane AVX2 group (822 ns).
 
 Options:
 - `-DJWT_INPUT_PADDED`: every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads.
@@ -241,20 +252,25 @@ HMAC only, ns/token:
 |---|---|---|---|---|---|
 | OpenSSL `HMAC()` | 2878 | 2888 | 2870 | 2867 | 2881 |
 | OpenSSL, precomputed midstates | 764 | 763 | 763 | 761 | 763 |
-| scalar | 1015 | 1007 | 1008 | 1004 | 1005 |
-| AVX2 ×8 (`-march=cascadelake` build) | 1015* | 422 | 222 | 221 | 221 |
-| **AVX-512VL ymm ×8 (default)** | 1014* | **286** | **155** | 154 | 153 |
-| AVX-512VL 2×ymm ×16 | 1017* | 287 | 155 | 177 | 176 |
-| zmm ×16 (not recommended) | 1017* | 287 | 155 | 126 | 126 |
+| scalar (compiled template) | 1015 | 1007 | 1008 | 1004 | 1005 |
+| OpenSSL's sha256 asm, extracted, one stream | 758 | 754 | 752 | 751 | 752 |
+| AVX2 ×8 (`-march=cascadelake` build) | 763* | 422 | 222 | 221 | 221 |
+| **AVX-512VL ymm ×8 (default)** | **763*** | **286** | **155** | 154 | 153 |
+| AVX-512VL 2×ymm ×16 | 764* | 287 | 155 | 177 | 176 |
+| zmm ×16 (not recommended) | 763* | 287 | 155 | 126 | 126 |
 
-\* A batch of 1 runs the scalar engine.
+\* A batch of 1 runs one stream of the extracted OpenSSL code (exp112). Before that change it ran the compiled
+scalar template, at 1,014–1,017 ns.
 
 Full verify, ns/token, default build (AVX-512VL + shape-matched JSON):
 
 | batch | 1 | 2 | 3 | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|---|---|---|
-| shape-matched JSON (default) | **1,178** | 691 | 508 | 417 | **277** | 272 | 268 |
-| strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,276 | 801 | 617 | 522 | 376 | 369 | 363 |
+| shape-matched JSON (default) | **938** | 691 | 508 | 417 | **277** | 272 | 268 |
+| strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,276† | 801 | 617 | 522 | 376 | 369 | 363 |
+
+† Measured before batch 1 moved to the extracted OpenSSL code. That change took the default build from 1,173 to
+938 ns at batch 1 (exp112); larger batches are unchanged.
 
 **RS256 / ES256 (opt-in prototype, `-DJWT_PK`).** µs per token, by batch size; OpenSSL is `EVP_DigestVerify`, one
 token at a time. This is the fast build (`-DJWT_S2N -DJWT_OPENSSL`). Batch mode for RS256 is `-DJWT_RSA_SCREEN`,
@@ -330,9 +346,11 @@ engine; each figure is the median of 300 trials.
   [PK.md](PK.md) for the design, the survey of other implementations and the numbers. No EdDSA, no JWE, no `kid`
   lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
-- **Batch 1 is the weak spot on x86 without SHA-NI.** The scalar engine (1,005 ns HMAC) is slower than OpenSSL's
-  single-stream code (763 ns). From batch 2 the 8-lane engine wins.
-- There's no SHA-NI engine. On x86 CPUs with SHA-NI, OpenSSL's single-stream code is likely competitive.
+- **Batch 1 ties OpenSSL rather than beating it.** On x86-64 Linux it *is* OpenSSL's code (extracted). That
+  includes its SHA-NI path, untested here because the Xeon has no SHA-NI.
+  - **x86-64 macOS / Windows:** they still use the compiled scalar template, since the extracted file is
+    ELF-only.
+  - **From batch 2** the vector engines win.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.
 

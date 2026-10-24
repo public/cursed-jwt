@@ -13,6 +13,8 @@
  *   x86-64 with -mavx512vl -DJWT_AVX512 -> same 8-lane code on ymm, vprord + vpternlogd
  *                                         (recommended on AVX-512 CPUs: no zmm, no licence drop)
  *   anything else                       -> portable scalar
+ * Batch 1 and leftover lanes run one message at a time; on x86-64 Linux with -DJWT_OSSL_SHA256 (the Makefile's
+ * default there) that is OpenSSL's extracted sha256 block function, src/sha256_x86_64_ossl.S (link it too).
  * Every engine that the target can run is also exported for tests/benchmarks.
  */
 #ifndef JWT_H
@@ -94,6 +96,9 @@ jwt_hmac_fn jwt_hmac_neon;
 #endif
 #if defined(__ARM_FEATURE_SHA2)
 jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2, jwt_hmac_sha2_4; /* JWT_SHA2_STREAMS (default 4), 1, 4 */
+#endif
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 block function (batch-1 path) */
 #endif
 #if defined(__AVX2__)
 jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-lane groups */

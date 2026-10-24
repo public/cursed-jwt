@@ -59,6 +59,9 @@ static hengine_t hengines[] = {
     {"openssl-HMAC()", hmac_ossl_oneshot},
     {"openssl-midstate", hmac_ossl_mid},
     {"scalar", jwt_hmac_scalar},
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+    {"ossl-asm-1stream", jwt_hmac_ossl},
+#endif
 #ifdef JWT_HAVE_NEON
     {"neon-4lane", jwt_hmac_neon},
 #endif

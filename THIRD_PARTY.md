@@ -1,6 +1,23 @@
 # Third-party credits
 
-cursed-jwt contains no vendored third-party code. It credits these projects for techniques and data:
+## Vendored code
+
+- **OpenSSL `sha256_block_data_order` for x86-64**: `src/sha256_x86_64_ossl.S`.
+  - Copyright 2005-2025 The OpenSSL Project Authors; written by Andy Polyakov. Apache License 2.0, full text in
+    [licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt).
+  - Generated from OpenSSL 3.6.0 (commit `7b371d8`) `crypto/sha/asm/sha512-x86_64.pl` by
+    `scripts/extract-openssl-sha256.sh`, which fetches the perlasm sources pinned and SHA-256-checked.
+  - **Modifications:**
+    - symbols renamed: `sha256_block_data_order*` → `jwt_ossl_sha256_block*` (hidden), `OPENSSL_ia32cap_P` →
+      `jwt_ossl_ia32cap_P`, the latter filled by `src/jwt.c` from CPUID;
+    - a `.note.GNU-stack` section added;
+    - nothing else.
+  - Used on x86-64 Linux for HS256 batch 1 and the lanes left over by vector groups (`-DJWT_OSSL_SHA256`, set by the
+    Makefile there).
+
+## Credits
+
+cursed-jwt credits these projects for techniques and data:
 
 - **simdjson** (https://github.com/simdjson/simdjson, dual-licensed Apache-2.0 / MIT, Copyright 2018-2025 The
   simdjson authors). The opt-in `-DJWT_FAST_JSON` payload path in `src/jwt.c` follows simdjson's stage-1 design:
