@@ -18,6 +18,7 @@ jobs:
       - if: runner.os == 'macOS'
         run: brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
       - run: make CC=${{ matrix.cc }} test-quick
+      - run: make CC=${{ matrix.cc }} test-vectors
       - if: runner.os == 'Linux'
         run: make CC=${{ matrix.cc }} asan
       - if: runner.os == 'Linux' && runner.arch == 'X64'

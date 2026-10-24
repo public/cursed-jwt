@@ -12,6 +12,28 @@ midstates.
 On a Xeon Platinum 8260 (no SHA-NI), a full verify costs **277 ns per token at batch 8** and 1,178 ns for a lone
 token. On the same box, jwt-cpp takes 6,201 ns and golang-jwt v5 8,739 ns per token: **5–24× faster**.
 
+### Benchmark comparison at a glance
+
+Full verify (signature + base64url + JSON + claims), ns per token, Intel Xeon Platinum 8260 (Cascade Lake, no
+SHA-NI), Ubuntu 24.04, kernel 6.8, gcc 13.3. Every implementation accepted the same tokens and rejected a forged
+one. Method and full tables are under [Benchmarks](#benchmarks).
+
+| implementation | batch 1 | batch 3 | batch 8 |
+|---|---|---|---|
+| **cursed-jwt** (AVX-512VL ymm, shape-matched JSON) | **1,178** | **508** | **277** |
+| cursed-jwt, strict JSON only | 1,276 | 617 | 376 |
+| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,201 | 6,201 | 6,201 |
+| [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,739 | 8,739 | 8,739 |
+
+| HMAC-SHA256 only, ns/token | batch 1 | batch 8 |
+|---|---|---|
+| **cursed-jwt AVX-512VL ymm ×8** | 1,014 | **155** |
+| cursed-jwt AVX2 ×8 | 1,015 | 222 |
+| OpenSSL, precomputed ipad/opad midstates | 764 | 763 |
+| OpenSSL `HMAC()` | 2,878 | 2,870 |
+
+On an Apple M5 Pro (`make compare`): cursed-jwt 116 ns/token at batch 8, jwt-cpp 2,521.
+
 ## Contents
 
 - [API](#api)
@@ -134,6 +156,8 @@ generation).
 make              # build/libcursedjwt.a, build/verify
 make test         # every engine vs OpenSSL + the claim rules (~6 s)
 make test-quick   # fewer random iterations (CI)
+make test-vectors # + external vectors: RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography (network)
+make compare      # full verify vs jwt-cpp and golang-jwt, fetched at pinned commits (network; go optional)
 make asan         # ASan + UBSan
 make bench        # ns/token per engine and batch size, vs OpenSSL
 make avx512       # real AVX-512VL test + bench binaries (run them on AVX-512 hardware)
@@ -151,6 +175,23 @@ make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
 The Docker runs use Ubuntu 24.04 with gcc and clang. `DOCKER_CPUS=8-13` pins the container to those CPUs.
 
 On macOS, the Makefile finds Homebrew's `openssl@3`. On Linux, install `libssl-dev`.
+
+**External vectors** (`make test-vectors`). These are independent of OpenSSL's HMAC and of this repository's
+generators:
+- **Sources.** `scripts/fetch-vectors.sh` downloads them and checks each file against a pinned SHA-256:
+  - RFC 4231 test cases 1–7 (one with a truncated tag, and keys longer than the block size);
+  - NIST CAVP `HMAC.rsp` `[L=32]`: 225 vectors, keys of 40–70 bytes, tags of 16–32 bytes;
+  - Wycheproof `hmac_sha256_test.json`: 174 cases, including invalid tags that must be rejected;
+  - the RFC 7515 Appendix A.1 HS256 JWS.
+- **Generator.** `tests/make_vectors.py` checks every parsed vector against **pyca/cryptography** first, so a
+  parsing mistake cannot pass silently. It then adds 5,000 random cases from cryptography: keys of 0–200 bytes,
+  messages of 0–1,100 bytes, and 10% corrupted tags.
+- **Every engine** (scalar, NEON, SHA2 ×1/×2/×4, AVX2, AVX2 ×2, AVX-512VL, 2×ymm, zmm, emulated ternlog) runs
+  every vector in a batch of 1–24 messages under the vector's key, at a random lane. The other lanes are random
+  messages checked against OpenSSL.
+- **The RFC 7515 token** must give BAD_PAYLOAD while live: the signature and time are valid, but it has no
+  `sub`/`username`. It must give INVALID once expired, and INVALID with one signature character changed.
+- A corrupted vector file makes the test fail. This was checked by flipping one expected result.
 
 **What the tests check** (`tests/test_jwt.c`, about 1.2M checks per run):
 - **Every engine's raw HMAC against OpenSSL `HMAC()`.** This covers 20,000 generated tokens, and 3,000 random
@@ -173,7 +214,7 @@ On macOS, the Makefile finds Homebrew's `openssl@3`. On Linux, install `libssl-d
 
 | platform | compilers | result |
 |---|---|---|
-| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, example |
+| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, test-vectors, example, compare (jwt-cpp) |
 | Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan |
 | Linux amd64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test (AVX2 engines), ASan/UBSan, AVX-512 build compiles |
 | Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test on real AVX-512 (AVX-512VL, 2×ymm, zmm engines) |
@@ -221,7 +262,14 @@ and `username` read). Every implementation accepted the same tokens and rejected
 | [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,201 | 6,201 | 6,201 |
 | [golang-jwt v5](https://github.com/golang-jwt/jwt), `MapClaims` | 8,739 | 8,739 | 8,739 |
 
-The libraries verify one token at a time. The comparison harness isn't shipped, because it vendors both libraries.
+The libraries verify one token at a time. `make compare` reruns this:
+- it fetches jwt-cpp and golang-jwt at pinned commits into `third_party/`;
+- each harness in `bench/compare/` first checks that every test token is accepted and a forged one rejected, then
+  times it;
+- golang-jwt needs a Go toolchain.
+
+On the Apple M5 Pro (`make compare`), full verify was 116 ns/token at batch 8 for cursed-jwt, against 2,521 for
+jwt-cpp.
 
 **AVX-512 frequency licence** (`make licence`). A fixed scalar workload is timed right after a 2 ms burst of each
 engine; each figure is the median of 300 trials.

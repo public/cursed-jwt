@@ -2,8 +2,10 @@
 #   make              build/libcursedjwt.a + build/verify (the library has no dependencies)
 #   make test         differential test vs OpenSSL (needs libcrypto: Homebrew openssl@3 / libssl-dev)
 #   make test-quick   the same with fewer random iterations (CI)
+#   make test-vectors + RFC 4231, NIST CAVP, Wycheproof, RFC 7515 and pyca/cryptography vectors (network)
 #   make asan         ASan + UBSan build of the test (quick mode)
 #   make bench        ns/token per engine and batch size, vs OpenSSL
+#   make compare      full verify vs jwt-cpp and golang-jwt (fetched at pinned commits; go optional)
 #   make avx512       real AVX-512VL build of the test and bench (run them on an AVX-512 CPU)
 #   make licence      AVX-512 frequency-licence probe (meaningful only on AVX-512 hardware)
 # Engine selection is compile-time, from ARCHFLAGS (see README.md).
@@ -59,6 +61,18 @@ example-check: $(B)/verify $(B)/tokens.json
 	  ./$(B)/verify $(TEST_SECRET) $$t | grep -q "OK sub=1 " && \
 	  ! ./$(B)/verify $(TEST_SECRET) $${t%?}A >/dev/null && echo "example: OK"
 
+# external vectors (network): RFC 4231, NIST CAVP, Wycheproof, RFC 7515 + random cases from pyca/cryptography.
+# Uses python3's cryptography if importable, else installs it into build/venv.
+VECTORS_N ?= 5000
+$(B)/pyenv: | $(B)
+	@if $(PYTHON) -c "import cryptography" 2>/dev/null; then echo $(PYTHON) > $@; \
+	  else $(PYTHON) -m venv $(B)/venv && $(B)/venv/bin/pip -q install cryptography && echo $(B)/venv/bin/python > $@; fi
+$(B)/hmac_vectors.txt: tests/make_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+	./scripts/fetch-vectors.sh
+	$$(cat $(B)/pyenv) tests/make_vectors.py third_party/vectors $(VECTORS_N) 1 > $@
+test-vectors: $(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
+	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
+
 test: $(B)/test_jwt $(B)/tokens.json example-check
 	./$(B)/test_jwt $(B)/tokens.json
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check
@@ -67,6 +81,19 @@ asan: $(B)/asan_jwt $(B)/tokens.json
 	ASAN_OPTIONS=detect_leaks=0 JWT_TEST_QUICK=1 ./$(B)/asan_jwt $(B)/tokens.json
 bench: $(B)/bench_jwt $(B)/tokens.json
 	./$(B)/bench_jwt $(B)/tokens.json
+
+# comparison vs jwt-cpp (C++) and golang-jwt v5 (Go, if `go` is installed), fetched at pinned commits (network)
+CXX ?= c++
+compare: $(B)/tokens.json $(SRC) | $(B)
+	./scripts/fetch-compare.sh
+	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) bench/compare/e2e.c -o $(B)/compare_e2e
+	$(CC) $(CFLAGS) $(ARCHFLAGS) -w $(INC) -DJWT_NO_SHAPE_JSON bench/compare/e2e.c -o $(B)/compare_e2e_strict
+	$(CXX) -O3 $(ARCHFLAGS) -std=c++17 -w -Ithird_party/jwt-cpp/include $(SSLINC) bench/compare/jwtcpp_bench.cpp $(SSLLIB) -lcrypto -o $(B)/compare_jwtcpp
+	./$(B)/compare_e2e $(B)/tokens.json
+	./$(B)/compare_e2e_strict $(B)/tokens.json
+	./$(B)/compare_jwtcpp $(B)/tokens.json
+	@if command -v go >/dev/null; then (cd bench/compare/go && GOFLAGS=-mod=mod go build -o ../../../$(B)/compare_gojwt .) && ./$(B)/compare_gojwt $(B)/tokens.json; \
+	  else echo "golang-jwt: skipped (no go toolchain)"; fi
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
@@ -78,4 +105,4 @@ licence: bench/licence_probe.c $(SRC) | $(B)
 
 clean:
 	rm -rf $(B)
-.PHONY: all test test-quick asan bench avx512 licence example-check clean
+.PHONY: all test test-quick test-vectors compare asan bench avx512 licence example-check clean

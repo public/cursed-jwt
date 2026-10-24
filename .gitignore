@@ -16,3 +16,4 @@ core
 *.bin
 tokens.json
 .DS_Store
+/third_party/

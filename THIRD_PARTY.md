@@ -22,3 +22,16 @@ cursed-jwt contains no vendored third-party code. It credits these projects for 
 
 Test and benchmark dependencies (not distributed): **OpenSSL** libcrypto (Apache-2.0) is the reference HMAC in
 `tests/` and the baseline in `bench/`; the library itself does not use it.
+
+## Fetched on demand (never committed) into `third_party/`
+
+| script | what | licence | used for |
+|---|---|---|---|
+| `scripts/fetch-vectors.sh` | RFC 4231, RFC 7515 (IETF Trust; code components under the Revised BSD licence) | IETF | test vectors |
+| `scripts/fetch-vectors.sh` | NIST CAVP `hmactestvectors.zip` | US government work, public domain | test vectors |
+| `scripts/fetch-vectors.sh` | Wycheproof `hmac_sha256_test.json` (https://github.com/C2SP/wycheproof @ `d17cc89`) | Apache-2.0 | test vectors |
+| `scripts/fetch-compare.sh` | jwt-cpp (https://github.com/Thalhammer/jwt-cpp @ `1e9b135`), bundles picojson | MIT, picojson BSD-2 | comparison benchmark |
+| `scripts/fetch-compare.sh` | golang-jwt v5 (https://github.com/golang-jwt/jwt @ `9a618ef`) | MIT | comparison benchmark |
+
+`tests/make_vectors.py` also uses **pyca/cryptography** (Apache-2.0 / BSD) as an independent HMAC reference. It
+is installed from PyPI into `build/venv` when python3 doesn't already have it.

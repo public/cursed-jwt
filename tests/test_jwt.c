@@ -1,5 +1,5 @@
 /* test_jwt.c — every engine vs OpenSSL HMAC, plus the claim rules.  Unity build: includes jwt.c.
- *   ./test_jwt [path/to/tokens.json]   (make test generates build/tokens.json with tests/gen_tokens.py)
+ *   ./test_jwt [tokens.json [hmac_vectors.txt]]   (make test / make test-vectors build both)
  */
 #include "jwt.c"
 
@@ -645,6 +645,71 @@ static void test_cases(int64_t now) {
     printf("  %d crafted cases\n", n);
 }
 
+/* ---- external vectors (make test-vectors): RFC 4231, NIST CAVP HMAC.rsp [L=32], Wycheproof hmac_sha256,
+ * random cases from pyca/cryptography, and the RFC 7515 A.1 JWS. Built by tests/make_vectors.py, which first
+ * checks every parsed vector against cryptography. Each HMAC vector runs on every engine in a batch of 1-24
+ * messages under its key (the others random, checked against OpenSSL), at a random lane position. */
+static int unhex(const char *h, uint8_t *out) {
+    if (!strcmp(h, "-")) return 0;
+    int n = (int)strlen(h) / 2;
+    for (int i = 0; i < n; i++) { unsigned v; sscanf(h + 2 * i, "%2x", &v); out[i] = (uint8_t)v; }
+    return n;
+}
+static void test_vectors(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); exit(2); }
+    size_t cap = 1 << 16; char *line = malloc(cap);
+    static uint8_t key[4096], tag[64];
+    uint8_t *vmsg = malloc(8192), *fill[24];
+    for (int i = 0; i < 24; i++) fill[i] = malloc(800 + 64);
+    long nh = 0, nbad = 0, nj = 0;
+    while (fgets(line, (int)cap, f)) {
+        char kind[8], src[128], a[9000], b[9000], c[200]; long long x, y;
+        if (sscanf(line, "%7s", kind) != 1) continue;
+        if (!strcmp(kind, "hmac")) {
+            if (sscanf(line, "%*s %127s %8999s %8999s %199s %lld", src, a, b, c, &x) != 5) { CHECK(0, "bad vector line"); continue; }
+            int kl = unhex(a, key), ml = unhex(b, vmsg), tl = unhex(c, tag), expect = (int)x;
+            memset(vmsg + ml, 0x5a, 64);
+            jwt_key_t k; jwt_key_init(&k, key, (size_t)kl);
+            nh++; nbad += !expect;
+            for (int e = 0; e < NENG; e++) {
+                if (!engines[e].hmac) continue;
+                int bs = 1 + (int)(rnd() % 24), at = (int)(rnd() % bs);
+                const uint8_t *msg[24]; int len[24]; uint32_t mac[24][8];
+                for (int i = 0; i < bs; i++) {
+                    if (i == at) { msg[i] = vmsg, len[i] = ml; continue; }
+                    len[i] = (int)(rnd() % 800); for (int j = 0; j < len[i]; j++) fill[i][j] = (uint8_t)rnd();
+                    msg[i] = fill[i];
+                }
+                engines[e].hmac(&k, bs, msg, len, mac);
+                uint8_t d[32];
+                for (int j = 0; j < 8; j++) d[4 * j] = mac[at][j] >> 24, d[4 * j + 1] = mac[at][j] >> 16, d[4 * j + 2] = mac[at][j] >> 8, d[4 * j + 3] = mac[at][j];
+                CHECK((memcmp(d, tag, (size_t)tl) == 0) == expect, "vector %s, engine %s: tag %s", src, engines[e].name, expect ? "mismatch" : "accepted");
+                for (int i = 0; i < bs; i++) {   /* the other lanes, against OpenSSL with the same key */
+                    if (i == at) continue;
+                    uint8_t r[32]; unsigned rl = 32;
+                    HMAC(EVP_sha256(), key, kl, msg[i], (size_t)len[i], r, &rl);
+                    int ok = 1; for (int j = 0; j < 8; j++) ok &= mac[i][j] == be32(r + 4 * j);
+                    CHECK(ok, "vector %s, engine %s: filler lane %d wrong", src, engines[e].name, i);
+                }
+            }
+        } else if (!strcmp(kind, "jws")) {
+            if (sscanf(line, "%*s %127s %8999s %8999s %lld %lld", src, a, b, &x, &y) != 5) { CHECK(0, "bad jws line"); continue; }
+            int kl = unhex(a, key); jwt_key_t k; jwt_key_init(&k, key, (size_t)kl);
+            char *tok = calloc(strlen(b) + 65, 1); memcpy(tok, b, strlen(b));
+            const char *tp[1] = {tok}; int tlen[1] = {(int)strlen(b)}; nj++;
+            for (int e = 0; e < NENG; e++) {
+                if (!engines[e].verify) continue;
+                jwt_result_t r[1]; engines[e].verify(&k, 1, tp, tlen, (int64_t)x, r);
+                CHECK(r[0].status == (int)y, "%s, engine %s: status %d, want %lld", src, engines[e].name, r[0].status, y);
+            }
+            free(tok);
+        }
+    }
+    fclose(f); free(line); free(vmsg); for (int i = 0; i < 24; i++) free(fill[i]);
+    printf("  external vectors: %ld HMAC-SHA256 (%ld with invalid tags) x every engine, %ld JWS checks\n", nh, nbad, nj);
+}
+
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "build/tokens.json";
     int n;
@@ -665,6 +730,7 @@ int main(int argc, char **argv) {
 #ifdef JWT_HAVE_LANES
     test_json_lanes(now);
 #endif
+    if (argc > 2) test_vectors(argv[2]);
     printf("%s: %d/%d checks passed\n", fails ? "FAILED" : "OK", checks - fails, checks);
     return fails != 0;
 }
