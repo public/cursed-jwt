@@ -271,6 +271,25 @@ The libraries verify one token at a time. `make compare` reruns this:
 On the Apple M5 Pro (`make compare`), full verify was 116 ns/token at batch 8 for cursed-jwt, against 2,521 for
 jwt-cpp.
 
+**How the comparison is kept fair** (`bench/compare/`):
+
+| library | build |
+|---|---|
+| cursed-jwt | `-O3` and the target's `-march` (`-march=cascadelake -DJWT_AVX512` on the Xeon) |
+| jwt-cpp | header-only C++17, `-O3` and the same `-march`. It links the same system OpenSSL libcrypto, whose own runtime-dispatched SHA-256 asm (AVX2, SHA-NI where present) does its HMAC. It uses its default picojson traits |
+| golang-jwt v5 | `go build`; Go has no optimisation flags, and no PGO is applied |
+
+- **Same tokens and job for all three.** They run the same 20,000 tokens and do the same job: HS256 only, `exp`
+  required, `sub` and `username` read.
+- **Correctness gate.** Each implementation must accept all 20,000 tokens and reject a forged one before it's
+  timed.
+- **Verifier setup is done once.** jwt-cpp's verifier and golang-jwt's parser and key are built before the loop,
+  as in a server.
+- **Batch sizes.** The libraries can only verify one token per call, so their number is the same at every batch
+  size. Compare them with our batch-1 column for a like-for-like single call.
+- **What favours us.** Our default build also has the shape-matched JSON fast path, which these compact
+  `{"sub","username","iat","exp"}` payloads hit. The strict-JSON-only row shows the result without it.
+
 **AVX-512 frequency licence** (`make licence`). A fixed scalar workload is timed right after a 2 ms burst of each
 engine; each figure is the median of 300 trials.
 
