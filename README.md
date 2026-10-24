@@ -162,6 +162,8 @@ make asan         # ASan + UBSan
 make bench        # ns/token per engine and batch size, vs OpenSSL
 make avx512       # real AVX-512VL test + bench binaries (run them on AVX-512 hardware)
 make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
+make pk-test      # RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
+make pk-bench     # RS256 / ES256 ns/token vs OpenSSL, with and without RSA batch screening
 ```
 
 ```bash
@@ -310,7 +312,9 @@ engine; each figure is the median of 300 trials.
 
 ## Limits
 
-- **HS256 only.** No RS/ES/EdDSA, no JWE, no `kid` lookup; the key is one shared secret.
+- **HS256 only by default.** RS256 and ES256 exist as an opt-in prototype (`-DJWT_PK`, `jwt_verify_batch_pk`); see
+  [PK.md](PK.md) for the design, the survey of other implementations and the numbers. No EdDSA, no JWE, no `kid`
+  lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
 - **Batch 1 is the weak spot on x86 without SHA-NI.** The scalar engine (1,005 ns HMAC) is slower than OpenSSL's
   single-stream code (763 ns). From batch 2 the 8-lane engine wins.

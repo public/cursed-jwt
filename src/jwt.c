@@ -9,6 +9,7 @@
 #include "jwt.h"
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -1101,8 +1102,8 @@ JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
     }
 }
 
-/* Header: an object whose "alg" is exactly "HS256". */
-static int header_ok(const uint8_t *h, int n) {
+/* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256"). */
+static int header_ok(const uint8_t *h, int n, const char *want) {
     jcur_t c = {h, h + n};
     const uint8_t *s;
     int len, esc, alg = 0;
@@ -1124,7 +1125,7 @@ static int header_ok(const uint8_t *h, int n) {
                 len = junescape(v, sizeof v, s, len);
                 s = v;
             }
-            if (len != 5 || memcmp(s, "HS256", 5)) return 0;
+            if (len != 5 || memcmp(s, want, 5)) return 0;
         } else if (!jskip(&c, 1)) {
             return 0;
         }
@@ -1756,6 +1757,23 @@ static int json_lane_claims(const uint8_t *pl, const jlane_t *o, const jnow_t *n
 
 static const char canon_hdr[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"; /* {"alg":"HS256","typ":"JWT"} */
 
+/* Payload of a token whose signature checked out: base64url-decode, JSON, claims -> r->status. */
+static void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
+    uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
+    int pn = jwt_b64url_decode(pb, (const char *)p64, n64);
+    if (pn < 0) return;
+#if defined(JWT_FAST_JSON) /* opt-in: measured 3-4% slower end to end on a Xeon Platinum 8260 */
+    int st = payload_fast(pb, pn, jn, r);
+#elif !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on a Xeon Platinum 8260 */
+    int st = payload_shape(pb, pn, jn, r);
+#else
+    int st = -1;
+#endif
+    if (st < 0) st = payload_check(pb, pn, jn, r);
+    r->status = (uint8_t)st;
+    if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
+}
+
 static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                         jwt_result_t *out, jwt_hmac_fn *hmac) {
     enum { CH = 64 };
@@ -1782,7 +1800,7 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
             if (!(hl == 36 && !memcmp(t, canon_hdr, 36))) {
                 uint8_t hb[JWT_TOKEN_MAX * 3 / 4 + 64];
                 int hn = jwt_b64url_decode(hb, t, hl);
-                if (hn < 0 || !header_ok(hb, hn)) continue;
+                if (hn < 0 || !header_ok(hb, hn, "HS256")) continue;
             }
             uint8_t sb[64];
             if (jwt_b64url_decode(sb, d2 + 1, 43) != 32) continue;
@@ -1835,20 +1853,7 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
 #endif
         for (int g = 0; g < ng; g++) {
             int j = good[g];
-            jwt_result_t *r = &out[base + idx[j]];
-            uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
-            int pn = jwt_b64url_decode(pb, (const char *)msg[j] + poff[j], mlen[j] - poff[j]);
-            if (pn < 0) continue;
-#if defined(JWT_FAST_JSON) /* opt-in: measured 3-4% slower end to end on a Xeon Platinum 8260 */
-            int st = payload_fast(pb, pn, &jn, r);
-#elif !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on a Xeon Platinum 8260 */
-            int st = payload_shape(pb, pn, &jn, r);
-#else
-            int st = -1;
-#endif
-            if (st < 0) st = payload_check(pb, pn, &jn, r);
-            r->status = (uint8_t)st;
-            if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
+            claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
         }
     }
 }
@@ -1896,3 +1901,7 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
     verify_impl(k, n, tok, len, now, out, jwt_hmac_scalar);
 #endif
 }
+
+#ifdef JWT_PK
+#include "jwt_pk.inc"
+#endif

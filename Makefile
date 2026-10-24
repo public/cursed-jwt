@@ -8,6 +8,8 @@
 #   make compare      full verify vs jwt-cpp and golang-jwt (fetched at pinned commits; go optional)
 #   make avx512       real AVX-512VL build of the test and bench (run them on an AVX-512 CPU)
 #   make licence      AVX-512 frequency-licence probe (meaningful only on AVX-512 hardware)
+#   make pk-test      RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
+#   make pk-bench     RS256 / ES256 ns/token vs OpenSSL (network for the fiat-crypto fetch)
 # Engine selection is compile-time, from ARCHFLAGS (see README.md).
 CC ?= cc
 PYTHON ?= python3
@@ -103,6 +105,39 @@ avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
 licence: bench/licence_probe.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< -o $(B)/licence_probe && ./$(B)/licence_probe
 
+# RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
+PK := -DJWT_PK -Ithird_party/fiat
+PKSRC := $(SRC) src/jwt_pk.inc third_party/fiat/p256_64.c
+third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
+	./scripts/fetch-fiat.sh
+$(B)/pk_vectors.txt: tests/make_pk_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+	./scripts/fetch-vectors.sh
+	$$(cat $(B)/pyenv) -I tests/make_pk_vectors.py third_party/vectors $(VECTORS_N) 1 > $@
+$(B)/test_pk: tests/test_pk.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< -o $@
+$(B)/test_pk_screen: tests/test_pk.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< -o $@
+$(B)/test_pk_w%: tests/test_pk.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_P256_W=$* $< -o $@
+$(B)/asan_pk: tests/test_pk.c $(PKSRC) | $(B)
+	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< -o $@
+pk-test: $(B)/test_pk $(B)/test_pk_screen $(B)/test_pk_w5 $(B)/test_pk_w7 $(B)/pk_vectors.txt
+	./$(B)/test_pk $(B)/pk_vectors.txt
+	./$(B)/test_pk_screen $(B)/pk_vectors.txt
+	./$(B)/test_pk_w5 $(B)/pk_vectors.txt | tail -1
+	./$(B)/test_pk_w7 $(B)/pk_vectors.txt | tail -1
+$(B)/pk_tokens.txt: bench/gen_pk_tokens.py $(B)/pyenv
+	$$(cat $(B)/pyenv) -I bench/gen_pk_tokens.py 64 1 > $@
+$(B)/bench_pk: bench/bench_pk.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
+$(B)/bench_pk_screen: bench/bench_pk.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
+pk-bench: $(B)/bench_pk $(B)/bench_pk_screen $(B)/pk_tokens.txt
+	./$(B)/bench_pk $(B)/pk_tokens.txt
+	./$(B)/bench_pk_screen $(B)/pk_tokens.txt
+pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
+	ASAN_OPTIONS=detect_leaks=0 ./$(B)/asan_pk $(B)/pk_vectors.txt
+
 clean:
 	rm -rf $(B)
-.PHONY: all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: pk-test pk-asan pk-bench all test test-quick test-vectors compare asan bench avx512 licence example-check clean

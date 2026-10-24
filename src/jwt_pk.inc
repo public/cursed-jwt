@@ -1,0 +1,773 @@
+/* jwt_pk.inc — RS256 and ES256 verification (prototype), #included by jwt.c under -DJWT_PK.
+ *
+ * Neither algorithm batches the way HMAC does: one P-256 or RSA-2048 verify is 10-100x the cost of the whole
+ * HS256 pipeline, and SIMD across tokens needs 52-bit multipliers (AVX-512 IFMA) that Cascade Lake lacks.
+ * What a verifier with a long-lived key *can* exploit is that the key is fixed (PK.md has the numbers):
+ *
+ *   ES256  R = u1*G + u2*Q.  OpenSSL precomputes a comb table for G only; Q is a variable base (~256
+ *          doublings).  Here key setup builds a signed-digit comb table for Q as well, so a verify is two
+ *          fixed-base multiplications: 2 * ceil(257/W) mixed additions and no doublings.  The x-coordinate
+ *          check is done projectively (X == r * Z^2), so there is no field inversion per token, and the
+ *          s^-1 of a whole batch share one inversion (Montgomery's trick).
+ *          Field and scalar arithmetic: fiat-crypto's generated, formally verified p256_64 / p256_scalar_64
+ *          (MIT), fetched by scripts/fetch-fiat.sh.  Verification handles only public data, so the point
+ *          arithmetic here is variable-time (branches on exceptional cases).
+ *   RS256  s^e mod n with e = 65537 is 16 squarings + 1 multiply.  The key holds R^2 mod n and -n^-1 mod 2^64,
+ *          and the expected EMSA-PKCS1-v1_5 block is compared word-wise (no parsing of the decrypted block).
+ *          -DJWT_RSA_SCREEN: batch "screening" (Bellare-Garay-Rabin): one check (prod s_i)^e == prod EM_i for
+ *          the whole batch, ~2 multiplications per token + 1 exponentiation, falling back to per-token checks
+ *          when it fails.  Screening proves every *message* was signed, not that every signature string is
+ *          the canonical one (s1*x, s2/x pass together), so it is opt-in.  PK.md discusses it.
+ */
+#include "p256_64.c"
+#include "p256_scalar_64.c"
+
+#ifndef JWT_P256_W
+#define JWT_P256_W 8 /* comb window: 33 windows x 128 points x 64 B = 264 KB per base point (W=7: 148 KB, ~12% slower) */
+#endif
+#define P256_NW ((257 + JWT_P256_W - 1) / JWT_P256_W)
+#define P256_H (1 << (JWT_P256_W - 1))
+
+typedef uint64_t fe_t[4]; /* little-endian 64-bit limbs; field elements in fiat's Montgomery domain */
+typedef struct {
+    fe_t x, y;
+} p256_aff_t;
+typedef struct {
+    fe_t x, y, z;
+    int inf;
+} p256_jac_t;
+
+#define RSA_MAXL 64 /* 4096-bit moduli */
+typedef struct {
+    int nl, k;           /* limbs, modulus bytes */
+    uint64_t n0;         /* -n^-1 mod 2^64 */
+    uint64_t e;
+    uint64_t n[RSA_MAXL], r2[RSA_MAXL]; /* R^2 mod n, R = 2^(64 nl) */
+    uint64_t em[RSA_MAXL];              /* EMSA-PKCS1-v1_5 block with a zero hash, as limbs */
+#ifdef JWT_RSA_SCREEN
+    uint64_t kc[16][RSA_MAXL];          /* R^((c-1)(e-1)) mod n for a screened batch of c = 1..16 */
+#endif
+} rsa_key_t;
+
+struct jwt_pkey {
+    int alg; /* 1 RS256, 2 ES256 */
+    const char *name, *canon;
+    int sig_bytes, sig_chars;
+    rsa_key_t rsa;
+    p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
+};
+enum { PK_RS256 = 1, PK_ES256 = 2 };
+
+/* ---------------------------------------------------------------------------------- SHA-256 of a message */
+static void sha256_msg(const uint8_t *m, int L, uint8_t out[32]) {
+    uint32_t st[8], w[16];
+    memcpy(st, IV256, 32);
+    int nf = L >> 6, rem = L & 63, nt = rem + 9 > 64 ? 2 : 1;
+    uint8_t last[128] = {0};
+    memcpy(last, m + (nf << 6), rem);
+    last[rem] = 0x80;
+    uint64_t bits = (uint64_t)L * 8;
+    for (int i = 0; i < 8; i++) last[nt * 64 - 1 - i] = (uint8_t)(bits >> (8 * i));
+#if defined(__ARM_FEATURE_SHA2)
+    uint32x4_t s0 = vld1q_u32(st), s1 = vld1q_u32(st + 4), mm[1][4];
+    for (int b = 0; b < nf + nt; b++) {
+        const uint8_t *blk = b < nf ? m + 64 * b : last + 64 * (b - nf);
+        for (int j = 0; j < 4; j++) mm[0][j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(blk + 16 * j)));
+        ce_compress(1, &s0, &s1, mm);
+    }
+    vst1q_u32(st, s0), vst1q_u32(st + 4, s1);
+#else
+    for (int b = 0; b < nf + nt; b++) {
+        const uint8_t *blk = b < nf ? m + 64 * b : last + 64 * (b - nf);
+        for (int i = 0; i < 16; i++) w[i] = be32(blk + 4 * i);
+        compress_scalar(st, w);
+    }
+#endif
+    (void)w;
+    for (int i = 0; i < 8; i++) out[4 * i] = st[i] >> 24, out[4 * i + 1] = st[i] >> 16, out[4 * i + 2] = st[i] >> 8, out[4 * i + 3] = st[i];
+}
+
+/* ---------------------------------------------------------------------------------- P-256 */
+static void be_to_limbs4(uint64_t o[4], const uint8_t b[32]) {
+    for (int i = 0; i < 4; i++) {
+        uint64_t v = 0;
+        for (int j = 0; j < 8; j++) v = v << 8 | b[8 * (3 - i) + j];
+        o[i] = v;
+    }
+}
+JWT_INLINE int fe_iszero(const fe_t a) { return !(a[0] | a[1] | a[2] | a[3]); }
+JWT_INLINE int fe_eq(const fe_t a, const fe_t b) { return !((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3])); }
+/* a < b, plain 256-bit integers */
+static int u256_lt(const uint64_t a[4], const uint64_t b[4]) {
+    for (int i = 3; i >= 0; i--)
+        if (a[i] != b[i]) return a[i] < b[i];
+    return 0;
+}
+static const uint64_t P256_P[4] = {0xffffffffffffffffull, 0x00000000ffffffffull, 0, 0xffffffff00000001ull};
+static const uint64_t P256_N[4] = {0xf3b9cac2fc632551ull, 0xbce6faada7179e84ull, 0xffffffffffffffffull, 0xffffffff00000000ull};
+static const uint8_t P256_B[32] = {0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7, 0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc,
+                                   0x65, 0x1d, 0x06, 0xb0, 0xcc, 0x53, 0xb0, 0xf6, 0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b};
+static const uint8_t P256_GX[32] = {0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
+                                    0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96};
+static const uint8_t P256_GY[32] = {0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
+                                    0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5};
+
+/* a + b, a - b, -a mod p for a, b < p; branch-free but without fiat's value barriers (public data only) */
+static const uint64_t P256_P[4];
+JWT_INLINE void fe_add(fe_t o, const fe_t a, const fe_t b) {
+    unsigned __int128 z = 0;
+    uint64_t t[4], r[4], bw = 0;
+    for (int i = 0; i < 4; i++) z = (unsigned __int128)a[i] + b[i] + (uint64_t)(z >> 64), t[i] = (uint64_t)z;
+    uint64_t cy = (uint64_t)(z >> 64);
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 d = (unsigned __int128)t[i] - P256_P[i] - bw;
+        r[i] = (uint64_t)d, bw = (uint64_t)(d >> 64) & 1;
+    }
+    uint64_t keep = (uint64_t)0 - (bw & ~cy); /* borrow and no carry: a + b < p */
+    for (int i = 0; i < 4; i++) o[i] = (t[i] & keep) | (r[i] & ~keep);
+}
+JWT_INLINE void fe_sub(fe_t o, const fe_t a, const fe_t b) {
+    uint64_t t[4], bw = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 d = (unsigned __int128)a[i] - b[i] - bw;
+        t[i] = (uint64_t)d, bw = (uint64_t)(d >> 64) & 1;
+    }
+    uint64_t mask = (uint64_t)0 - bw;
+    unsigned __int128 z = 0;
+    for (int i = 0; i < 4; i++) z = (unsigned __int128)t[i] + (P256_P[i] & mask) + (uint64_t)(z >> 64), o[i] = (uint64_t)z;
+}
+JWT_INLINE void fe_opp(fe_t o, const fe_t a) {
+    static const fe_t zero = {0};
+    fe_sub(o, zero, a);
+}
+
+/* o = a b / 2^256 mod p for a, b < p (Montgomery, CIOS).  p's limbs are 2^64-1, 2^32-1, 0, 2^64-2^32+1 and
+ * -p^-1 = 1 mod 2^64, so each reduction round takes m = t0 and needs two multiplications instead of four, the
+ * structure OpenSSL's ecp_nistz256 uses.  Cross-checked against fiat_p256_mul by tests/test_pk.c.  ~2x faster
+ * than fiat's generic word-by-word code here (which also carries value barriers for constant time). */
+#define P256_P1 0x00000000ffffffffull
+#define P256_P3 0xffffffff00000001ull
+JWT_INLINE void fe_mul(fe_t o, const fe_t a, const fe_t b) {
+    uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5, c, m;
+    unsigned __int128 z;
+    for (int i = 0; i < 4; i++) {
+        uint64_t bi = b[i];
+        z = (unsigned __int128)a[0] * bi + t0, t0 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)a[1] * bi + t1 + c, t1 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)a[2] * bi + t2 + c, t2 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)a[3] * bi + t3 + c, t3 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)t4 + c, t4 = (uint64_t)z, t5 = (uint64_t)(z >> 64);
+        m = t0; /* t0 + m (2^64 - 1) = m 2^64: limb 0 becomes 0 and carries m */
+        z = (unsigned __int128)m * P256_P1 + t1 + m, t0 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)t2 + c, t1 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)m * P256_P3 + t3 + c, t2 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        z = (unsigned __int128)t4 + c, t3 = (uint64_t)z, c = (uint64_t)(z >> 64);
+        t4 = t5 + c;
+    }
+    /* t < 2p: subtract p once if t >= p */
+    uint64_t r0, r1, r2, r3, bw;
+    z = (unsigned __int128)t0 - 0xffffffffffffffffull, r0 = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    z = (unsigned __int128)t1 - P256_P1 - bw, r1 = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    z = (unsigned __int128)t2 - bw, r2 = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    z = (unsigned __int128)t3 - P256_P3 - bw, r3 = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    if (t4 >= bw) o[0] = r0, o[1] = r1, o[2] = r2, o[3] = r3; /* no net borrow: t >= p */
+    else o[0] = t0, o[1] = t1, o[2] = t2, o[3] = t3;
+}
+#define fe_sqr(o, a) fe_mul(o, a, a)
+
+/* a^(p-2): init only (table building) */
+static void fe_inv(fe_t o, const fe_t a) {
+    uint64_t e[4];
+    memcpy(e, P256_P, 32);
+    e[0] -= 2;
+    fe_t r;
+    fiat_p256_set_one(r);
+    for (int i = 255; i >= 0; i--) {
+        fe_sqr(r, r);
+        if (e[i >> 6] >> (i & 63) & 1) fe_mul(r, r, a);
+    }
+    memcpy(o, r, 32);
+}
+
+/* dbl-2001-b (a = -3), 3M + 5S */
+static void p256_dbl(p256_jac_t *o, const p256_jac_t *p) {
+    if (p->inf || fe_iszero(p->y)) { o->inf = 1; return; }
+    fe_t delta, gamma, beta, alpha, t, u;
+    fe_sqr(delta, p->z);
+    fe_sqr(gamma, p->y);
+    fe_mul(beta, p->x, gamma);
+    fe_sub(t, p->x, delta);
+    fe_add(u, p->x, delta);
+    fe_mul(alpha, t, u);
+    fe_add(t, alpha, alpha);
+    fe_add(alpha, alpha, t); /* 3 (X - delta)(X + delta) */
+    fe_add(t, p->y, p->z);
+    fe_sqr(t, t);
+    fe_sub(t, t, gamma);
+    fe_sub(o->z, t, delta);
+    fe_add(beta, beta, beta);
+    fe_add(beta, beta, beta); /* 4 beta */
+    fe_sqr(t, alpha);
+    fe_add(u, beta, beta);
+    fe_sub(o->x, t, u);
+    fe_sub(t, beta, o->x);
+    fe_mul(t, alpha, t);
+    fe_sqr(gamma, gamma);
+    fe_add(gamma, gamma, gamma);
+    fe_add(gamma, gamma, gamma);
+    fe_add(gamma, gamma, gamma); /* 8 gamma^2 */
+    fe_sub(o->y, t, gamma);
+    o->inf = 0;
+}
+
+/* p += q (affine), madd-2007-bl, 7M + 4S; exceptional cases (q = +-p) branch */
+static void p256_madd(p256_jac_t *p, const fe_t qx, const fe_t qy) {
+    if (p->inf) {
+        memcpy(p->x, qx, 32), memcpy(p->y, qy, 32), fiat_p256_set_one(p->z), p->inf = 0;
+        return;
+    }
+    fe_t z1z1, u2, s2, h, hh, i, j, r, v, t;
+    fe_sqr(z1z1, p->z);
+    fe_mul(u2, qx, z1z1);
+    fe_mul(s2, qy, p->z);
+    fe_mul(s2, s2, z1z1);
+    fe_sub(h, u2, p->x);
+    fe_sub(r, s2, p->y);
+    if (fe_iszero(h)) {
+        if (fe_iszero(r)) {
+            p256_jac_t d = *p;
+            p256_dbl(p, &d);
+        } else {
+            p->inf = 1;
+        }
+        return;
+    }
+    fe_add(r, r, r);
+    fe_sqr(hh, h);
+    fe_add(i, hh, hh);
+    fe_add(i, i, i);
+    fe_mul(j, h, i);
+    fe_mul(v, p->x, i);
+    fe_sqr(t, r);
+    fe_sub(t, t, j);
+    fe_sub(t, t, v);
+    fe_sub(t, t, v); /* X3 */
+    fe_add(p->z, p->z, h);
+    fe_sqr(p->z, p->z);
+    fe_sub(p->z, p->z, z1z1);
+    fe_sub(p->z, p->z, hh);
+    fe_sub(v, v, t);
+    fe_mul(v, r, v);
+    fe_mul(j, p->y, j);
+    fe_add(j, j, j);
+    fe_sub(p->y, v, j);
+    memcpy(p->x, t, 32);
+}
+
+/* tab[w][k-1] = k * 2^(W w) * P, affine, k = 1..H */
+static void p256_table(p256_aff_t tab[P256_NW][P256_H], const fe_t px, const fe_t py) {
+    p256_jac_t *jac = malloc(sizeof(p256_jac_t) * P256_H);
+    fe_t *pre = malloc(sizeof(fe_t) * P256_H);
+    fe_t bx, by;
+    memcpy(bx, px, 32), memcpy(by, py, 32);
+    for (int w = 0; w < P256_NW; w++) {
+        jac[0].inf = 1;
+        p256_madd(&jac[0], bx, by);
+        for (int k = 1; k < P256_H; k++) jac[k] = jac[k - 1], p256_madd(&jac[k], bx, by);
+        /* to affine with one inversion; no k*B is infinity since k < n */
+        memcpy(pre[0], jac[0].z, 32);
+        for (int k = 1; k < P256_H; k++) fe_mul(pre[k], pre[k - 1], jac[k].z);
+        fe_t inv, zi, zi2;
+        fe_inv(inv, pre[P256_H - 1]);
+        for (int k = P256_H - 1; k >= 0; k--) {
+            if (k) fe_mul(zi, inv, pre[k - 1]), fe_mul(inv, inv, jac[k].z);
+            else memcpy(zi, inv, 32);
+            fe_sqr(zi2, zi);
+            fe_mul(tab[w][k].x, jac[k].x, zi2);
+            fe_mul(zi2, zi2, zi);
+            fe_mul(tab[w][k].y, jac[k].y, zi2);
+        }
+        /* next base: 2^W * B = 2 * (H * B) */
+        p256_jac_t d = jac[P256_H - 1], d2;
+        p256_dbl(&d2, &d);
+        fe_t z2;
+        fe_inv(inv, d2.z);
+        fe_sqr(z2, inv);
+        fe_mul(bx, d2.x, z2);
+        fe_mul(z2, z2, inv);
+        fe_mul(by, d2.y, z2);
+    }
+    free(jac), free(pre);
+}
+
+static int p256_on_curve(const fe_t x, const fe_t y) { /* y^2 = x^3 - 3x + b */
+    fe_t l, r, t, b;
+    uint64_t bn[4];
+    be_to_limbs4(bn, P256_B);
+    fiat_p256_to_montgomery(b, bn);
+    fe_sqr(l, y);
+    fe_sqr(r, x);
+    fe_mul(r, r, x);
+    fe_add(t, x, x);
+    fe_add(t, t, x);
+    fe_sub(r, r, t);
+    fe_add(r, r, b);
+    return fe_eq(l, r);
+}
+
+jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
+    uint64_t xi[4], yi[4], gx[4], gy[4];
+    be_to_limbs4(xi, x), be_to_limbs4(yi, y);
+    if (!u256_lt(xi, P256_P) || !u256_lt(yi, P256_P)) return NULL;
+    jwt_pkey_t *k = calloc(1, sizeof *k);
+    if (!k) return NULL;
+    k->tg = malloc(sizeof(p256_aff_t[P256_NW][P256_H]) * 2);
+    if (!k->tg) { free(k); return NULL; }
+    k->tq = k->tg + P256_NW;
+    fe_t qx, qy, gmx, gmy;
+    fiat_p256_to_montgomery(qx, xi), fiat_p256_to_montgomery(qy, yi);
+    if (!p256_on_curve(qx, qy)) { free(k->tg), free(k); return NULL; }
+    be_to_limbs4(gx, P256_GX), be_to_limbs4(gy, P256_GY);
+    fiat_p256_to_montgomery(gmx, gx), fiat_p256_to_montgomery(gmy, gy);
+    p256_table(k->tg, gmx, gmy);
+    p256_table(k->tq, qx, qy);
+    k->alg = PK_ES256, k->name = "ES256", k->canon = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9";
+    k->sig_bytes = 64, k->sig_chars = 86;
+    return k;
+}
+
+/* u = sum d_w 2^(W w), d_w in [-H+1, H] */
+static void p256_recode(int16_t d[P256_NW], const uint64_t u[4]) {
+    int carry = 0;
+    for (int w = 0; w < P256_NW; w++) {
+        int bit = w * JWT_P256_W, li = bit >> 6, sh = bit & 63;
+        uint64_t v = li < 4 ? u[li] >> sh : 0;
+        if (sh + JWT_P256_W > 64 && li + 1 < 4) v |= u[li + 1] << (64 - sh);
+        int c = (int)(v & ((1u << JWT_P256_W) - 1)) + carry;
+        if (c > P256_H) d[w] = (int16_t)(c - 2 * P256_H), carry = 1;
+        else d[w] = (int16_t)c, carry = 0;
+    }
+}
+
+JWT_INLINE void p256_add_digit(p256_jac_t *acc, const p256_aff_t *row, int d) {
+    if (!d) return;
+    if (d > 0) {
+        p256_madd(acc, row[d - 1].x, row[d - 1].y);
+    } else {
+        fe_t ny;
+        fe_opp(ny, row[-d - 1].y);
+        p256_madd(acc, row[-d - 1].x, ny);
+    }
+}
+
+/* 1/a mod n for 0 < a < n, plain integers: binary extended Euclid.  Variable-time, which is fine here: s is part of
+ * the signature, public.  ~5x cheaper than a^(n-2) with fiat's scalar multiplication. */
+static void u256_shr1(uint64_t a[4], uint64_t top) {
+    a[0] = a[0] >> 1 | a[1] << 63, a[1] = a[1] >> 1 | a[2] << 63, a[2] = a[2] >> 1 | a[3] << 63, a[3] = a[3] >> 1 | top << 63;
+}
+static uint64_t u256_add(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]) {
+    unsigned __int128 z = 0;
+    for (int i = 0; i < 4; i++) z = (unsigned __int128)a[i] + b[i] + (uint64_t)(z >> 64), r[i] = (uint64_t)z;
+    return (uint64_t)(z >> 64);
+}
+static uint64_t u256_sub(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]) { /* returns the borrow */
+    uint64_t bw = 0;
+    for (int i = 0; i < 4; i++) {
+        unsigned __int128 z = (unsigned __int128)a[i] - b[i] - bw;
+        r[i] = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    }
+    return bw;
+}
+static void halve_mod_n(uint64_t x[4]) { /* x / 2 mod n, x < n */
+    if (x[0] & 1) u256_shr1(x, u256_add(x, x, P256_N));
+    else u256_shr1(x, 0);
+}
+static void sub_mod_n(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]) {
+    if (u256_sub(r, a, b)) u256_add(r, r, P256_N);
+}
+static int u256_is1(const uint64_t a[4]) { return a[0] == 1 && !(a[1] | a[2] | a[3]); }
+static void sc_inv_plain(uint64_t o[4], const uint64_t a[4]) {
+    uint64_t u[4], v[4], x1[4] = {1}, x2[4] = {0};
+    memcpy(u, a, 32), memcpy(v, P256_N, 32);
+    while (!u256_is1(u) && !u256_is1(v)) {
+        while (!(u[0] & 1)) u256_shr1(u, 0), halve_mod_n(x1);
+        while (!(v[0] & 1)) u256_shr1(v, 0), halve_mod_n(x2);
+        if (!u256_lt(u, v)) u256_sub(u, u, v), sub_mod_n(x1, x1, x2);
+        else u256_sub(v, v, u), sub_mod_n(x2, x2, x1);
+    }
+    memcpy(o, u256_is1(u) ? x1 : x2, 32);
+}
+/* the same in fiat's Montgomery domain (mod n): (aR)^-1 R^3 / R = a^-1 R */
+static void sc_inv(uint64_t o[4], const uint64_t am[4]) {
+    uint64_t one[4] = {1}, r3[4], t[4];
+    fiat_p256_scalar_to_montgomery(r3, one);  /* R */
+    fiat_p256_scalar_to_montgomery(r3, r3);   /* R^2 */
+    fiat_p256_scalar_to_montgomery(r3, r3);   /* R^3 */
+    sc_inv_plain(t, am);
+    fiat_p256_scalar_mul(o, t, r3);
+}
+
+static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
+                      const uint8_t *const *sig, const int *slen, uint8_t *ok) {
+    enum { CH = 32 };
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH, c = 0, at[CH];
+        uint64_t r[CH][4], sm[CH][4], em[CH][4], pre[CH][4];
+        for (int i = 0; i < m; i++) {
+            int t = base + i;
+            ok[t] = 0;
+            if (slen[t] != 64) continue;
+            uint64_t s[4], e[4];
+            uint8_t h[32];
+            be_to_limbs4(r[c], sig[t]), be_to_limbs4(s, sig[t] + 32);
+            if (fe_iszero(r[c]) || fe_iszero(s) || !u256_lt(r[c], P256_N) || !u256_lt(s, P256_N)) continue;
+            sha256_msg(msg[t], len[t], h);
+            be_to_limbs4(e, h);
+            if (!u256_lt(e, P256_N)) { /* e < 2^256 < 2n: one subtraction */
+                fiat_p256_scalar_uint1 b = 0;
+                for (int j = 0; j < 4; j++) fiat_p256_scalar_subborrowx_u64(&e[j], &b, b, e[j], P256_N[j]);
+            }
+            fiat_p256_scalar_to_montgomery(sm[c], s);
+            fiat_p256_scalar_to_montgomery(em[c], e);
+            at[c++] = t;
+        }
+        if (!c) continue;
+        /* all s^-1 with one inversion (Montgomery's trick) */
+        memcpy(pre[0], sm[0], 32);
+        for (int i = 1; i < c; i++) fiat_p256_scalar_mul(pre[i], pre[i - 1], sm[i]);
+        uint64_t inv[4], w[4];
+        sc_inv(inv, pre[c - 1]);
+        for (int i = c - 1; i >= 0; i--) {
+            if (i) fiat_p256_scalar_mul(w, inv, pre[i - 1]), fiat_p256_scalar_mul(inv, inv, sm[i]);
+            else memcpy(w, inv, 32);
+            uint64_t u1[4], u2[4], rm[4];
+            fiat_p256_scalar_mul(u1, em[i], w);
+            fiat_p256_scalar_from_montgomery(u1, u1);
+            fiat_p256_scalar_to_montgomery(rm, r[i]);
+            fiat_p256_scalar_mul(u2, rm, w);
+            fiat_p256_scalar_from_montgomery(u2, u2);
+            int16_t d1[P256_NW], d2[P256_NW];
+            p256_recode(d1, u1), p256_recode(d2, u2);
+            p256_jac_t acc;
+            acc.inf = 1;
+            for (int j = 0; j < P256_NW; j++) {
+                p256_add_digit(&acc, k->tg[j], d1[j]);
+                p256_add_digit(&acc, k->tq[j], d2[j]);
+            }
+            if (acc.inf) continue;
+            /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
+            fe_t z2, rf, t;
+            fe_sqr(z2, acc.z);
+            fiat_p256_to_montgomery(rf, r[i]);
+            fe_mul(t, rf, z2);
+            int good = fe_eq(t, acc.x);
+            uint64_t rn[4];
+            fiat_p256_scalar_uint1 cy = 0;
+            for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
+            if (!good && !cy && u256_lt(rn, P256_P)) {
+                fiat_p256_to_montgomery(rf, rn);
+                fe_mul(t, rf, z2);
+                good = fe_eq(t, acc.x);
+            }
+            ok[at[i]] = (uint8_t)good;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------------- RSA */
+typedef unsigned __int128 u128;
+
+/* Montgomery multiplication r = a b R^-1 mod n, product scanning (one column of a*b + m*n at a time, in a 3-word
+ * accumulator), and a squaring that computes each a_j a_k (j < k) once and doubles it: 16 of RS256's 18
+ * multiplications are squarings.  a, b < n; r may alias a or b.  The multiply loops are inlined into fixed-size
+ * copies for 2048/3072/4096-bit moduli so their trip counts are constants. */
+/* (c0, c1, c2) += x y.  On x86-64 through _addcarry_u64, which gcc and clang turn into add/adc/adc; elsewhere as
+ * 128-bit adds (aarch64 compilers emit adds/adcs/adc for these).  gcc turned the obvious `acc += z; c2 += acc < z`
+ * into branches and stack spills on x86: 7x slower than OpenSSL on a Cascade Lake. */
+#if defined(__x86_64__)
+#include <x86intrin.h>
+#define MAC(c0, c1, c2, x, y)                                                        \
+    do {                                                                             \
+        u128 z_ = (u128)(x) * (y);                                                   \
+        unsigned long long l_;                                                       \
+        unsigned char k_ = _addcarry_u64(0, (c0), (uint64_t)z_, &l_);                \
+        (c0) = l_;                                                                   \
+        k_ = _addcarry_u64(k_, (c1), (uint64_t)(z_ >> 64), &l_);                     \
+        (c1) = l_, (c2) += k_;                                                       \
+    } while (0)
+#else
+#define MAC(c0, c1, c2, x, y)                                                        \
+    do {                                                                             \
+        u128 z_ = (u128)(x) * (y), s_ = (u128)(c0) + (uint64_t)z_;                   \
+        (c0) = (uint64_t)s_;                                                         \
+        s_ = (u128)(c1) + (uint64_t)(z_ >> 64) + (uint64_t)(s_ >> 64);               \
+        (c1) = (uint64_t)s_, (c2) += (uint64_t)(s_ >> 64);                           \
+    } while (0)
+#endif
+JWT_INLINE void mont_fin(uint64_t *r, const uint64_t *t, uint64_t top, const uint64_t *n, int nl) {
+    uint64_t d[RSA_MAXL], bw = 0;
+    for (int j = 0; j < nl; j++) {
+        u128 z = (u128)t[j] - n[j] - bw;
+        d[j] = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+    }
+    memcpy(r, top >= bw ? d : t, sizeof(uint64_t) * nl); /* t >= n unless the subtraction borrowed past top */
+}
+/* the m*n half of column i, shared by mul and sqr; (c0, c1, c2) hold the a*b part of the column */
+#define MONT_COL(i)                                                                     \
+    do {                                                                                \
+        if ((i) < nl) {                                                                 \
+            for (int j = 0; j < (i); j++) MAC(c0, c1, c2, m[j], n[(i) - j]);            \
+            m[i] = c0 * n0;                                                             \
+            MAC(c0, c1, c2, m[i], n[0]);                                                \
+        } else {                                                                        \
+            for (int j = (i) - nl + 1; j < nl; j++) MAC(c0, c1, c2, m[j], n[(i) - j]);  \
+            t[(i) - nl] = c0;                                                           \
+        }                                                                               \
+        c0 = c1, c1 = c2, c2 = 0;                                                       \
+    } while (0)
+JWT_INLINE void mont_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *n, uint64_t n0, int nl) {
+    uint64_t m[RSA_MAXL], t[RSA_MAXL], c0 = 0, c1 = 0, c2 = 0;
+    for (int i = 0; i < 2 * nl - 1; i++) {
+        int lo = i < nl ? 0 : i - nl + 1, hi = i < nl ? i : nl - 1;
+        for (int j = lo; j <= hi; j++) MAC(c0, c1, c2, a[j], b[i - j]);
+        MONT_COL(i);
+    }
+    t[nl - 1] = c0;
+    mont_fin(r, t, c1, n, nl);
+}
+JWT_INLINE void mont_sqr(uint64_t *r, const uint64_t *a, const uint64_t *n, uint64_t n0, int nl) {
+    uint64_t m[RSA_MAXL], t[RSA_MAXL], c0 = 0, c1 = 0, c2 = 0;
+    for (int i = 0; i < 2 * nl - 1; i++) {
+        int lo = i < nl ? 0 : i - nl + 1;
+        uint64_t q0 = 0, q1 = 0, q2 = 0; /* sum of a_j a_(i-j), j < i - j; then doubled */
+        for (int j = lo; j < i - j; j++) MAC(q0, q1, q2, a[j], a[i - j]);
+        q2 = q2 << 1 | q1 >> 63, q1 = q1 << 1 | q0 >> 63, q0 <<= 1;
+        if (!(i & 1)) MAC(q0, q1, q2, a[i >> 1], a[i >> 1]);
+        u128 s_ = (u128)c0 + q0;
+        c0 = (uint64_t)s_, s_ = (u128)c1 + q1 + (uint64_t)(s_ >> 64);
+        c1 = (uint64_t)s_, c2 += q2 + (uint64_t)(s_ >> 64);
+        MONT_COL(i);
+    }
+    t[nl - 1] = c0;
+    mont_fin(r, t, c1, n, nl);
+}
+#undef MONT_COL
+typedef struct {
+    void (*mul)(uint64_t *, const uint64_t *, const uint64_t *, const rsa_key_t *);
+    void (*sqr)(uint64_t *, const uint64_t *, const rsa_key_t *);
+} mont_ops_t;
+#define MONT_SIZE(N)                                                                                    \
+    static void mont_mul_##N(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) { \
+        mont_mul(r, a, b, k->n, k->n0, N);                                                             \
+    }                                                                                                   \
+    static void mont_sqr_##N(uint64_t *r, const uint64_t *a, const rsa_key_t *k) { mont_sqr(r, a, k->n, k->n0, N); }
+MONT_SIZE(32)
+MONT_SIZE(48)
+MONT_SIZE(64)
+static void mont_mul_any(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) { mont_mul(r, a, b, k->n, k->n0, k->nl); }
+static void mont_sqr_any(uint64_t *r, const uint64_t *a, const rsa_key_t *k) { mont_sqr(r, a, k->n, k->n0, k->nl); }
+static mont_ops_t mont_for(const rsa_key_t *k) {
+    switch (k->nl) {
+    case 32: return (mont_ops_t){mont_mul_32, mont_sqr_32};
+    case 48: return (mont_ops_t){mont_mul_48, mont_sqr_48};
+    case 64: return (mont_ops_t){mont_mul_64, mont_sqr_64};
+    default: return (mont_ops_t){mont_mul_any, mont_sqr_any};
+    }
+}
+
+static void be_to_limbs(uint64_t *o, int nl, const uint8_t *b, int len) { /* len <= 8 nl */
+    memset(o, 0, sizeof(uint64_t) * nl);
+    for (int i = 0; i < len; i++) o[(len - 1 - i) >> 3] |= (uint64_t)b[i] << (8 * ((len - 1 - i) & 7));
+}
+
+/* x = s^e R mod n from sR (Montgomery domain); left-to-right binary */
+static void rsa_pow(uint64_t *x, const uint64_t *sr, uint64_t e, const rsa_key_t *k, mont_ops_t mo) {
+    int top = 63 - __builtin_clzll(e);
+    memcpy(x, sr, sizeof(uint64_t) * k->nl);
+    for (int b = top - 1; b >= 0; b--) {
+        mo.sqr(x, x, k);
+        if (e >> b & 1) mo.mul(x, x, sr, k);
+    }
+}
+
+static const uint8_t sha256_di[19] = {0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+                                      0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+
+jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen) {
+    while (nlen && !*n) n++, nlen--;
+    while (elen && !*e) e++, elen--;
+    if (nlen < 256 || nlen > 512 || !(n[nlen - 1] & 1) || !elen || elen > 8 || !(e[elen - 1] & 1)) return NULL;
+    jwt_pkey_t *pk = calloc(1, sizeof *pk);
+    if (!pk) return NULL;
+    rsa_key_t *k = &pk->rsa;
+    k->k = (int)nlen, k->nl = (int)((nlen + 7) / 8);
+    be_to_limbs(k->n, k->nl, n, (int)nlen);
+    k->e = 0;
+    for (size_t i = 0; i < elen; i++) k->e = k->e << 8 | e[i];
+    if (k->e < 3) { free(pk); return NULL; }
+    uint64_t inv = 1; /* Newton: n^-1 mod 2^64 */
+    for (int i = 0; i < 6; i++) inv *= 2 - k->n[0] * inv;
+    k->n0 = -inv;
+    /* R^2 mod n by doubling 1 2*64*nl times */
+    int nl = k->nl;
+    uint64_t x[RSA_MAXL + 1] = {1};
+    for (int it = 0; it < 2 * 64 * nl; it++) {
+        uint64_t c = 0;
+        for (int j = 0; j < nl; j++) {
+            uint64_t v = x[j];
+            x[j] = v << 1 | c, c = v >> 63;
+        }
+        int ge = c != 0;
+        if (!ge) {
+            ge = 1;
+            for (int j = nl - 1; j >= 0; j--)
+                if (x[j] != k->n[j]) { ge = x[j] > k->n[j]; break; }
+        }
+        if (ge) {
+            uint64_t bw = 0;
+            for (int j = 0; j < nl; j++) {
+                u128 z = (u128)x[j] - k->n[j] - bw;
+                x[j] = (uint64_t)z, bw = (uint64_t)(z >> 64) & 1;
+            }
+        }
+    }
+    memcpy(k->r2, x, sizeof(uint64_t) * nl);
+#ifdef JWT_RSA_SCREEN
+    { /* kc[c-1] = Q^(c-1), Q = R^(e-1): computed in the Montgomery domain, stored plain */
+        mont_ops_t mo = mont_for(k);
+        uint64_t q[RSA_MAXL], km[RSA_MAXL], one[RSA_MAXL] = {1};
+        rsa_pow(q, k->r2, k->e - 1, k, mo); /* (R)^(e-1), Montgomery form */
+        mo.mul(km, k->r2, one, k);          /* 1, Montgomery form */
+        for (int c = 0; c < 16; c++) {
+            mo.mul(k->kc[c], km, one, k);
+            mo.mul(km, km, q, k);
+        }
+    }
+#endif
+    /* EM = 00 01 FF..FF 00 DigestInfo H, with H = 0 */
+    uint8_t em[512];
+    int kk = k->k, ps = kk - 3 - 19 - 32;
+    em[0] = 0, em[1] = 1;
+    memset(em + 2, 0xff, (size_t)ps);
+    em[2 + ps] = 0;
+    memcpy(em + 3 + ps, sha256_di, 19);
+    memset(em + kk - 32, 0, 32);
+    be_to_limbs(k->em, nl, em, kk);
+    pk->alg = PK_RS256, pk->name = "RS256", pk->canon = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    pk->sig_bytes = kk, pk->sig_chars = (kk * 4 + 2) / 3;
+    return pk;
+}
+
+/* expected EM limbs for message hash h: the template with the hash in limbs 0..3 */
+static void rsa_em(uint64_t *o, const rsa_key_t *k, const uint8_t h[32]) {
+    memcpy(o, k->em, sizeof(uint64_t) * k->nl);
+    be_to_limbs4(o, h);
+}
+
+static int rsa_lt_n(const uint64_t *s, const rsa_key_t *k) {
+    for (int j = k->nl - 1; j >= 0; j--)
+        if (s[j] != k->n[j]) return s[j] < k->n[j];
+    return 0;
+}
+
+static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const uint64_t *em) {
+    uint64_t sr[RSA_MAXL], x[RSA_MAXL], one[RSA_MAXL] = {1};
+    mo.mul(sr, s, k->r2, k);
+    rsa_pow(x, sr, k->e, k, mo);
+    mo.mul(x, x, one, k);
+    uint64_t d = 0;
+    for (int j = 0; j < k->nl; j++) d |= x[j] ^ em[j];
+    return d == 0;
+}
+
+static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, const int *len,
+                      const uint8_t *const *sig, const int *slen, uint8_t *ok) {
+    const rsa_key_t *k = &pk->rsa;
+    mont_ops_t mo = mont_for(k);
+    enum { CH = 16 };
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH, c = 0, at[CH];
+        uint64_t s[CH][RSA_MAXL], em[CH][RSA_MAXL];
+        for (int i = 0; i < m; i++) {
+            int t = base + i;
+            ok[t] = 0;
+            if (slen[t] != k->k) continue;
+            be_to_limbs(s[c], k->nl, sig[t], k->k);
+            if (!rsa_lt_n(s[c], k)) continue;
+            uint8_t h[32];
+            sha256_msg(msg[t], len[t], h);
+            rsa_em(em[c], k, h);
+            at[c++] = t;
+        }
+#ifdef JWT_RSA_SCREEN
+        /* A = prod s_i R^-(c-1), B = prod EM_i R^-(c-1) by chained Montgomery products of the raw values; then
+         * (prod s)^e == prod EM  <=>  A^e R^((c-1)(e-1)) == B  <=>  mont(pow(A R), kc[c-1]) == B.
+         * 2c + e's ~18 multiplications for the whole batch instead of ~19 per token. */
+        if (c >= 2) {
+            uint64_t A[RSA_MAXL], B[RSA_MAXL], x[RSA_MAXL];
+            memcpy(A, s[0], sizeof(uint64_t) * k->nl), memcpy(B, em[0], sizeof(uint64_t) * k->nl);
+            for (int i = 1; i < c; i++) mo.mul(A, A, s[i], k), mo.mul(B, B, em[i], k);
+            mo.mul(A, A, k->r2, k);
+            rsa_pow(x, A, k->e, k, mo);
+            mo.mul(x, x, k->kc[c - 1], k);
+            uint64_t d = 0;
+            for (int j = 0; j < k->nl; j++) d |= x[j] ^ B[j];
+            if (!d) {
+                for (int i = 0; i < c; i++) ok[at[i]] = 1;
+                continue;
+            }
+        }
+#endif
+        for (int i = 0; i < c; i++) ok[at[i]] = (uint8_t)rsa_one(k, mo, s[i], em[i]);
+    }
+}
+
+/* ---------------------------------------------------------------------------------- front end */
+void jwt_pkey_free(jwt_pkey_t *k) {
+    if (k) free(k->tg), free(k);
+}
+
+void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
+                       const uint8_t *const *sig, const int *slen, uint8_t *ok) {
+    if (k->alg == PK_ES256) es256_raw(k, n, msg, len, sig, slen, ok);
+    else rs256_raw(k, n, msg, len, sig, slen, ok);
+}
+
+void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, const int *len, int64_t now,
+                         jwt_result_t *out) {
+    enum { CH = 16 };
+    const uint8_t *msg[CH], *sp[CH];
+    int mlen[CH], idx[CH], poff[CH], sl[CH];
+    uint8_t sb[CH][512 + 64], ok[CH];
+    jnow_t jn;
+    jnow_init(&jn, now);
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH, c = 0;
+        for (int i = 0; i < m; i++) {
+            jwt_result_t *r = &out[base + i];
+            const char *t = tok[base + i];
+            int L = len[base + i];
+            r->status = JWT_INVALID, r->username_escape = 0, r->username_len = 0, r->uid = 0;
+            r->username = r->ubuf, r->ubuf[0] = 0;
+            if (L <= 0 || L > JWT_TOKEN_MAX) continue;
+            const char *d1 = memchr(t, '.', L);
+            if (!d1) continue;
+            const char *d2 = memchr(d1 + 1, '.', L - (d1 + 1 - t));
+            if (!d2 || t + L - (d2 + 1) != k->sig_chars) continue;
+            int hl = (int)(d1 - t), pl = (int)(d2 - d1 - 1);
+            if (hl == 0 || pl == 0) continue;
+            if (!(hl == 36 && !memcmp(t, k->canon, 36))) {
+                uint8_t hb[JWT_TOKEN_MAX * 3 / 4 + 64];
+                int hn = jwt_b64url_decode(hb, t, hl);
+                if (hn < 0 || !header_ok(hb, hn, k->name)) continue;
+            }
+            if (jwt_b64url_decode(sb[c], d2 + 1, k->sig_chars) != k->sig_bytes) continue;
+            sp[c] = sb[c], sl[c] = k->sig_bytes;
+            msg[c] = (const uint8_t *)t, mlen[c] = (int)(d2 - t), idx[c] = i, poff[c] = hl + 1;
+            c++;
+        }
+        jwt_pk_verify_raw(k, c, msg, mlen, sp, sl, ok);
+        for (int j = 0; j < c; j++)
+            if (ok[j]) claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
+    }
+}

@@ -102,6 +102,23 @@ jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
 #endif
 
+/* ---- RS256 / ES256 (prototype; build with -DJWT_PK, needs scripts/fetch-fiat.sh, see PK.md) ----
+ * The same front end and claim rules as jwt_verify_batch, with a public key instead of a secret.  The key
+ * fixes the algorithm: a token's header "alg" must equal it (no alg confusion).  Key setup does the
+ * expensive per-key work once (ES256: comb tables of ~300 KB for u1*G + u2*Q; RS256: Montgomery constants). */
+typedef struct jwt_pkey jwt_pkey_t;
+/* ES256: the public point's affine coordinates, big-endian.  NULL if not a point on P-256. */
+jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]);
+/* RS256: modulus and public exponent, big-endian; 2048..4096-bit odd n, odd e in [3, 2^64).  NULL otherwise. */
+jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen);
+void jwt_pkey_free(jwt_pkey_t *k);
+void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                         jwt_result_t *out);
+/* Raw signature check of n messages (the JWS signing input); sig[i] is JOSE-format (ES256: r || s, 64 bytes;
+ * RS256: k bytes for a k-byte modulus).  ok[i] = 1 iff valid.  For tests and benchmarks. */
+void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
+                       const uint8_t *const *sig, const int *slen, uint8_t *ok);
+
 /* base64url decode (no padding, canonical trailing bits).  Returns decoded length or -1.
  * dst needs room for (n/4)*3 + 3 bytes + 32 bytes of slack (SIMD stores overrun). */
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n);
