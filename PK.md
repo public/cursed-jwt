@@ -261,7 +261,8 @@ the asm backends with and without screening. Each build makes about 12,100 check
 - the real Xeon: portable C with gcc (exp75/79), and the s2n, libcrypto and fast builds with clang (exp107/109/110).
 
 HS256 is unchanged by the shared front end (`claims_one`, `header_ok` taking the alg). On the Xeon (exp79), full
-verify is 277.9 ns at batch 8 and 1,178.7 at batch 1; the README has 277 and 1,178. `make test-vectors` passes on the M5.
+verify is 277.9 ns at batch 8 and 1,178.7 at batch 1. The README had 277 and 1,178 at the time; batch 1 has since
+moved to the extracted OpenSSL SHA-256 code (938 ns). `make test-vectors` passes on the M5.
 
 The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 

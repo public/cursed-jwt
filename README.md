@@ -9,6 +9,10 @@ The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JS
 fast path. Every signature is recomputed on every call; nothing is cached except the key's HMAC ipad/opad
 midstates.
 
+RS256 and ES256 are an opt-in prototype (`-DJWT_PK`) with the same front end. ES256 builds per-key comb tables, and
+RS256 has an optional batch "screening" mode. Both use s2n-bignum's or libcrypto's asm kernels where those are
+faster. Against OpenSSL that is 3.5–5.1× on ES256 and up to 6.1× on batched RS256; [PK.md](PK.md) has the details.
+
 On a Xeon Platinum 8260 (no SHA-NI), a full verify costs **277 ns per token at batch 8** and 938 ns for a lone
 token. On the same box, jwt-cpp takes 6,201 ns and golang-jwt v5 8,739 ns per token: **5–24× faster**.
 
@@ -52,7 +56,8 @@ On an Apple M5 Pro (`make compare`): cursed-jwt 116 ns/token at batch 8, jwt-cpp
 ## API
 
 ```c
-#include "jwt.h"            // link build/libcursedjwt.a (or compile src/jwt.c into your program)
+#include "jwt.h"            // link build/libcursedjwt.a (or compile src/jwt.c into your program; on x86-64 Linux
+                            // also assemble src/sha256_x86_64_ossl.S and define JWT_OSSL_SHA256 for the fast batch-1 path)
 
 jwt_key_t key;
 jwt_key_init(&key, secret, secret_len);          // once: HMAC ipad/opad midstates (any key length)
@@ -76,6 +81,14 @@ Lower-level entry points, for your own claims or for benchmarks:
 - `jwt_verify_batch_<engine>`: the full verify on a chosen engine.
 
 `examples/verify.c` is a complete program: `build/verify SECRET TOKEN...`.
+
+RS256 / ES256 (prototype, `-DJWT_PK`; the setup and the backends are in [PK.md](PK.md)):
+
+```c
+jwt_pkey_t *pk = jwt_pkey_es256(x, y);      // or jwt_pkey_rs256(n, n_len, e, e_len); NULL if the key is invalid
+jwt_verify_batch_pk(pk, n, tok, len, time(NULL), out);   // same results and claim rules; "alg" must match the key
+jwt_pkey_free(pk);
+```
 
 ## Claim semantics
 
@@ -125,6 +138,9 @@ The claim profile (`sub` as a numeric user id, `username` as a string) is built 
     37 ns, and falls back to the strict parser (131 ns) for anything else;
   - SWAR integer parsing;
   - `exp`/`nbf` are compared with `now` by digit count, then bytewise, with no number conversion.
+- **Batch 1 on x86-64 Linux runs OpenSSL's own SHA-256 asm**, extracted (`src/sha256_x86_64_ossl.S`). There is
+  no 8-way parallelism to exploit for one token, and OpenSSL's hand-scheduled AVX2+BMI2 code beats the compiled
+  scalar template by 25%.
 - **Identical results either way.** The shape matcher and the opt-in simdjson-style path both defer to the strict
   parser on anything unusual. The tests fuzz each against it.
 
@@ -155,6 +171,13 @@ Options:
 - `-DJWT_FAST_JSON`: the simdjson-style path, 3–4% slower on a Xeon.
 - `-DJWT_LANE_JSON`: lane-parallel JSON, which only pays at batch ≥ 32.
 - `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX`: size limits.
+- `-DJWT_OSSL_SHA256`: the extracted OpenSSL single-stream SHA-256 (x86-64 ELF). The Makefile sets it on x86-64
+  Linux.
+- **RS256 / ES256 prototype**, all described in [PK.md](PK.md):
+  - `-DJWT_PK` turns it on. Without the next two it needs only fiat-crypto's generated C (`scripts/fetch-fiat.sh`).
+  - `-DJWT_S2N` uses s2n-bignum's asm (`scripts/fetch-s2n-bignum.sh`; on x86 it needs BMI2 and ADX).
+  - `-DJWT_OPENSSL` uses libcrypto's BN for RSA.
+  - `-DJWT_RSA_SCREEN` turns on RSA batch screening.
 
 The 16-lane `jwt_hmac_zmm` and `jwt_hmac_avx512x2` exist for benchmarks; neither is the default.
 
@@ -228,10 +251,10 @@ generators:
 
 | platform | compilers | result |
 |---|---|---|
-| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, test-vectors, example, compare (jwt-cpp) |
-| Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan |
-| Linux amd64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test (AVX2 engines), ASan/UBSan, AVX-512 build compiles |
-| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test on real AVX-512 (AVX-512VL, 2×ymm, zmm engines) |
+| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, test-vectors, example, compare (jwt-cpp), pk-test with every backend |
+| Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan, pk-test with every backend |
+| Linux amd64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, test-vectors (AVX2 engines + every OpenSSL sha256 path but SHA-NI), ASan/UBSan, AVX-512 build compiles, pk-test (portable C) |
+| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test + test-vectors on real AVX-512 (AVX-512VL, 2×ymm, zmm, extracted OpenSSL sha256), pk-test with every backend |
 
 ## Benchmarks
 
@@ -356,4 +379,6 @@ engine; each figure is the median of 300 trials.
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE). Credits for techniques (simdjson, cpuminer-opt) are in [THIRD_PARTY.md](THIRD_PARTY.md).
+MIT, see [LICENSE](LICENSE). The one vendored file, `src/sha256_x86_64_ossl.S`, is OpenSSL's (Apache-2.0, text in
+[licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)). Fetched dependencies of the optional builds
+(fiat-crypto, s2n-bignum) and credits for techniques (simdjson, cpuminer-opt) are in [THIRD_PARTY.md](THIRD_PARTY.md).
