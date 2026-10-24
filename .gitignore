@@ -1,0 +1,18 @@
+# build outputs
+/build/
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+a.out
+# logs, dumps, local data
+*.log
+*.out
+*.core
+core
+*.db
+*.db-*
+*.bin
+tokens.json
+.DS_Store

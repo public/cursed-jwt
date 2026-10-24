@@ -1,0 +1,670 @@
+/* test_jwt.c — every engine vs OpenSSL HMAC, plus the claim rules.  Unity build: includes jwt.c.
+ *   ./test_jwt [path/to/tokens.json]   (make test generates build/tokens.json with tests/gen_tokens.py)
+ */
+#include "jwt.c"
+
+#include "ossl_min.h"
+#include <stdio.h>
+#include <time.h>
+
+static const char *SECRET = "cursed-jwt-test-secret"; /* must match the Makefile's token generation */
+static int fails, checks;
+static int quick; /* JWT_TEST_QUICK=1: fewer random iterations, same token/crafted coverage */
+#define CHECK(cond, ...)                                                            \
+    do {                                                                            \
+        checks++;                                                                   \
+        if (!(cond)) {                                                              \
+            fails++;                                                                \
+            if (fails < 40) fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__),    \
+                            fprintf(stderr, __VA_ARGS__), fputc('\n', stderr);      \
+        }                                                                           \
+    } while (0)
+
+/* ---- the AVX-512 template, executed with a scalar emulation of vpternlogd/vprord ---- */
+static inline uint32_t tl_emu(uint32_t a, uint32_t b, uint32_t c, int imm) {
+    uint32_t r = 0;
+    for (int i = 0; i < 32; i++) {
+        int idx = (int)((a >> i & 1) << 2 | (b >> i & 1) << 1 | (c >> i & 1));
+        r |= (uint32_t)(imm >> idx & 1) << i;
+    }
+    return r;
+}
+#define MB(name) name##_tlemu
+#define MB_LANES 1
+#define V uint32_t
+#define VSET1(x) ((uint32_t)(x))
+#define VADD(a, b) ((a) + (b))
+#define VXOR(a, b) ((a) ^ (b))
+#define VSHR(x, n) ((x) >> (n))
+#define VROR(x, n) ROR32(x, n)
+#define VXOR3(a, b, c) tl_emu(a, b, c, JWT_TL_XOR3)
+#define VCH(e, f, g) tl_emu(e, f, g, JWT_TL_CH)
+#define VMAJ(a, b, c) tl_emu(a, b, c, JWT_TL_MAJ)
+#define VSEL(m, x, y) tl_emu(m, x, y, JWT_TL_CH)
+#define VMASK(arr) ((arr)[0])
+#define MB_LOAD16(ptr, w)                                                   \
+    do {                                                                    \
+        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = be32((ptr)[0] + 4 * i_);  \
+    } while (0)
+#define MB_STORE8(s, out)                                                   \
+    do {                                                                    \
+        for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];              \
+    } while (0)
+#define MB_MIN_LANES 1
+#include "jwt_mb.inc"
+
+/* ---- helpers ---- */
+static void ossl_hmac(const uint8_t *m, int n, uint32_t out[8]) {
+    uint8_t d[32];
+    unsigned dl = 32;
+    HMAC(EVP_sha256(), SECRET, (int)strlen(SECRET), m, (size_t)n, d, &dl);
+    for (int i = 0; i < 8; i++) out[i] = be32(d + 4 * i);
+}
+
+static const char B64U[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+static int b64u_enc(char *dst, const uint8_t *s, int n) {
+    int o = 0, i = 0;
+    for (; i + 3 <= n; i += 3) {
+        uint32_t v = (uint32_t)s[i] << 16 | (uint32_t)s[i + 1] << 8 | s[i + 2];
+        dst[o++] = B64U[v >> 18], dst[o++] = B64U[v >> 12 & 63], dst[o++] = B64U[v >> 6 & 63], dst[o++] = B64U[v & 63];
+    }
+    if (n - i == 1) {
+        uint32_t v = (uint32_t)s[i] << 16;
+        dst[o++] = B64U[v >> 18], dst[o++] = B64U[v >> 12 & 63];
+    } else if (n - i == 2) {
+        uint32_t v = (uint32_t)s[i] << 16 | (uint32_t)s[i + 1] << 8;
+        dst[o++] = B64U[v >> 18], dst[o++] = B64U[v >> 12 & 63], dst[o++] = B64U[v >> 6 & 63];
+    }
+    dst[o] = 0;
+    return o;
+}
+
+/* sign(header, payload) with SECRET (or a different key) -> malloc'd token */
+static char *sign_with(const char *hdr, const char *pl, const char *key) {
+    size_t hl = strlen(hdr), pll = strlen(pl);
+    char *t = malloc((hl + pll) * 2 + 128);
+    int o = b64u_enc(t, (const uint8_t *)hdr, (int)hl);
+    t[o++] = '.';
+    o += b64u_enc(t + o, (const uint8_t *)pl, (int)pll);
+    uint8_t d[32];
+    unsigned dl = 32;
+    HMAC(EVP_sha256(), key, (int)strlen(key), (uint8_t *)t, (size_t)o, d, &dl);
+    t[o++] = '.';
+    b64u_enc(t + o, d, 32);
+    return t;
+}
+static const char *HS = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+static char *sign(const char *pl) { return sign_with(HS, pl, SECRET); }
+
+static char *fmt(const char *f, ...) __attribute__((format(printf, 1, 2)));
+static char *fmt(const char *f, ...) {
+    va_list ap;
+    va_start(ap, f);
+    char *s = NULL;
+    if (vasprintf(&s, f, ap) < 0) abort();
+    va_end(ap);
+    return s;
+}
+
+typedef struct {
+    const char *name;
+    jwt_hmac_fn *hmac;
+    void (*verify)(const jwt_key_t *, int, const char *const *, const int *, int64_t, jwt_result_t *);
+} engine_t;
+
+static engine_t engines[] = {
+    {"scalar", jwt_hmac_scalar, jwt_verify_batch_scalar},
+#ifdef JWT_HAVE_NEON
+    {"neon4", jwt_hmac_neon, jwt_verify_batch_neon},
+#endif
+#if defined(__ARM_FEATURE_SHA2)
+    {"sha2x1", jwt_hmac_sha2_1, NULL},
+    {"sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2},
+    {"sha2x2", jwt_hmac_sha2_2, NULL},
+    {"sha2x4", jwt_hmac_sha2_4, NULL},
+#endif
+#if defined(__AVX2__)
+    {"avx2", jwt_hmac_avx2, jwt_verify_batch_avx2},
+    {"avx2x2", jwt_hmac_avx2x2, NULL},
+#endif
+#if defined(JWT_AVX512) && defined(__AVX512VL__)
+    {"avx512", jwt_hmac_avx512, jwt_verify_batch_avx512},
+    {"avx512x2", jwt_hmac_avx512x2, NULL},
+    {"zmm", jwt_hmac_zmm, NULL},
+#endif
+    {"tlemu", jwt_hmac_tlemu, NULL},
+    {"default", NULL, jwt_verify_batch},
+};
+#define NENG ((int)(sizeof engines / sizeof engines[0]))
+
+/* ---- tokens.json ---- */
+typedef struct {
+    int id;
+    char *name, *tok;
+} seedtok_t;
+static seedtok_t *load_tokens(const char *path, int *count) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); exit(2); }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(sz + 1);
+    if (fread(buf, 1, sz, f) != (size_t)sz) exit(2);
+    buf[sz] = 0;
+    fclose(f);
+    int cap = 1024, n = 0;
+    seedtok_t *v = malloc(cap * sizeof *v);
+    for (char *p = buf; (p = strstr(p, "{\"id\":")); ) {
+        if (n == cap) v = realloc(v, (cap *= 2) * sizeof *v);
+        v[n].id = atoi(p + 6);
+        char *u = strstr(p, "\"username\":\"") + 12, *ue = strchr(u, '"');
+        char *t = strstr(p, "\"token\":\"") + 9, *te = strchr(t, '"');
+        v[n].name = strndup(u, ue - u), v[n].tok = calloc(te - t + 65, 1), memcpy(v[n].tok, t, te - t);
+        n++, p = te;
+    }
+    *count = n;
+    return v;
+}
+
+static uint64_t rng = 0x9E3779B97F4A7C15ull;
+static uint32_t rnd(void) {
+    rng ^= rng << 13, rng ^= rng >> 7, rng ^= rng << 17;
+    return (uint32_t)(rng >> 16);
+}
+
+/* ---- tests ---- */
+static void test_ternlog_immediates(void) {
+    for (int i = 0; i < 1000; i++) {
+        uint32_t a = rnd() ^ rnd() << 16, b = rnd() ^ rnd() << 16, c = rnd() ^ rnd() << 16;
+        CHECK(tl_emu(a, b, c, JWT_TL_XOR3) == (a ^ b ^ c), "xor3");
+        CHECK(tl_emu(a, b, c, JWT_TL_CH) == ((a & b) | (~a & c)), "ch");
+        CHECK(tl_emu(a, b, c, JWT_TL_MAJ) == ((a & b) ^ (a & c) ^ (b & c)), "maj");
+    }
+}
+
+static void test_jint(void) {
+    char b[32];
+    for (int it = 0; it < (quick ? 20000 : 200000); it++) {
+        int digits = 1 + (int)(rnd() % 18);
+        uint64_t v = ((uint64_t)rnd() << 32 | rnd() << 16 | rnd()) % 1000000000000000000ull;
+        uint64_t p = 1;
+        for (int i = 0; i < digits; i++) p *= 10;
+        v %= p;
+        int neg = rnd() & 1;
+        int n = snprintf(b, sizeof b, "%s%llu", neg ? "-" : "", (unsigned long long)v);
+        CHECK(jint((const uint8_t *)b, n) == (neg ? -(int64_t)v : (int64_t)v), "jint %s", b);
+    }
+}
+
+static void test_b64(void) {
+    uint8_t a[600], b[600];
+    char s[600];
+    for (int it = 0; it < (quick ? 3000 : 20000); it++) {
+        int n = (int)(rnd() % 300);
+        for (int i = 0; i < n; i++) s[i] = B64U[rnd() & 63];
+        int mode = (int)(rnd() % 4);
+        if (mode == 1 && n) s[rnd() % n] = (char)(rnd() & 255); /* random garbage byte */
+        if (mode == 2 && n) s[rnd() % n] = "=+/. \x80\xff"[rnd() % 7];
+        int ra = jwt_b64url_decode_scalar(a, s, n), rb = jwt_b64url_decode(b, s, n);
+        CHECK(ra == rb && (ra < 0 || !memcmp(a, b, ra)), "b64 simd/scalar mismatch n=%d ra=%d rb=%d", n, ra, rb);
+        if (mode == 0) CHECK((n & 3) == 1 ? ra < 0 : (ra >= 0 || (n & 3)), "b64 valid rejected n=%d", n);
+    }
+    /* round trip */
+    for (int n = 0; n < 200; n++) {
+        uint8_t in[200];
+        for (int i = 0; i < n; i++) in[i] = (uint8_t)rnd();
+        int m = b64u_enc(s, in, n);
+        CHECK(jwt_b64url_decode(a, s, m) == n && !memcmp(a, in, n), "b64 roundtrip %d", n);
+    }
+    CHECK(jwt_b64url_decode(a, "QQ", 2) == 1 && a[0] == 'A', "QQ");
+    CHECK(jwt_b64url_decode(a, "QR", 2) < 0, "non-canonical QR");
+    CHECK(jwt_b64url_decode(a, "QUI", 3) == 2, "QUI");
+    CHECK(jwt_b64url_decode(a, "QUJ", 3) < 0, "non-canonical QUJ");
+    CHECK(jwt_b64url_decode(a, "QQ==", 4) < 0, "padding");
+}
+
+static void test_hmac_random(void) {
+    enum { MAXN = 70 };
+    static uint8_t data[MAXN + 1][768]; /* row slack: JWT_INPUT_PADDED reads up to 64 B past a message */
+    const uint8_t *msg[MAXN];
+    int len[MAXN];
+    uint32_t ref[MAXN][8], got[MAXN][8];
+    jwt_key_t k;
+    jwt_key_init(&k, SECRET, strlen(SECRET));
+    for (int it = 0; it < (quick ? 400 : 3000); it++) {
+        int n = 1 + (int)(rnd() % MAXN);
+        int mode = (int)(rnd() % 3); /* 0: uniform-ish token lengths, 1: wild, 2: block boundaries */
+        for (int i = 0; i < n; i++) {
+            len[i] = mode == 0 ? 130 + (int)(rnd() % 60) : mode == 1 ? (int)(rnd() % 700) : 64 * (int)(rnd() % 5) + (int)(rnd() % 3) - 1 + 55 - 55 * (int)(rnd() & 1);
+            if (len[i] < 0) len[i] = 0;
+            if (len[i] > 699) len[i] = 699;
+            for (int j = 0; j < len[i]; j++) data[i][j] = (uint8_t)rnd();
+            msg[i] = data[i];
+            ossl_hmac(msg[i], len[i], ref[i]);
+        }
+        for (int e = 0; e < NENG; e++) {
+            if (!engines[e].hmac) continue;
+            memset(got, 0, sizeof got);
+            engines[e].hmac(&k, n, msg, len, got);
+            for (int i = 0; i < n; i++)
+                CHECK(!memcmp(ref[i], got[i], 32), "hmac %s it=%d n=%d i=%d len=%d", engines[e].name, it, n, i, len[i]);
+        }
+    }
+    /* long keys get hashed (RFC 2104) */
+    const char *lk = "a-secret-that-is-definitely-longer-than-sixty-four-bytes-0123456789-abcdefghijklmnop";
+    jwt_key_t k2;
+    jwt_key_init(&k2, lk, strlen(lk));
+    uint8_t d[32];
+    unsigned dl;
+    static const uint8_t hello[80] = "hello";
+    const uint8_t *m0 = hello;
+    int l0 = 5;
+    HMAC(EVP_sha256(), lk, (int)strlen(lk), m0, 5, d, &dl);
+    jwt_hmac_scalar(&k2, 1, &m0, &l0, got);
+    for (int i = 0; i < 8; i++) ref[0][i] = be32(d + 4 * i);
+    CHECK(!memcmp(ref[0], got[0], 32), "long key");
+}
+
+
+/* simdjson-style fast path vs the strict parser on fuzzed payloads: whenever the fast path
+ * answers (>= 0) it must agree with payload_check exactly. */
+static void test_json_diff(int64_t now) {
+    static const char *base[] = {
+        "{\"sub\":\"1\",\"username\":\"golden_ember_1\",\"iat\":1792832174,\"exp\":2108192174}",
+        "{\"sub\":\"20000\",\"username\":\"swift_nebula_20000\",\"iat\":1792832174,\"exp\":2108192174}",
+        "{\"exp\":2108192174.5,\"nbf\":100,\"username\":\"a b\",\"sub\":\"007\",\"x\":true,\"y\":null,\"z\":false}",
+        " {\"sub\" : \"9223372036854775807\" ,\"username\":\"\", \"exp\" : 4.1e9 } ",
+        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":1}",
+        "{\"sub\":1,\"username\":\"n\",\"exp\":2108192174}",
+        "{\"sub\":\"1\",\"username\":0,\"exp\":2108192174}",
+        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":2108192174,\"a\":[1,2],\"b\":{\"c\":1}}",
+    };
+    static const char alpha[] = "{}[]:,\"\\ \t\n\r0123456789-+.eEtrufalsn_abcxyz\x01\x7f\xc3\xa9";
+    uint8_t a[400], b[400];
+    int fast = 0, total = 0, shaped = 0;
+    jnow_t jn;
+    jnow_init(&jn, now);
+    for (int it = 0; it < (quick ? 30000 : 300000); it++) {
+        const char *src = base[rnd() % (sizeof base / sizeof *base)];
+        int n = (int)strlen(src);
+        memcpy(a, src, n);
+        int muts = (int)(rnd() % 4);
+        for (int m = 0; m < muts; m++) {
+            int op = (int)(rnd() % 3), pos = n ? (int)(rnd() % (n + 1)) : 0;
+            char ch = alpha[rnd() % (sizeof alpha - 1)];
+            if (op == 0 && n < 300) memmove(a + pos + 1, a + pos, n - pos), a[pos] = (uint8_t)ch, n++;
+            else if (op == 1 && pos < n) memmove(a + pos, a + pos + 1, n - pos - 1), n--;
+            else if (pos < n) a[pos] = (uint8_t)ch;
+        }
+        memcpy(b, a, n);
+        jwt_result_t rf, rs;
+        memset(&rf, 0, sizeof rf), memset(&rs, 0, sizeof rs);
+        int sf = payload_fast(a, n, &jn, &rf);
+        int ss = payload_check(b, n, &jn, &rs);
+        jwt_result_t rp;
+        memset(&rp, 0, sizeof rp);
+        int sp = payload_shape(a, n, &jn, &rp);
+        total++;
+        if (sp >= 0) {
+            shaped++;
+            int okp = sp == ss;
+            if (okp && sp == JWT_OK)
+                okp = rp.uid == rs.uid && rp.username_len == rs.username_len &&
+                      !memcmp(rp.ubuf, rs.ubuf, rp.username_len) && rp.username_escape == rs.username_escape;
+            CHECK(okp, "json diff: shape %d strict %d on '%.*s'", sp, ss, n, (const char *)b);
+        }
+        if (sf < 0) continue;
+        fast++;
+        int ok = sf == ss;
+        if (ok && sf == JWT_OK)
+            ok = rf.uid == rs.uid && rf.username_len == rs.username_len &&
+                 !memcmp(rf.ubuf, rs.ubuf, rf.username_len) && rf.username_escape == rs.username_escape;
+        CHECK(ok, "json diff: fast %d strict %d on '%.*s'", sf, ss, n, (const char *)b);
+    }
+    printf("  json fast path: decided %d of %d fuzzed payloads; shape matcher: %d; all agreed with the strict parser\n", fast, total, shaped);
+    CHECK(shaped > total / 20, "shape matcher decided too few (%d/%d)", shaped, total);
+    CHECK(fast > total / 10, "fast path decided too few (%d/%d)", fast, total);
+}
+
+#ifdef JWT_HAVE_LANES
+/* lane-parallel JSON vs the strict parser: random-size groups of fuzzed payloads */
+static void test_json_lanes(int64_t now) {
+    static const char *base[] = {
+        "{\"sub\":\"1\",\"username\":\"golden_ember_1\",\"iat\":1792832174,\"exp\":2108192174}",
+        "{\"sub\":\"20000\",\"username\":\"swift_nebula_20000\",\"iat\":1792832174,\"exp\":2108192174}",
+        "{\"exp\":2108192174,\"nbf\":100,\"username\":\"a b\",\"sub\":\"007\",\"x\":\"y\"}",
+        " {\"sub\" : \"9223372036854775807\" ,\"username\":\"\", \"exp\" : 4100000000 } ",
+        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":1}",
+        "{\"sub\":1,\"username\":\"n\",\"exp\":2108192174}",
+        "{\"sub\":\"1\",\"username\":0,\"exp\":2108192174}",
+        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":2108192174,\"a\":[1,2],\"b\":{\"c\":1}}",
+        "{\"sub\":\"1\",\"sub\":\"2\",\"username\":\"n\",\"exp\":2108192174}",
+        "{\"subx\":\"1\",\"usernam\":\"n\",\"exp\":2108192174,\"nbf\":9999999999}",
+    };
+    static const char alpha[] = "{}[]:,\"\\ \t0123456789-+.eEtrufalsn_abcxyz\x01\x7f\xc3";
+    enum { G = 64 };
+    static uint8_t buf[G][320], ref[G][320];
+    const uint8_t *ptr[G];
+    int len[G], decided = 0, total = 0;
+    jnow_t jn;
+    jnow_init(&jn, now);
+    for (int it = 0; it < (quick ? 2000 : 20000); it++) {
+        int m = 1 + (int)(rnd() % JL);
+        for (int j = 0; j < m; j++) {
+            const char *src = base[rnd() % (sizeof base / sizeof *base)];
+            int n = (int)strlen(src);
+            memcpy(buf[j], src, n);
+            for (int k = 0, muts = (int)(rnd() % 4); k < muts; k++) {
+                int op = (int)(rnd() % 3), pos = n ? (int)(rnd() % (n + 1)) : 0;
+                char ch = alpha[rnd() % (sizeof alpha - 1)];
+                if (op == 0 && n < 238) memmove(buf[j] + pos + 1, buf[j] + pos, n - pos), buf[j][pos] = (uint8_t)ch, n++;
+                else if (op == 1 && pos < n) memmove(buf[j] + pos, buf[j] + pos + 1, n - pos - 1), n--;
+                else if (pos < n) buf[j][pos] = (uint8_t)ch;
+            }
+            for (int k = n; k < 320; k++) buf[j][k] = (uint8_t)rnd(); /* garbage past n must not matter */
+            memcpy(ref[j], buf[j], n);
+            ptr[j] = buf[j], len[j] = n;
+        }
+        jlane_t o[JL];
+        json_lanes(m, ptr, len, o);
+        for (int j = 0; j < m; j++) {
+            jwt_result_t rl, rs;
+            memset(&rl, 0, sizeof rl), memset(&rs, 0, sizeof rs);
+            int sl = json_lane_claims(buf[j], &o[j], &jn, &rl);
+            int ss = payload_check(ref[j], len[j], &jn, &rs);
+            total++;
+            if (sl < 0) continue;
+            decided++;
+            int ok = sl == ss;
+            if (ok && sl == JWT_OK)
+                ok = rl.uid == rs.uid && rl.username_len == rs.username_len && !memcmp(rl.ubuf, rs.ubuf, rl.username_len);
+            CHECK(ok, "lanes: lane %d strict %d on '%.*s'", sl, ss, len[j], (const char *)ref[j]);
+        }
+    }
+    printf("  json lanes (%d wide): decided %d of %d fuzzed payloads, all agreed with the strict parser\n", JL, decided, total);
+    CHECK(decided > total / 10, "lanes decided too few (%d/%d)", decided, total);
+}
+#endif
+
+static void test_seed(seedtok_t *t, int n, int64_t now) {
+    jwt_key_t k;
+    jwt_key_init(&k, SECRET, strlen(SECRET));
+    const char **tok = malloc(n * sizeof *tok);
+    const uint8_t **msg = malloc(n * sizeof *msg);
+    int *len = malloc(n * sizeof *len), *mlen = malloc(n * sizeof *mlen);
+    uint32_t(*ref)[8] = malloc(n * sizeof *ref), (*got)[8] = malloc(n * sizeof *got);
+    jwt_result_t *res = malloc(n * sizeof *res);
+    for (int i = 0; i < n; i++) {
+        tok[i] = t[i].tok, len[i] = (int)strlen(t[i].tok);
+        msg[i] = (const uint8_t *)t[i].tok, mlen[i] = (int)(strrchr(t[i].tok, '.') - t[i].tok);
+        ossl_hmac(msg[i], mlen[i], ref[i]);
+    }
+    for (int e = 0; e < NENG; e++) {
+        if (engines[e].hmac) {
+            engines[e].hmac(&k, n, msg, mlen, got);
+            int bad = 0;
+            for (int i = 0; i < n; i++) bad += memcmp(ref[i], got[i], 32) != 0;
+            CHECK(bad == 0, "seed hmac %s: %d/%d mismatches", engines[e].name, bad, n);
+        }
+        if (!engines[e].verify) continue;
+        static const int bs[] = {1, 8, 32, 3, 4, 16, 64, 100};
+        for (int b = 0; b < (quick ? 3 : (int)(sizeof bs / sizeof bs[0])); b++) {
+            int bad = 0;
+            memset(res, 0xA5, n * sizeof *res);
+            for (int i = 0; i < n; i += bs[b]) {
+                int m = n - i < bs[b] ? n - i : bs[b];
+                engines[e].verify(&k, m, tok + i, len + i, now, res + i);
+            }
+            for (int i = 0; i < n; i++) {
+                jwt_result_t *r = &res[i];
+                int ok = r->status == JWT_OK && r->uid == t[i].id && r->username == r->ubuf &&
+                         r->username_len == strlen(t[i].name) && !memcmp(r->username, t[i].name, r->username_len) &&
+                         r->username_escape == 0 && r->username[r->username_len] == 0;
+                bad += !ok;
+            }
+            CHECK(bad == 0, "seed verify %s batch=%d: %d/%d wrong", engines[e].name, bs[b], bad, n);
+        }
+    }
+    free(tok), free(msg), free(len), free(mlen), free(ref), free(got), free(res);
+}
+
+typedef struct {
+    char *tok;
+    int status;
+    int64_t uid;
+    const char *name; /* expected decoded username for OK */
+    int esc;
+    const char *what;
+} case_t;
+
+static void test_cases(int64_t now) {
+    case_t c[256];
+    int n = 0;
+#define ADD(t, st, u, nm, e, w) (c[n++] = (case_t){(t), (st), (u), (nm), (e), (w)})
+#define OKC(pl, u, nm, e) ADD(sign(pl), JWT_OK, u, nm, e, pl)
+#define BAD(pl) ADD(sign(pl), JWT_INVALID, 0, NULL, 0, pl)
+#define BADP(pl) ADD(sign(pl), JWT_BAD_PAYLOAD, 0, NULL, 0, pl)
+    long long fut = now + 3600, past = now - 3600;
+    char *good = sign(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
+    ADD(good, JWT_OK, 7, "bob", 0, "good");
+    /* typical API test-suite cases */
+    ADD(strdup("abc"), JWT_INVALID, 0, NULL, 0, "garbage");
+    {
+        char *t = strdup(good);
+        char *d = strrchr(t, '.');
+        d[1] = 0;
+        ADD(fmt("%s%s", t, "c2lnbmF0dXJlLWlzLW5vdC12YWxpZC1hdC1hbGwtYXQtYWxsLTEyMzQ"), JWT_INVALID, 0, NULL, 0, "bad signature");
+        char hb[64];
+        b64u_enc(hb, (const uint8_t *)"{\"alg\":\"none\",\"typ\":\"JWT\"}", 26);
+        char *p1 = strchr(good, '.') + 1, *p2 = strrchr(good, '.');
+        ADD(fmt("%s.%.*s.", hb, (int)(p2 - p1), p1), JWT_INVALID, 0, NULL, 0, "alg=none");
+        /* alg=none, signature copied from the good token */
+        ADD(fmt("%s.%.*s%s", hb, (int)(p2 - p1), p1, p2), JWT_INVALID, 0, NULL, 0, "alg=none, real sig");
+        free(t);
+    }
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":%lld,\"exp\":%lld}", past - 3600, past));
+    BADP(fmt("{\"sub\":\"abc\",\"username\":\"bob\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
+    BADP(fmt("{\"sub\":\"7\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
+    /* sub variants, as other implementations' test suites check them */
+    const char *subs[] = {"0", "1", "true", "\"0\"", "\"-1\"", "\"1.5\"", "\"abc\"", "null", "\"\"", "\" 1\"",
+                          "\"1 \"", "\"+1\"", "\"1e3\"", "\"9223372036854775808\"", "{}", "[\"1\"]"};
+    for (int i = 0; i < (int)(sizeof subs / sizeof *subs); i++)
+        BADP(fmt("{\"sub\":%s,\"username\":\"bob\",\"exp\":%lld}", subs[i], fut));
+    OKC(fmt("{\"sub\":\"9223372036854775807\",\"username\":\"bob\",\"exp\":%lld}", fut), INT64_MAX, "bob", 0);
+    OKC(fmt("{\"sub\":\"007\",\"username\":\"bob\",\"exp\":%lld}", fut), 7, "bob", 0);
+    OKC(fmt("{\"sub\":\"\\u0031\\u0032\",\"username\":\"bob\",\"exp\":%lld}", fut), 12, "bob", 0);
+    const char *names[] = {"0", "true", "null", "{}", "[]", "false", "1.5"};
+    for (int i = 0; i < (int)(sizeof names / sizeof *names); i++)
+        BADP(fmt("{\"sub\":\"7\",\"username\":%s,\"exp\":%lld}", names[i], fut));
+    /* time claims */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\"}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":0}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":\"3000000000\"}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":null}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":true}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":[%lld]}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", (long long)now));
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", (long long)now + 1), 7, "bob", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld.25}", (long long)now), 7, "bob", 0);
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld.75}", (long long)now - 1));
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%.6f}", (double)fut + 0.123456), 7, "bob", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":4.1e9}"), 7, "bob", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":99999999999999999999999}"), 7, "bob", 0);
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":-99999999999999999999999}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":1e3}"));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,\"nbf\":%lld}", fut, fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,\"nbf\":\"bad\"}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,\"nbf\":null}", fut));
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,\"nbf\":%lld}", fut, (long long)now), 7, "bob", 0);
+    OKC(fmt("{\"nbf\":%lld,\"exp\":%lld,\"username\":\"bob\",\"sub\":\"7\"}", past, fut), 7, "bob", 0);
+    /* expired beats bad payload */
+    BAD(fmt("{\"sub\":\"abc\",\"exp\":%lld}", past));
+    /* iat and unknown claims are ignored but must be valid JSON */
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":\"whenever\",\"x\":[1,{\"a\":[]},\"\\n\"],\"exp\":%lld}", fut), 7, "bob", 0);
+    /* duplicates and escaped keys */
+    BAD(fmt("{\"sub\":\"7\",\"sub\":\"8\",\"username\":\"bob\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"username\":\"eve\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,\"exp\":%lld}", fut, fut));
+    BAD(fmt("{\"sub\":\"7\",\"\\u0073ub\":\"8\",\"username\":\"bob\",\"exp\":%lld}", fut));
+    OKC(fmt("{\"\\u0073ub\":\"8\",\"user\\u006eame\":\"bob\",\"\\u0065xp\":%lld}", fut), 8, "bob", 0);
+    /* usernames */
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"\",\"exp\":%lld}", fut), 7, "", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"a\\\"b\",\"exp\":%lld}", fut), 7, "a\"b", 1);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"a\\\\b\",\"exp\":%lld}", fut), 7, "a\\b", 1);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"tab\\there\",\"exp\":%lld}", fut), 7, "tab\there", 1);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"sl\\/ash\",\"exp\":%lld}", fut), 7, "sl/ash", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"caf\\u00e9\",\"exp\":%lld}", fut), 7, "caf\xc3\xa9", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"caf\xc3\xa9 \xf0\x9f\x92\xa9\",\"exp\":%lld}", fut), 7, "caf\xc3\xa9 \xf0\x9f\x92\xa9", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"\\ud83d\\udca9\",\"exp\":%lld}", fut), 7, "\xf0\x9f\x92\xa9", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"x\\ud83dy\",\"exp\":%lld}", fut), 7, "x\xef\xbf\xbdy", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"nul\\u0000\",\"exp\":%lld}", fut), 7, "nul", 1); /* len checked below */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc3\",\"exp\":%lld}", fut));         /* truncated UTF-8 */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc0\xaf\",\"exp\":%lld}", fut));     /* overlong */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xed\xa0\x80\",\"exp\":%lld}", fut)); /* raw surrogate */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"ctl\x01\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\\x\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\\u12\",\"exp\":%lld}", fut));
+    {
+        char longname[400];
+        memset(longname, 'n', sizeof longname - 1), longname[sizeof longname - 1] = 0;
+        BADP(fmt("{\"sub\":\"7\",\"username\":\"%s\",\"exp\":%lld}", longname, fut));
+        longname[JWT_USERNAME_MAX] = 0;
+        OKC(fmt("{\"sub\":\"7\",\"username\":\"%s\",\"exp\":%lld}", longname, fut), 7, strdup(longname), 0);
+        /* big payload: many blocks, mixed into a batch with short tokens */
+        char *pad = malloc(3001);
+        memset(pad, 'p', 3000), pad[3000] = 0;
+        OKC(fmt("{\"sub\":\"7\",\"pad\":\"%s\",\"username\":\"bob\",\"exp\":%lld}", pad, fut), 7, "bob", 0);
+        free(pad);
+    }
+    /* malformed JSON */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld,}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}x", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld", fut));
+    BAD(fmt("[\"sub\",\"7\"]"));
+    BAD(fmt("\"just a string\""));
+    BAD(fmt("{\"sub\":\"7\" \"username\":\"bob\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":0%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":+%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld.}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"x\":tru,\"exp\":%lld}", fut));
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"x\":NaN,\"exp\":%lld}", fut));
+    BAD(fmt("{'sub':\"7\",\"username\":\"bob\",\"exp\":%lld}", fut));
+    BAD(fmt("{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", fut));
+    BAD(strdup(""));
+    OKC(fmt(" \n{ \"sub\" : \"7\" ,\t\"username\" :\"bob\" , \"exp\" : %lld } \r\n", fut), 7, "bob", 0);
+    /* headers */
+    char *pl = fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", fut);
+    ADD(sign_with("{\"typ\":\"JWT\",\"alg\":\"HS256\"}", pl, SECRET), JWT_OK, 7, "bob", 0, "typ first");
+    ADD(sign_with("{\"alg\":\"HS256\"}", pl, SECRET), JWT_OK, 7, "bob", 0, "alg only");
+    ADD(sign_with(" { \"alg\" : \"HS\\u0032\\u00356\", \"kid\":[1,2] } ", pl, SECRET), JWT_OK, 7, "bob", 0, "escaped alg");
+    ADD(sign_with("{\"alg\":\"none\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "alg none (signed)");
+    ADD(sign_with("{\"alg\":\"HS512\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "HS512");
+    ADD(sign_with("{\"alg\":\"hs256\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "hs256");
+    ADD(sign_with("{\"alg\":0}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "alg 0");
+    ADD(sign_with("{}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "{}");
+    ADD(sign_with("{\"typ\":\"JWT\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "no alg");
+    ADD(sign_with("{\"alg\":\"HS256\",\"alg\":\"HS256\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "dup alg");
+    ADD(sign_with("{\"alg\":\"HS256\"", pl, SECRET), JWT_INVALID, 0, NULL, 0, "hdr truncated");
+    ADD(sign_with("[\"alg\",\"HS256\"]", pl, SECRET), JWT_INVALID, 0, NULL, 0, "hdr array");
+    ADD(sign_with(HS, pl, "wrong-secret"), JWT_INVALID, 0, NULL, 0, "wrong secret");
+    /* structural damage on the good token */
+    {
+        int L = (int)strlen(good);
+        char *t;
+        t = strdup(good), t[L - 1] = t[L - 1] == 'A' ? 'B' : 'A';
+        ADD(t, JWT_INVALID, 0, NULL, 0, "last sig char changed");
+        /* same top 4 bits, different (non-zero) low 2 bits: identical MAC bytes, non-canonical */
+        t = strdup(good);
+        {
+            int v = (int)(strchr(B64U, t[L - 1]) - B64U);
+            t[L - 1] = B64U[v | 1];
+        }
+        ADD(t, JWT_INVALID, 0, NULL, 0, "non-canonical sig");
+        t = strdup(good), t[3] ^= 1;
+        ADD(t, JWT_INVALID, 0, NULL, 0, "header bit flip");
+        t = strdup(good), t[40] = t[40] == 'x' ? 'y' : 'x';
+        ADD(t, JWT_INVALID, 0, NULL, 0, "payload char changed");
+        ADD(fmt("%s=", good), JWT_INVALID, 0, NULL, 0, "sig padding");
+        ADD(fmt("%s.", good), JWT_INVALID, 0, NULL, 0, "trailing dot");
+        ADD(fmt("%sA", good), JWT_INVALID, 0, NULL, 0, "sig too long");
+        ADD(strndup(good, L - 1), JWT_INVALID, 0, NULL, 0, "sig too short");
+        ADD(fmt("x.%s", good), JWT_INVALID, 0, NULL, 0, "extra segment");
+        ADD(fmt(".%s", strchr(good, '.') + 1), JWT_INVALID, 0, NULL, 0, "empty header");
+        ADD(fmt("%.36s..%s", good, strrchr(good, '.') + 1), JWT_INVALID, 0, NULL, 0, "empty payload");
+        ADD(fmt("Bearer %s", good), JWT_INVALID, 0, NULL, 0, "with Bearer prefix");
+        t = strdup(good), t[37] = '+';
+        ADD(t, JWT_INVALID, 0, NULL, 0, "base64 (not url) char");
+        t = strdup(good), t[10] = '\0';
+        ADD(t, JWT_INVALID, 0, NULL, 0, "NUL inside (len says full)");
+        c[n - 1].what = "nul";
+    }
+    /* payload not valid base64url but correctly signed: the MAC covers the raw text */
+    {
+        char *raw = fmt("%s.%s", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "e30*");
+        uint8_t d[32];
+        unsigned dl;
+        HMAC(EVP_sha256(), SECRET, (int)strlen(SECRET), (uint8_t *)raw, strlen(raw), d, &dl);
+        char sg[64];
+        b64u_enc(sg, d, 32);
+        ADD(fmt("%s.%s", raw, sg), JWT_INVALID, 0, NULL, 0, "signed garbage payload");
+    }
+
+    int lens[256];
+    const char *toks[256];
+    jwt_key_t k;
+    jwt_key_init(&k, SECRET, strlen(SECRET));
+    for (int i = 0; i < n; i++) {
+        size_t tl = strlen(c[i].tok) > strlen(good) ? strlen(c[i].tok) : strlen(good);
+        char *padded = calloc(tl + 65, 1); /* JWT_INPUT_PADDED contract */
+        memcpy(padded, c[i].tok, strlen(c[i].tok));
+        toks[i] = padded;
+        lens[i] = (int)strlen(c[i].tok);
+        if (!strcmp(c[i].what, "nul")) memcpy((char *)toks[i], c[i].tok, strlen(good)), lens[i] = (int)strlen(good);
+    }
+    for (int e = 0; e < NENG; e++) {
+        if (!engines[e].verify) continue;
+        for (int bsz = 1; bsz <= n; bsz = bsz < 8 && !quick ? bsz + 1 : bsz * 3) {
+            jwt_result_t res[256];
+            for (int i = 0; i < n; i += bsz) engines[e].verify(&k, n - i < bsz ? n - i : bsz, toks + i, lens + i, now, res + i);
+            for (int i = 0; i < n; i++) {
+                jwt_result_t *r = &res[i];
+                int ok = r->status == c[i].status;
+                if (ok && r->status == JWT_OK) {
+                    size_t el = strlen(c[i].name);
+                    if (!strcmp(c[i].name, "nul")) el = 4;
+                    ok = r->uid == c[i].uid && r->username_len == el && !memcmp(r->username, c[i].name, el) &&
+                         r->username_escape == c[i].esc;
+                }
+                if (ok && r->status != JWT_OK) ok = r->uid == 0 && r->username_len == 0;
+                CHECK(ok, "case %d [%s] engine %s batch %d: got status %d uid %lld name '%.*s' esc %d, want %d", i,
+                      c[i].what, engines[e].name, bsz, r->status, (long long)r->uid, r->username_len, r->username,
+                      r->username_escape, c[i].status);
+            }
+        }
+    }
+    printf("  %d crafted cases\n", n);
+}
+
+int main(int argc, char **argv) {
+    const char *path = argc > 1 ? argv[1] : "build/tokens.json";
+    int n;
+    seedtok_t *t = load_tokens(path, &n);
+    int64_t now = (int64_t)time(NULL);
+    quick = getenv("JWT_TEST_QUICK") != NULL;
+    printf("engines:");
+    for (int e = 0; e < NENG; e++) printf(" %s", engines[e].name);
+    printf("\n");
+    test_ternlog_immediates();
+    test_b64();
+    test_jint();
+    test_hmac_random();
+    printf("  %d generated tokens\n", n);
+    test_seed(t, n, now);
+    test_cases(now);
+    test_json_diff(now);
+#ifdef JWT_HAVE_LANES
+    test_json_lanes(now);
+#endif
+    printf("%s: %d/%d checks passed\n", fails ? "FAILED" : "OK", checks - fails, checks);
+    return fails != 0;
+}
