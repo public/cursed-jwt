@@ -10,6 +10,8 @@
 #   make licence      AVX-512 frequency-licence probe (meaningful only on AVX-512 hardware)
 #   make pk-test      RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
 #   make pk-bench     RS256 / ES256 ns/token vs OpenSSL (network for the fiat-crypto fetch)
+#   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
+#   make pk-test-fast / pk-bench-fast s2n-bignum for P-256 + OpenSSL's BN asm for RSA (-DJWT_S2N -DJWT_OPENSSL)
 # Engine selection is compile-time, from ARCHFLAGS (see README.md).
 CC ?= cc
 PYTHON ?= python3
@@ -110,6 +112,42 @@ PK := -DJWT_PK -Ithird_party/fiat
 PKSRC := $(SRC) src/jwt_pk.inc third_party/fiat/p256_64.c
 third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
 	./scripts/fetch-fiat.sh
+# -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)
+S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
+S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
+             fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n
+S2N := -DJWT_S2N $(B)/libs2n.a
+$(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
+	./scripts/fetch-s2n-bignum.sh
+	mkdir -p $(B)/s2n
+	for f in $(S2N_FILES); do $(CC) -c -DS2N_BN_HIDE_SYMBOLS=1 -Ithird_party/s2n-bignum/include \
+	  third_party/s2n-bignum/$(S2N_ARCH)/$$f.S -o $(B)/s2n/$${f#*/}.o || exit 1; done
+	rm -f $@ && ar rcs $@ $(addprefix $(B)/s2n/,$(addsuffix .o,$(notdir $(S2N_FILES))))
+$(B)/test_pk_s2n: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(S2N) -o $@
+$(B)/test_pk_s2n_screen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(S2N) -o $@
+$(B)/bench_pk_s2n: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $(SSLINC) $< $(S2N) $(SSLLIB) -lcrypto -o $@
+$(B)/bench_pk_s2n_screen: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $(SSLINC) $< $(S2N) $(SSLLIB) -lcrypto -o $@
+# -DJWT_OPENSSL: RSA arithmetic through libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery (OpenSSL's asm);
+# pk-test-fast / pk-bench-fast build the fastest combination: s2n-bignum for P-256, OpenSSL for RSA
+FAST := -DJWT_S2N -DJWT_OPENSSL $(SSLINC) $(B)/libs2n.a $(SSLLIB) -lcrypto
+$(B)/test_pk_fast: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(FAST) -o $@
+$(B)/test_pk_fast_screen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(FAST) -o $@
+$(B)/bench_pk_fast: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(FAST) -o $@
+$(B)/bench_pk_fast_screen: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(FAST) -o $@
+pk-test-fast: $(B)/test_pk_fast $(B)/test_pk_fast_screen $(B)/pk_vectors.txt
+	./$(B)/test_pk_fast $(B)/pk_vectors.txt
+	./$(B)/test_pk_fast_screen $(B)/pk_vectors.txt
+pk-bench-fast: $(B)/bench_pk_fast $(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
+	./$(B)/bench_pk_fast $(B)/pk_tokens.txt
+	./$(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
 $(B)/pk_vectors.txt: tests/make_pk_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
 	./scripts/fetch-vectors.sh
 	$$(cat $(B)/pyenv) -I tests/make_pk_vectors.py third_party/vectors $(VECTORS_N) 1 > $@
@@ -126,6 +164,9 @@ pk-test: $(B)/test_pk $(B)/test_pk_screen $(B)/test_pk_w5 $(B)/test_pk_w7 $(B)/p
 	./$(B)/test_pk_screen $(B)/pk_vectors.txt
 	./$(B)/test_pk_w5 $(B)/pk_vectors.txt | tail -1
 	./$(B)/test_pk_w7 $(B)/pk_vectors.txt | tail -1
+pk-test-s2n: $(B)/test_pk_s2n $(B)/test_pk_s2n_screen $(B)/pk_vectors.txt
+	./$(B)/test_pk_s2n $(B)/pk_vectors.txt
+	./$(B)/test_pk_s2n_screen $(B)/pk_vectors.txt
 $(B)/pk_tokens.txt: bench/gen_pk_tokens.py $(B)/pyenv
 	$$(cat $(B)/pyenv) -I bench/gen_pk_tokens.py 64 1 > $@
 $(B)/bench_pk: bench/bench_pk.c $(PKSRC) | $(B)
@@ -135,9 +176,12 @@ $(B)/bench_pk_screen: bench/bench_pk.c $(PKSRC) | $(B)
 pk-bench: $(B)/bench_pk $(B)/bench_pk_screen $(B)/pk_tokens.txt
 	./$(B)/bench_pk $(B)/pk_tokens.txt
 	./$(B)/bench_pk_screen $(B)/pk_tokens.txt
+pk-bench-s2n: $(B)/bench_pk_s2n $(B)/bench_pk_s2n_screen $(B)/pk_tokens.txt
+	./$(B)/bench_pk_s2n $(B)/pk_tokens.txt
+	./$(B)/bench_pk_s2n_screen $(B)/pk_tokens.txt
 pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
 	ASAN_OPTIONS=detect_leaks=0 ./$(B)/asan_pk $(B)/pk_vectors.txt
 
 clean:
 	rm -rf $(B)
-.PHONY: pk-test pk-asan pk-bench all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean

@@ -130,10 +130,18 @@ static void test_arith(void) {
     for (int it = 0; it < n; it++) {
         uint64_t a[4], b[4], x[4], y[4];
         rand_below(a, P256_P), rand_below(b, P256_P);
-        fe_mul(x, a, b), fiat_p256_mul(y, a, b);
-        bad += memcmp(x, y, 32) != 0;
-        fe_sqr(x, a), fiat_p256_square(y, a);
-        bad += memcmp(x, y, 32) != 0;
+        fiat_p256_mul(y, a, b);
+        fe_mul(x, a, b), bad += memcmp(x, y, 32) != 0;
+        fe_mul_c(x, a, b), bad += memcmp(x, y, 32) != 0;
+        fiat_p256_square(y, a);
+        fe_sqr(x, a), bad += memcmp(x, y, 32) != 0;
+        fe_sqr_c(x, a), bad += memcmp(x, y, 32) != 0;
+        fiat_p256_add(y, a, b);
+        fe_add(x, a, b), bad += memcmp(x, y, 32) != 0;
+        fe_add_c(x, a, b), bad += memcmp(x, y, 32) != 0;
+        fiat_p256_sub(y, a, b);
+        fe_sub(x, a, b), bad += memcmp(x, y, 32) != 0;
+        fe_sub_c(x, a, b), bad += memcmp(x, y, 32) != 0;
         rand_below(a, P256_N);
         if (fe_iszero(a)) continue;
         uint64_t am[4], im[4], one[4];
@@ -144,7 +152,27 @@ static void test_arith(void) {
         bad += !u256_is1(one);
     }
     CHECK(!bad, "field / scalar arithmetic: %d mismatches against fiat-crypto", bad);
-    printf("  P-256 fe_mul/fe_sqr vs fiat_p256_mul/square, sc_inv: %d random + edge inputs\n", n);
+#ifdef JWT_S2N
+    { /* RSA-2048 Montgomery: s2n-bignum kernels vs the C ones */
+        uint8_t nb[256], e3[3] = {1, 0, 1};
+        for (int i = 0; i < 256; i++) nb[i] = (uint8_t)rnd();
+        nb[0] |= 0x80, nb[255] |= 1;
+        jwt_pkey_t *pk = jwt_pkey_rs256(nb, 256, e3, 3);
+        uint64_t u[32], v[32], w1[32], w2[32];
+        int rb = 0;
+        for (int it = 0; it < 20000; it++) {
+            for (int i = 0; i < 32; i++) u[i] = (uint64_t)rnd() << 32 ^ rnd(), v[i] = (uint64_t)rnd() << 32 ^ rnd();
+            u[31] &= pk->rsa.n[31] >> 1, v[31] &= pk->rsa.n[31] >> 1; /* < n */
+            if (it & 1) memcpy(u, pk->rsa.n, 256), u[0] -= 2; /* n - 2 */
+            mont_mul_s2n(w1, u, v, &pk->rsa), mont_mul_32(w2, u, v, &pk->rsa), rb += memcmp(w1, w2, 256) != 0;
+            mont_sqr_s2n(w1, u, &pk->rsa), mont_sqr_32(w2, u, &pk->rsa), rb += memcmp(w1, w2, 256) != 0;
+        }
+        CHECK(!rb, "RSA-2048 Montgomery: %d s2n-bignum / C mismatches", rb);
+        jwt_pkey_free(pk);
+        printf("  s2n-bignum (-DJWT_S2N): P-256 field ops and RSA-2048 mont mul/sqr cross-checked\n");
+    }
+#endif
+    printf("  P-256 fe_mul/sqr/add/sub (selected and C) vs fiat-crypto, sc_inv: %d random + edge inputs\n", n);
 }
 
 int main(int argc, char **argv) {

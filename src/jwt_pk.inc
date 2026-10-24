@@ -18,6 +18,9 @@
  *          the whole batch, ~2 multiplications per token + 1 exponentiation, falling back to per-token checks
  *          when it fails.  Screening proves every *message* was signed, not that every signature string is
  *          the canonical one (s1*x, s2/x pass together), so it is opt-in.  PK.md discusses it.
+ *
+ * Arithmetic backends (PK.md "Backends" has the measurements): portable C by default; -DJWT_S2N links s2n-bignum's
+ * verified assembly for the P-256 field and RSA-2048; -DJWT_OPENSSL hands RSA to libcrypto's BN Montgomery asm.
  */
 #include "p256_64.c"
 #include "p256_scalar_64.c"
@@ -47,7 +50,15 @@ typedef struct {
 #ifdef JWT_RSA_SCREEN
     uint64_t kc[16][RSA_MAXL];          /* R^((c-1)(e-1)) mod n for a screened batch of c = 1..16 */
 #endif
+#ifdef JWT_OPENSSL
+    struct bignum_st *bn_n, *bn_e, *bn_kcm[16]; /* the same values for libcrypto; kcm = kc R (Montgomery form) */
+    struct bn_mont_ctx_st *mont;
+#endif
 } rsa_key_t;
+
+#ifdef JWT_OPENSSL
+static int rsa_ossl_init(rsa_key_t *k);
+#endif
 
 struct jwt_pkey {
     int alg; /* 1 RS256, 2 ES256 */
@@ -114,7 +125,7 @@ static const uint8_t P256_GY[32] = {0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x
 
 /* a + b, a - b, -a mod p for a, b < p; branch-free but without fiat's value barriers (public data only) */
 static const uint64_t P256_P[4];
-JWT_INLINE void fe_add(fe_t o, const fe_t a, const fe_t b) {
+JWT_INLINE void fe_add_c(fe_t o, const fe_t a, const fe_t b) {
     unsigned __int128 z = 0;
     uint64_t t[4], r[4], bw = 0;
     for (int i = 0; i < 4; i++) z = (unsigned __int128)a[i] + b[i] + (uint64_t)(z >> 64), t[i] = (uint64_t)z;
@@ -126,7 +137,7 @@ JWT_INLINE void fe_add(fe_t o, const fe_t a, const fe_t b) {
     uint64_t keep = (uint64_t)0 - (bw & ~cy); /* borrow and no carry: a + b < p */
     for (int i = 0; i < 4; i++) o[i] = (t[i] & keep) | (r[i] & ~keep);
 }
-JWT_INLINE void fe_sub(fe_t o, const fe_t a, const fe_t b) {
+JWT_INLINE void fe_sub_c(fe_t o, const fe_t a, const fe_t b) {
     uint64_t t[4], bw = 0;
     for (int i = 0; i < 4; i++) {
         unsigned __int128 d = (unsigned __int128)a[i] - b[i] - bw;
@@ -136,10 +147,8 @@ JWT_INLINE void fe_sub(fe_t o, const fe_t a, const fe_t b) {
     unsigned __int128 z = 0;
     for (int i = 0; i < 4; i++) z = (unsigned __int128)t[i] + (P256_P[i] & mask) + (uint64_t)(z >> 64), o[i] = (uint64_t)z;
 }
-JWT_INLINE void fe_opp(fe_t o, const fe_t a) {
-    static const fe_t zero = {0};
-    fe_sub(o, zero, a);
-}
+#define fe_opp(o, a) fe_sub(o, P256_ZERO, a)
+static const fe_t P256_ZERO = {0};
 
 /* o = a b / 2^256 mod p for a, b < p (Montgomery, CIOS).  p's limbs are 2^64-1, 2^32-1, 0, 2^64-2^32+1 and
  * -p^-1 = 1 mod 2^64, so each reduction round takes m = t0 and needs two multiplications instead of four, the
@@ -147,7 +156,7 @@ JWT_INLINE void fe_opp(fe_t o, const fe_t a) {
  * than fiat's generic word-by-word code here (which also carries value barriers for constant time). */
 #define P256_P1 0x00000000ffffffffull
 #define P256_P3 0xffffffff00000001ull
-JWT_INLINE void fe_mul(fe_t o, const fe_t a, const fe_t b) {
+JWT_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
     uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5, c, m;
     unsigned __int128 z;
     for (int i = 0; i < 4; i++) {
@@ -173,7 +182,29 @@ JWT_INLINE void fe_mul(fe_t o, const fe_t a, const fe_t b) {
     if (t4 >= bw) o[0] = r0, o[1] = r1, o[2] = r2, o[3] = r3; /* no net borrow: t >= p */
     else o[0] = t0, o[1] = t1, o[2] = t2, o[3] = t3;
 }
-#define fe_sqr(o, a) fe_mul(o, a, a)
+#define fe_sqr_c(o, a) fe_mul_c(o, a, a)
+
+#if defined(JWT_S2N) && defined(__x86_64__) && !(defined(__BMI2__) && defined(__ADX__))
+#error "JWT_S2N on x86-64 needs BMI2 and ADX (s2n-bignum uses mulx/adcx/adox): build with -march=broadwell or later"
+#endif
+#ifdef JWT_S2N
+/* -DJWT_S2N: AWS s2n-bignum's formally verified assembly (scripts/fetch-s2n-bignum.sh, MIT-0), Montgomery
+ * multiply / square and modular add / sub for p_256.  Same domain and contracts as the C versions above, which
+ * tests/test_pk.c still cross-checks against fiat-crypto alongside these. */
+void bignum_montmul_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void bignum_montsqr_p256(uint64_t z[4], const uint64_t x[4]);
+void bignum_add_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void bignum_sub_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+#define fe_mul(o, a, b) bignum_montmul_p256(o, a, b)
+#define fe_sqr(o, a) bignum_montsqr_p256(o, a)
+#define fe_add(o, a, b) bignum_add_p256(o, a, b)
+#define fe_sub(o, a, b) bignum_sub_p256(o, a, b)
+#else
+#define fe_mul fe_mul_c
+#define fe_sqr fe_sqr_c
+#define fe_add fe_add_c
+#define fe_sub fe_sub_c
+#endif
 
 /* a^(p-2): init only (table building) */
 static void fe_inv(fe_t o, const fe_t a) {
@@ -566,9 +597,33 @@ MONT_SIZE(48)
 MONT_SIZE(64)
 static void mont_mul_any(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) { mont_mul(r, a, b, k->n, k->n0, k->nl); }
 static void mont_sqr_any(uint64_t *r, const uint64_t *a, const rsa_key_t *k) { mont_sqr(r, a, k->n, k->n0, k->nl); }
+#ifdef JWT_S2N
+/* -DJWT_S2N, 2048-bit moduli: s2n-bignum's Karatsuba product / square (bignum_kmul_32_64, bignum_ksqr_32_64) and
+ * its 8-limb-blocked Montgomery reduction (bignum_emontredc_8n), as AWS-LC uses them for RSA-2048.  emontredc
+ * leaves z + q n = 2^2048 (c 2^2048 + hi): hi plus carry c is the unreduced result, < 2n. */
+void bignum_kmul_32_64(uint64_t z[64], const uint64_t x[32], const uint64_t y[32], uint64_t t[96]);
+void bignum_ksqr_32_64(uint64_t z[64], const uint64_t x[32], uint64_t t[72]);
+uint64_t bignum_emontredc_8n(uint64_t k, uint64_t *z, const uint64_t *m, uint64_t w);
+static void mont_mul_s2n(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
+    uint64_t z[64], t[96];
+    bignum_kmul_32_64(z, a, b, t);
+    uint64_t c = bignum_emontredc_8n(32, z, k->n, k->n0);
+    mont_fin(r, z + 32, c, k->n, 32);
+}
+static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
+    uint64_t z[64], t[72];
+    bignum_ksqr_32_64(z, a, t);
+    uint64_t c = bignum_emontredc_8n(32, z, k->n, k->n0);
+    mont_fin(r, z + 32, c, k->n, 32);
+}
+#endif
 static mont_ops_t mont_for(const rsa_key_t *k) {
     switch (k->nl) {
+#ifdef JWT_S2N
+    case 32: return (mont_ops_t){mont_mul_s2n, mont_sqr_s2n};
+#else
     case 32: return (mont_ops_t){mont_mul_32, mont_sqr_32};
+#endif
     case 48: return (mont_ops_t){mont_mul_48, mont_sqr_48};
     case 64: return (mont_ops_t){mont_mul_64, mont_sqr_64};
     default: return (mont_ops_t){mont_mul_any, mont_sqr_any};
@@ -655,6 +710,9 @@ jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size
     be_to_limbs(k->em, nl, em, kk);
     pk->alg = PK_RS256, pk->name = "RS256", pk->canon = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
     pk->sig_bytes = kk, pk->sig_chars = (kk * 4 + 2) / 3;
+#ifdef JWT_OPENSSL
+    if (!rsa_ossl_init(k)) { jwt_pkey_free(pk); return NULL; }
+#endif
     return pk;
 }
 
@@ -669,6 +727,82 @@ static int rsa_lt_n(const uint64_t *s, const rsa_key_t *k) {
         if (s[j] != k->n[j]) return s[j] < k->n[j];
     return 0;
 }
+
+#ifdef JWT_OPENSSL
+/* -DJWT_OPENSSL: the RSA arithmetic goes to libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery, i.e. OpenSSL's
+ * hand-written bn_mul_mont / sqr8x assembly, which neither the C here nor s2n-bignum beats (PK.md).  Everything
+ * else stays ours: the token front end, the exact PKCS#1 block compare, screening.  Limbs are little-endian
+ * uint64 arrays, so on a little-endian host they are BN_lebin2bn byte strings. */
+#include <openssl/bn.h>
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "JWT_OPENSSL assumes a little-endian host"
+#endif
+static int rsa_ossl_init(rsa_key_t *k) {
+    BN_CTX *ctx = BN_CTX_new();
+    k->bn_n = BN_lebin2bn((const uint8_t *)k->n, 8 * k->nl, NULL);
+    k->bn_e = BN_new();
+    k->mont = BN_MONT_CTX_new();
+    int ok = ctx && k->bn_n && k->bn_e && k->mont && BN_set_word(k->bn_e, k->e) && BN_MONT_CTX_set(k->mont, k->bn_n, ctx);
+#ifdef JWT_RSA_SCREEN
+    for (int c = 0; ok && c < 16; c++)
+        ok = (k->bn_kcm[c] = BN_lebin2bn((const uint8_t *)k->kc[c], 8 * k->nl, NULL)) &&
+             BN_to_montgomery(k->bn_kcm[c], k->bn_kcm[c], k->mont, ctx);
+#endif
+    BN_CTX_free(ctx);
+    return ok;
+}
+static void rsa_ossl_free(rsa_key_t *k) {
+    BN_free(k->bn_n), BN_free(k->bn_e), BN_MONT_CTX_free(k->mont);
+    for (int c = 0; c < 16; c++) BN_free(k->bn_kcm[c]);
+}
+static int bn_eq_limbs(const BIGNUM *x, const uint64_t *em, int nl) {
+    uint64_t t[RSA_MAXL], d = 0;
+    if (BN_bn2lebinpad(x, (uint8_t *)t, 8 * nl) < 0) return 0;
+    for (int j = 0; j < nl; j++) d |= t[j] ^ em[j];
+    return d == 0;
+}
+/* Which kernels win (PK.md, measured): on x86-64, s2n-bignum's mulx/adx RSA-2048 code beats libcrypto (16.2 vs 20.0 us
+ * per verify on a Cascade Lake); on arm64 libcrypto's armv8-mont beats s2n-bignum (8.4 vs 13.2 us on an M5); for
+ * 3072/4096-bit moduli s2n-bignum has no fixed-size kernel here and libcrypto beats the C. */
+static int rsa_use_ossl(const rsa_key_t *k) {
+#if defined(JWT_S2N) && defined(__x86_64__)
+    return k->nl != 32;
+#else
+    (void)k;
+    return 1;
+#endif
+}
+static void rs256_ossl(const rsa_key_t *k, int c, uint64_t (*s)[RSA_MAXL], uint64_t (*em)[RSA_MAXL], const int *at,
+                       uint8_t *ok) {
+    BN_CTX *ctx = BN_CTX_new();
+    if (!ctx) return; /* allocation failure: everything stays rejected */
+    BN_CTX_start(ctx);
+    BIGNUM *x = BN_CTX_get(ctx), *a = BN_CTX_get(ctx), *b = BN_CTX_get(ctx), *t = BN_CTX_get(ctx);
+    if (!t) goto out;
+    (void)b;
+#ifdef JWT_RSA_SCREEN
+    if (c >= 2) { /* the same algebra as the C screening below, with libcrypto's Montgomery products */
+        BN_lebin2bn((const uint8_t *)s[0], 8 * k->nl, a), BN_lebin2bn((const uint8_t *)em[0], 8 * k->nl, b);
+        for (int i = 1; i < c; i++) {
+            BN_lebin2bn((const uint8_t *)s[i], 8 * k->nl, t), BN_mod_mul_montgomery(a, a, t, k->mont, ctx);
+            BN_lebin2bn((const uint8_t *)em[i], 8 * k->nl, t), BN_mod_mul_montgomery(b, b, t, k->mont, ctx);
+        }
+        if (BN_mod_exp_mont(x, a, k->bn_e, k->bn_n, ctx, k->mont) && BN_mod_mul_montgomery(x, x, k->bn_kcm[c - 1], k->mont, ctx) &&
+            !BN_cmp(x, b)) {
+            for (int i = 0; i < c; i++) ok[at[i]] = 1;
+            goto out;
+        }
+    }
+#endif
+    for (int i = 0; i < c; i++) {
+        BN_lebin2bn((const uint8_t *)s[i], 8 * k->nl, a);
+        ok[at[i]] = BN_mod_exp_mont(x, a, k->bn_e, k->bn_n, ctx, k->mont) && bn_eq_limbs(x, em[i], k->nl);
+    }
+out:
+    BN_CTX_end(ctx);
+    BN_CTX_free(ctx);
+}
+#endif
 
 static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const uint64_t *em) {
     uint64_t sr[RSA_MAXL], x[RSA_MAXL], one[RSA_MAXL] = {1};
@@ -699,6 +833,12 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             rsa_em(em[c], k, h);
             at[c++] = t;
         }
+#ifdef JWT_OPENSSL
+        if (rsa_use_ossl(k)) {
+            rs256_ossl(k, c, s, em, at, ok);
+            continue;
+        }
+#endif
 #ifdef JWT_RSA_SCREEN
         /* A = prod s_i R^-(c-1), B = prod EM_i R^-(c-1) by chained Montgomery products of the raw values; then
          * (prod s)^e == prod EM  <=>  A^e R^((c-1)(e-1)) == B  <=>  mont(pow(A R), kc[c-1]) == B.
@@ -724,7 +864,11 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
 
 /* ---------------------------------------------------------------------------------- front end */
 void jwt_pkey_free(jwt_pkey_t *k) {
-    if (k) free(k->tg), free(k);
+    if (!k) return;
+#ifdef JWT_OPENSSL
+    if (k->alg == PK_RS256) rsa_ossl_free(&k->rsa);
+#endif
+    free(k->tg), free(k);
 }
 
 void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,

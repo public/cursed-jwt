@@ -103,9 +103,11 @@ jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes i
 #endif
 
 /* ---- RS256 / ES256 (prototype; build with -DJWT_PK, needs scripts/fetch-fiat.sh, see PK.md) ----
+ * Optional asm backends: -DJWT_S2N (s2n-bignum, scripts/fetch-s2n-bignum.sh, link build/libs2n.a) and
+ * -DJWT_OPENSSL (libcrypto BN for RSA, link -lcrypto); with both, the fastest kernel per platform and key size.
  * The same front end and claim rules as jwt_verify_batch, with a public key instead of a secret.  The key
  * fixes the algorithm: a token's header "alg" must equal it (no alg confusion).  Key setup does the
- * expensive per-key work once (ES256: comb tables of ~300 KB for u1*G + u2*Q; RS256: Montgomery constants). */
+ * expensive per-key work once (ES256: comb tables of 528 KB for u1*G + u2*Q; RS256: Montgomery constants). */
 typedef struct jwt_pkey jwt_pkey_t;
 /* ES256: the public point's affine coordinates, big-endian.  NULL if not a point on P-256. */
 jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]);

@@ -164,6 +164,7 @@ make avx512       # real AVX-512VL test + bench binaries (run them on AVX-512 ha
 make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
 make pk-test      # RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
 make pk-bench     # RS256 / ES256 ns/token vs OpenSSL, with and without RSA batch screening
+make pk-test-fast pk-bench-fast   # the same with s2n-bignum + libcrypto BN kernels (fetched pinned / Homebrew)
 ```
 
 ```bash
@@ -254,6 +255,19 @@ Full verify, ns/token, default build (AVX-512VL + shape-matched JSON):
 |---|---|---|---|---|---|---|---|
 | shape-matched JSON (default) | **1,178** | 691 | 508 | 417 | **277** | 272 | 268 |
 | strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,276 | 801 | 617 | 522 | 376 | 369 | 363 |
+
+**RS256 / ES256 (opt-in prototype, `-DJWT_PK`).** µs per token, by batch size; OpenSSL is `EVP_DigestVerify`, one
+token at a time. This is the fast build (`-DJWT_S2N -DJWT_OPENSSL`). Batch mode for RS256 is `-DJWT_RSA_SCREEN`,
+which has a caveat about signature malleability. [PK.md](PK.md) has the method, the other builds and the caveat.
+
+| | 1 | 2 | 4 | 8 | 16 | OpenSSL |
+|---|---|---|---|---|---|---|
+| ES256, Xeon | 21.7 | 18.4 | 16.7 | 15.8 | **15.4** | 78.6 |
+| ES256, M5 | 10.8 | 9.6 | 9.4 | 9.3 | **9.2** | 32.4 |
+| RS256-2048 one at a time, Xeon | 16.5 | 16.5 | 16.4 | 16.5 | 16.4 | 23.1 |
+| RS256-2048 batch mode, Xeon | 16.4 | 9.7 | 6.3 | 4.6 | **3.8** | 23.1 |
+| RS256-2048 one at a time, M5 | 8.5 | 8.4 | 8.3 | 8.4 | 8.3 | 9.0 |
+| RS256-2048 batch mode, M5 | 8.5 | 5.5 | 3.7 | 2.8 | **2.35** | 9.0 |
 
 **Against established libraries** on the same box, the same tokens and the same job (HS256, `exp` required, `sub`
 and `username` read). Every implementation accepted the same tokens and rejected a forged one.
