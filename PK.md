@@ -24,12 +24,15 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - A verify is then 2 × 33 mixed additions with no doublings. Compare OpenSSL's ~256 doublings + ~90 additions.
   - The x-coordinate check is projective (X = r·Z²), so a token needs no field inversion. All the s⁻¹ in a batch
     share one inversion.
-  - **Measured: 2.0–3.5× faster than OpenSSL**, at batch 1 too:
+  - **Measured: 2.8–3.7× faster than OpenSSL**, and already ≥ 2.8× at batch 1 on the M5:
 
-    | | M5 | Xeon |
-    |---|---|---|
-    | cursed-jwt, batch 16 | 9.0–9.8 µs | 37.6 µs |
-    | OpenSSL | 31.6–33.7 µs | 76.3 µs |
+    | ES256 verify, µs | M5 (Apple clang) | Xeon, clang 18 | Xeon, gcc 13 |
+    |---|---|---|---|
+    | cursed-jwt, batch 1 | 11.0–12.0 | 28.2 | 45.1 |
+    | cursed-jwt, batch 16 | 9.0–9.8 | **21.6** | 37.7 |
+    | OpenSSL `EVP_DigestVerify` | 32.4–33.7 | 79.1 | 79.1 |
+
+  - On x86, build the PK code with clang: gcc's code for the 128-bit carry chains is 1.7× slower.
 
   - The field arithmetic is portable C (fiat-crypto's verified code, plus a P-256-specific Montgomery multiply).
     Swapping in assembly (OpenSSL's ecp_nistz256 or AWS's s2n-bignum) is the obvious next step.
@@ -40,8 +43,15 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 
     (∏ sᵢ)^e ≡ ∏ EMᵢ (mod n)
 
-    That is 2 multiplications per token + 17 per batch, instead of 19 per token. On the M5, RSA-2048 costs
-    **2.7–2.8 µs per token at batch 16, against OpenSSL's 8.4–8.9 µs (3.1×)**.
+    That is 2 multiplications per token + 17 per batch, instead of 19 per token. RSA-2048 at batch 16:
+
+    | RS256-2048 verify, µs | M5 | Xeon, clang 18 | Xeon, gcc 13 |
+    |---|---|---|---|
+    | cursed-jwt, one at a time | 13.3–14.6 | 34.4 | 40.7 |
+    | cursed-jwt screened, batch 16 | **2.7–2.8** | **6.9** | 8.0 |
+    | OpenSSL `EVP_DigestVerify` | 9.3–10.3 | 23.0 | 23.0 |
+
+    Screening is 3.3× faster than OpenSSL on both machines; one at a time, the C is 1.4–1.8× slower.
   - **The catch:** screening proves that every *message* was signed. It does not prove that every *signature string*
     is the canonical one: s₁·x and s₂/x pass together. So it's opt-in (`-DJWT_RSA_SCREEN`); see below.
 - **EdDSA isn't prototyped yet, but it is where the biggest ratio is.** OpenSSL's Ed25519 verify is slow (38 µs on
@@ -68,19 +78,18 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 
 | implementation | technique | M5 µs | Xeon µs | licence |
 |---|---|---|---|---|
-| OpenSSL 3.x `ecp_nistz256` (Gueron–Krasnov asm) | fixed-base comb for G; wNAF for Q (~256 doublings) | **32.4** meas. | **78.7** meas. | Apache-2.0 |
+| OpenSSL 3.x `ecp_nistz256` (Gueron–Krasnov asm) | fixed-base comb for G; wNAF for Q (~256 doublings) | **32.4–33.7** meas. | **79.1** meas. | Apache-2.0 |
 | BoringSSL (nistz256 asm + fiat-crypto) | same algorithm as OpenSSL | ~30 est. | ~75 est. | Apache-2.0 (older files ISC) |
 | AWS-LC + s2n-bignum (`p256_montjscalarmul`, formally verified asm) | same shape, verified field ops | ~30 est. | ~70 est. | Apache-2.0 OR ISC (s2n-bignum also MIT-0) |
 | Go `crypto/internal/fips140/nistec` | nistz256 port | ~35 est. | ~85 est. | BSD-3-Clause |
 | ipp-crypto `crypto_mb` `mbx_nistp256_ecdsa_verify_ssl_mb8` | 8 tokens per zmm, 52-bit limbs | n/a (no IFMA) | n/a (no IFMA) | Apache-2.0 |
-| **cursed-jwt prototype** (fiat-crypto C + P-256-specific `fe_mul`) | **fixed-key combs for G and Q (W=8)**, projective x-check, batched s⁻¹ | **11.1–12.0** b1 / **9.0–9.8** b16 meas. | **45.5** b1 / **37.6** b16 meas. | MIT (fiat-crypto MIT) |
-| same with s2n-bignum or nistz256 field asm | swap `fe_mul`/`fe_sqr`/add/sub | ~7 est. | ~20 est. | + Apache-2.0 / MIT-0 |
+| **cursed-jwt prototype** (fiat-crypto C + P-256-specific `fe_mul`) | **fixed-key combs for G and Q (W=8)**, projective x-check, batched s⁻¹ | **11.0–12.0** b1 / **9.0–9.8** b16 meas. | clang **28.2** b1 / **21.6** b16; gcc 45.1 / 37.7 meas. | MIT (fiat-crypto MIT) |
+| same with s2n-bignum or nistz256 field asm | swap `fe_mul`/`fe_sqr`/add/sub | ~7 est. | ~13 est. | + Apache-2.0 / MIT-0 |
 | joint comb table (one add per window for both scalars) | 52 adds instead of 66, ~1.8 MB per key | ~8 est. | n/a: exceeds the 1 MB L2 | — |
 
 - **The "with asm" estimates.** The prototype makes ~730 field multiplications per verify:
-  - The Xeon spends ~51 ns per multiplication, all-in. gcc's 128-bit C is the weak spot there. OpenSSL does
-    ~3,300 field operations (~256 doublings, ~90 additions) in 78.7 µs: ~24 ns each with nistz256's `mulx`/`adx`
-    asm, about 2× faster per operation.
+  - On the Xeon that's ~30 ns per multiplication, all-in, with clang (~51 with gcc). OpenSSL does ~3,300 field
+    operations (~256 doublings, ~90 additions) in 79 µs: ~24 ns each with nistz256's `mulx`/`adx` asm.
   - On the M5 the gap is smaller (C ≈ 43 cycles of latency per multiply).
 - **Batching** adds ~15% from batch 1 to batch 16, because all the s⁻¹ share one inversion.
   - True multi-token SIMD needs IFMA.
@@ -91,13 +100,13 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 
 | implementation | technique | M5 µs (2048 / 3072) | Xeon µs (2048 / 3072) | licence |
 |---|---|---|---|---|
-| OpenSSL 3.x `bn_mul_mont` (armv8-mont / x86_64-mont5, mulx/adx) | 16 sqr + 1 mul, asm | **9.4 / 18.7** meas. | **22.8 / 43.9** meas. | Apache-2.0 |
+| OpenSSL 3.x `bn_mul_mont` (armv8-mont / x86_64-mont5, mulx/adx) | 16 sqr + 1 mul, asm | **9.3–10.3 / 18.1–21.0** meas. | **23.0 / 44.0** meas. | Apache-2.0 |
 | AWS-LC (s2n-bignum `bignum_kmul_32_64` + `bignum_emontredc_8n`) | Karatsuba + verified Montgomery reduction | ~8 / ~17 est. | ~20 / ~40 est. | Apache-2.0 OR ISC / MIT-0 |
 | OpenSSL `rsaz-avx512` / AWS-LC IFMA RSA | 52-bit IFMA | n/a | n/a (no IFMA; also used for private-key CRT, not verify) | Apache-2.0 |
 | ipp-crypto `crypto_mb` RSA public mb8 | 8 moduli per zmm, IFMA | n/a | n/a | Apache-2.0 |
-| **cursed-jwt prototype**, per token | product-scanning Montgomery in C, dedicated squaring | **13.3–14.6 / 28–33** meas. | XEON_RS_SINGLE meas. | MIT |
-| **cursed-jwt `-DJWT_RSA_SCREEN`**, batch 16 | BGR screening, 2 mults/token + 1 exponentiation | **2.7–2.8 / 5.9–6.1** meas. | XEON_RS_SCREEN meas. | MIT |
-| screening + OpenSSL-class multiply (s2n-bignum) | | ~1.8 / ~4 est. | ~5 / ~10 est. | + Apache-2.0 / MIT-0 |
+| **cursed-jwt prototype**, per token | product-scanning Montgomery in C, dedicated squaring | **13.3–14.6 / 28–33** meas. | clang 34.4 / –; gcc 40.7 / 88.8 meas. | MIT |
+| **cursed-jwt `-DJWT_RSA_SCREEN`**, batch 16 | BGR screening, 2 mults/token + 1 exponentiation | **2.7–2.8 / 5.9–6.1** meas. | clang **6.9** / –; gcc 8.0 / 16.7 meas. | MIT |
+| screening + OpenSSL-class multiply (s2n-bignum) | | ~1.8 / ~4 est. | ~4.5 / ~9 est. | + Apache-2.0 / MIT-0 |
 
 - **Ceiling without screening.** Verification is 19 Montgomery operations, which OpenSSL already does in asm.
   Beating it per token needs a better multiplier, and the only candidate is IFMA.
@@ -181,6 +190,9 @@ on:
 - Linux arm64 and amd64 in Docker (gcc 13.3, clang 18.1, plus ASan/UBSan);
 - the real Xeon (gcc 13.3).
 
+HS256 is unchanged by the shared front end (`claims_one`, `header_ok` taking the alg). On the Xeon (exp79), full
+verify is 277.9 ns at batch 8 and 1,178.7 at batch 1; the README has 277 and 1,178. `make test-vectors` passes on the M5.
+
 The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 
 | source | vectors |
@@ -249,7 +261,7 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 1. **ES256 field arithmetic in verified asm.**
    - Fetch s2n-bignum at a pinned commit and link `bignum_montmul_p256`, `bignum_montsqr_p256` and the
      add/sub/neg routines for arm64 and x86-64.
-   - Expected: Xeon ~38 → ~20 µs, M5 ~9.5 → ~7 µs.
+   - Expected: Xeon 21.6 → ~13 µs (clang), M5 ~9.5 → ~7 µs.
    - s2n-bignum is Apache-2.0 OR ISC OR MIT-0; the MIT-0 option needs no notice.
    - The same library's `bignum_kmul_32_64`/`bignum_ksqr_32_64` + `bignum_emontredc_8n` would bring RS256 to
      OpenSSL parity per token, and make screening ~1.5× cheaper again.
