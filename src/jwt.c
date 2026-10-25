@@ -32,12 +32,16 @@
 #define JWT_X86 1
 #if defined(__clang__)
 #define JWT_BEGIN_AVX2 _Pragma("clang attribute push (__attribute__((target(\"avx2,bmi,bmi2\"))), apply_to = function)")
+/* tune=skylake-avx512 carries "prefer 256-bit vectors": without it the compiler auto-vectorises copies and memsets in
+ * this region with zmm, and one zmm instruction drops the core's frequency licence (19% slower for 0.5-1 ms on a
+ * Cascade Lake; measured 29% slower full verify) -- exactly what the ymm-only design avoids. */
 #define JWT_BEGIN_AVX512 \
-    _Pragma("clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx2,bmi,bmi2\"))), apply_to = function)")
+    _Pragma("clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512\"))), apply_to = function)")
 #define JWT_END_TARGET _Pragma("clang attribute pop")
 #else
 #define JWT_BEGIN_AVX2 _Pragma("GCC push_options") _Pragma("GCC target(\"avx2,bmi,bmi2\")")
-#define JWT_BEGIN_AVX512 _Pragma("GCC push_options") _Pragma("GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx2,bmi,bmi2\")")
+#define JWT_BEGIN_AVX512 \
+    _Pragma("GCC push_options") _Pragma("GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512,prefer-vector-width=256\")")
 #define JWT_END_TARGET _Pragma("GCC pop_options")
 #endif
 #endif
@@ -78,8 +82,9 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     }
     int ymm = (xcr0 & 6) == 6, zmm = ymm && (xcr0 & 0xE0) == 0xE0;
     if (ymm && (ebx7 & (1u << 5)) && (ebx7 & (1u << 3)) && (ebx7 & (1u << 8))) f |= JWT_CPU_AVX2; /* + BMI1, BMI2 */
-    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 17)))
-        f |= JWT_CPU_AVX512VL; /* F, VL, BW, DQ */
+    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 17)) &&
+        (ebx7 & (1u << 28)))
+        f |= JWT_CPU_AVX512VL; /* F, VL, BW, DQ, CD */
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
     if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
@@ -98,7 +103,8 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     f |= JWT_CPU_SHA2;
 #endif
 #endif
-    if (getenv("JWT_CPU_MASK")) f &= (unsigned)strtoul(getenv("JWT_CPU_MASK"), NULL, 0) | JWT_CPU_DETECTED; /* tests: pretend */
+    const char *mask = getenv("JWT_CPU_MASK"); /* tests and benchmarks: pretend features are missing */
+    if (mask && *mask) f &= (unsigned)strtoul(mask, NULL, 0) | JWT_CPU_DETECTED;
     jwt_cpu_bits = f;
 }
 static unsigned jwt_cpu(void) {
@@ -733,10 +739,8 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
-JWT_END_TARGET
-JWT_BEGIN_AVX2
+JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 #endif
-JWT_END_TARGET
 #endif /* AVX2 */
 
 /* ---- ARMv8 SHA2 instructions: S independent streams interleaved for latency hiding ---- */

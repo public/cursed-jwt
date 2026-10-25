@@ -15,6 +15,7 @@
 #   make pk-bench     RS256 / ES256 ns/token vs OpenSSL (network for the fiat-crypto fetch)
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
 #   make pk-test-fast / pk-bench-fast s2n-bignum for P-256 + OpenSSL's BN asm for RSA (-DJWT_S2N -DJWT_OPENSSL)
+#   make pk-test-ifma / pk-bench-ifma + Intel crypto_mb 8-way AVX-512 IFMA (Linux x86-64; IFMA CPU to exercise it)
 # Engine selection is compile-time, from ARCHFLAGS (see README.md).
 CC ?= cc
 PYTHON ?= python3
@@ -186,6 +187,23 @@ pk-test-fast: $(B)/test_pk_fast $(B)/test_pk_fast_screen $(B)/pk_vectors.txt
 pk-bench-fast: $(B)/bench_pk_fast $(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
 	./$(B)/bench_pk_fast $(B)/pk_tokens.txt
 	./$(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
+# -DJWT_CRYPTO_MB: Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA (scripts/build-crypto-mb.sh; Linux x86-64; used only
+# on CPUs with IFMA, checked at run time).  pk-test-ifma / pk-bench-ifma = the fast build plus crypto_mb.
+CMB := -DJWT_CRYPTO_MB -Ithird_party/crypto-mb/include third_party/crypto-mb/lib/libcrypto_mb.a
+third_party/crypto-mb/lib/libcrypto_mb.a:
+	./scripts/build-crypto-mb.sh
+$(B)/test_pk_ifma: tests/test_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(CMB) $(FAST) -o $@
+$(B)/test_pk_ifma_noscreen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(CMB) $(FAST) -o $@
+$(B)/bench_pk_ifma: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(CMB) $(FAST) -o $@
+pk-test-ifma: $(B)/test_pk_ifma $(B)/test_pk_ifma_noscreen $(B)/pk_vectors.txt
+	./$(B)/test_pk_ifma $(B)/pk_vectors.txt
+	./$(B)/test_pk_ifma_noscreen $(B)/pk_vectors.txt
+pk-bench-ifma: $(B)/bench_pk_ifma $(B)/pk_tokens.txt
+	./$(B)/bench_pk_ifma $(B)/pk_tokens.txt
+	JWT_CPU_MASK=0xef ./$(B)/bench_pk_ifma $(B)/pk_tokens.txt   # the same binary with IFMA masked off, for comparison
 $(B)/pk_vectors.txt: tests/make_pk_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
 	./scripts/fetch-vectors.sh
 	$$(cat $(B)/pyenv) -I tests/make_pk_vectors.py third_party/vectors $(VECTORS_N) 1 > $@
@@ -222,4 +240,4 @@ pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
 
 clean:
 	rm -rf $(B)
-.PHONY: fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean

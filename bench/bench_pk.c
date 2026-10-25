@@ -163,6 +163,14 @@ int main(int argc, char **argv) {
 #ifdef JWT_RSA_SCREEN
     printf("(built with -DJWT_RSA_SCREEN)\n");
 #endif
+    printf("cpu features 0x%x", jwt_cpu_features());
+#ifdef JWT_CRYPTO_MB
+    printf(", crypto_mb (AVX-512 IFMA): %s", cmb_ok() ? "active" : "inactive");
+#endif
+#ifdef JWT_S2N
+    printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive");
+#endif
+    printf("\n");
     printf("P-256 comb window W=%d (%d windows, %zu KB of tables per ES256 key)\n", JWT_P256_W, P256_NW,
            sizeof(p256_aff_t[P256_NW][P256_H]) * 2 / 1024);
     for (int i = 0; i < ns; i++) bench_set(&sets[i]);

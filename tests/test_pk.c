@@ -182,6 +182,14 @@ static void test_arith(void) {
 }
 
 int main(int argc, char **argv) {
+    printf("  cpu features 0x%x", jwt_cpu_features());
+#ifdef JWT_CRYPTO_MB
+    printf(", crypto_mb (AVX-512 IFMA) path: %s", cmb_ok() ? "ACTIVE" : "inactive, CPU lacks IFMA (fallback paths run)");
+#endif
+#ifdef JWT_S2N
+    printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive, CPU lacks BMI2/ADX");
+#endif
+    printf("\n");
     test_arith();
     FILE *f = fopen(argc > 1 ? argv[1] : "build/pk_vectors.txt", "r");
     if (!f) { perror("vectors"); return 2; }

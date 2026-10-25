@@ -69,7 +69,20 @@ struct jwt_pkey {
     int sig_bytes, sig_chars;
     rsa_key_t rsa;
     p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
+    uint64_t qx[4], qy[4];                   /* ES256: the public point, plain little-endian limbs */
 };
+
+#ifdef JWT_CRYPTO_MB
+/* -DJWT_CRYPTO_MB: Intel's crypto_mb (intel/cryptography-primitives, Apache-2.0; scripts/build-crypto-mb.sh) runs
+ * 8 ES256 verifies or 8 RSA public-key operations at once in 52-bit AVX-512 IFMA lanes, i.e. SIMD across tokens.
+ * Used only when the CPU has AVX-512 IFMA (Ice Lake and later; jwt_cpu); everything else falls back to the paths
+ * below.  Byte order, from Intel's own known-answer tests: r, s, digests and RSA inputs / outputs are big-endian
+ * strings, public-key coordinates and moduli little-endian 64-bit limbs. */
+#include <crypto_mb/ec_nistp256.h>
+#include <crypto_mb/rsa.h>
+#include <crypto_mb/status.h>
+static int cmb_ok(void) { return (jwt_cpu() & JWT_CPU_IFMA) != 0; }
+#endif
 enum { PK_RS256 = 1, PK_ES256 = 2 };
 
 /* ---------------------------------------------------------------------------------- signing-input hashes */
@@ -303,6 +316,7 @@ jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
     k->tq = k->tg + P256_NW;
     fe_t qx, qy, gmx, gmy;
     fiat_p256_to_montgomery(qx, xi), fiat_p256_to_montgomery(qy, yi);
+    memcpy(k->qx, xi, 32), memcpy(k->qy, yi, 32);
     if (!p256_on_curve(qx, qy)) { free(k->tg), free(k); return NULL; }
     be_to_limbs4(gx, P256_GX), be_to_limbs4(gy, P256_GY);
     fiat_p256_to_montgomery(gmx, gx), fiat_p256_to_montgomery(gmy, gy);
@@ -397,6 +411,25 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             at[c++] = t;
         }
         if (!c) continue;
+#ifdef JWT_CRYPTO_MB
+        if (cmb_ok()) { /* 8 verifies per call; short groups repeat their first lane */
+            for (int g = 0; g < c; g += 8) {
+                const int8u *pr[8], *ps[8], *pm[8];
+                const int64u *px[8], *py[8];
+                uint8_t dig[8][32];
+                for (int l = 0; l < 8; l++) {
+                    int j = g + l < c ? g + l : g, t = at[j];
+                    for (int w = 0; w < 4; w++)
+                        for (int b = 0; b < 8; b++) dig[l][8 * w + b] = (uint8_t)(hs[t - base][3 - w] >> (56 - 8 * b));
+                    pr[l] = sig[t], ps[l] = sig[t] + 32, pm[l] = dig[l];
+                    px[l] = (const int64u *)k->qx, py[l] = (const int64u *)k->qy;
+                }
+                mbx_status st = mbx_nistp256_ecdsa_verify_mb8(pr, ps, pm, px, py, NULL, NULL);
+                for (int l = 0; l < 8 && g + l < c; l++) ok[at[g + l]] = MBX_GET_STS(st, l) == MBX_STATUS_OK;
+            }
+            continue;
+        }
+#endif
         /* all s^-1 with one inversion (Montgomery's trick), then u1 = e/s, u2 = r/s as signed digits */
         memcpy(pre[0], sm[0], 32);
         for (int i = 1; i < c; i++) fiat_p256_scalar_mul(pre[i], pre[i - 1], sm[i]);
@@ -717,6 +750,42 @@ out:
 }
 #endif
 
+#ifdef JWT_CRYPTO_MB
+/* crypto_mb handles e = 65537 with full-size 2048 / 3072 / 4096-bit moduli */
+static int rsa_cmb_usable(const rsa_key_t *k) {
+    int bits = 8 * k->k;
+    return cmb_ok() && k->e == 65537 && (bits == 2048 || bits == 3072 || bits == 4096) && (k->n[k->nl - 1] >> 63);
+}
+static void limbs_to_be(uint8_t *o, const uint64_t *x, int kbytes) {
+    for (int i = 0; i < kbytes; i++) o[kbytes - 1 - i] = (uint8_t)(x[i >> 3] >> (8 * (i & 7)));
+}
+/* s_i^65537 mod n for c tokens, 8 per call; short groups repeat their first lane */
+static void rs256_cmb(const rsa_key_t *k, int c, uint64_t (*s)[RSA_MAXL], uint64_t (*em)[RSA_MAXL], const int *at,
+                      uint8_t *ok) {
+    const mbx_RSA_Method *m = mbx_RSA_pub65537_Method(8 * k->k);
+    int8u *buf = malloc((size_t)mbx_RSA_Method_BufSize(m));
+    static _Thread_local uint8_t in[8][512], out[8][512];
+    if (!buf) return; /* allocation failure: everything stays rejected */
+    for (int g = 0; g < c; g += 8) {
+        const int8u *from[8];
+        int8u *to[8];
+        const int64u *np[8];
+        for (int l = 0; l < 8; l++) {
+            int j = g + l < c ? g + l : g;
+            limbs_to_be(in[l], s[j], k->k);
+            from[l] = in[l], to[l] = out[l], np[l] = (const int64u *)k->n;
+        }
+        mbx_status st = mbx_rsa_public_mb8(from, to, np, 8 * k->k, m, buf);
+        for (int l = 0; l < 8 && g + l < c; l++) {
+            uint8_t want[512];
+            limbs_to_be(want, em[g + l], k->k);
+            ok[at[g + l]] = MBX_GET_STS(st, l) == MBX_STATUS_OK && !memcmp(out[l], want, (size_t)k->k);
+        }
+    }
+    free(buf);
+}
+#endif
+
 static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const uint64_t *em) {
     uint64_t sr[RSA_MAXL], x[RSA_MAXL], one[RSA_MAXL] = {1};
     mo.mul(sr, s, k->r2, k);
@@ -746,7 +815,11 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             at[c++] = t;
         }
 #ifdef JWT_OPENSSL
+#ifdef JWT_CRYPTO_MB
+        if (rsa_use_ossl(k) && !rsa_cmb_usable(k)) {
+#else
         if (rsa_use_ossl(k)) {
+#endif
             rs256_ossl(k, c, s, em, at, ok);
             continue;
         }
@@ -768,6 +841,12 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
                 for (int i = 0; i < c; i++) ok[at[i]] = 1;
                 continue;
             }
+        }
+#endif
+#ifdef JWT_CRYPTO_MB
+        if (rsa_cmb_usable(k)) {
+            rs256_cmb(k, c, s, em, at, ok);
+            continue;
         }
 #endif
         for (int i = 0; i < c; i++) ok[at[i]] = (uint8_t)rsa_one(k, mo, s[i], em[i]);
