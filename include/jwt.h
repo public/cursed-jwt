@@ -126,6 +126,23 @@ void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, con
 void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
                        const uint8_t *const *sig, const int *slen, uint8_t *ok);
 
+/* Plain SHA-256 of n messages through the same multi-buffer engines (the RS256 / ES256 signing inputs).
+ * dig[i] receives the 8 big-endian-interpreted state words.  jwt_sha256_batch picks the default engine. */
+typedef void jwt_sha256_fn(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]);
+jwt_sha256_fn jwt_sha256_batch, jwt_sha256_scalar;
+#if defined(__aarch64__) || defined(_M_ARM64)
+jwt_sha256_fn jwt_sha256_neon;
+#endif
+#if defined(__ARM_FEATURE_SHA2)
+jwt_sha256_fn jwt_sha256_sha2;
+#endif
+#if defined(__AVX2__)
+jwt_sha256_fn jwt_sha256_avx2;
+#endif
+#if defined(JWT_AVX512) && defined(__AVX512VL__)
+jwt_sha256_fn jwt_sha256_avx512;
+#endif
+
 /* base64url decode (no padding, canonical trailing bits).  Returns decoded length or -1.
  * dst needs room for (n/4)*3 + 3 bytes + 32 bytes of slack (SIMD stores overrun). */
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n);

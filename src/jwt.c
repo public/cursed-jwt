@@ -54,9 +54,10 @@ typedef struct {
     uint8_t tail[128];
 } hplan_t;
 
-static void hplan_init(hplan_t *p, const uint8_t *m, int L) {
+/* off = bytes already hashed before m: 64 (the ipad block) for HMAC, 0 for a plain SHA-256 */
+JWT_INLINE void hplan_init_off(hplan_t *p, const uint8_t *m, int L, int off) {
     int nf = L >> 6, rem = L & 63, nt = rem + 9 > 64 ? 2 : 1;
-    uint64_t bits = (uint64_t)(64 + L) * 8;
+    uint64_t bits = (uint64_t)(off + L) * 8;
     p->m = m, p->nf = nf, p->nb = nf + nt;
 #ifdef JWT_INPUT_PADDED
     /* Caller guarantees >= 64 readable bytes after each token (padded recv buffers): fixed-size
@@ -76,11 +77,16 @@ static void hplan_init(hplan_t *p, const uint8_t *m, int L) {
 #endif
 }
 
+static void hplan_init(hplan_t *p, const uint8_t *m, int L) { hplan_init_off(p, m, L, 64); }
+
 JWT_INLINE const uint8_t *hplan_block(const hplan_t *p, int b) {
     return b < p->nf ? p->m + (b << 6) : p->tail + ((b - p->nf) << 6);
 }
 
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]);
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]);
+/* plain SHA-256 runs the HMAC machinery from the IV, with no ipad block and no outer hash (raw mode) */
+static const jwt_key_t sha_iv_key = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, {0}};
 
 /* ======================================================================================
  * 2. SHA-256 engines
@@ -169,6 +175,11 @@ static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) 
     memcpy(mac, k->oh, 32);
     jwt_ossl_sha256_block(mac, ob, 1);
 }
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
+    memcpy(dig, sha_iv_key.ih, 32);
+    if (p->nf) jwt_ossl_sha256_block(dig, p->m, (size_t)p->nf);
+    jwt_ossl_sha256_block(dig, p->tail, (size_t)(p->nb - p->nf));
+}
 /* every message one at a time through the extracted block function (tests, benchmarks) */
 void jwt_hmac_ossl(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     for (int i = 0; i < n; i++) {
@@ -181,6 +192,10 @@ void jwt_hmac_ossl(const jwt_key_t *k, int n, const uint8_t *const *msg, const i
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
     const hplan_t *pp = p;
     lanes_scalar(k, 1, &pp, (uint32_t(*)[8])mac);
+}
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
+    const hplan_t *pp = p;
+    lanes_raw_scalar(1, &pp, (uint32_t(*)[8])dig);
 }
 #endif
 
@@ -650,8 +665,8 @@ JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t 
     for (int s = 0; s < S; s++) st0[s] = vaddq_u32(st0[s], a0[s]), st1[s] = vaddq_u32(st1[s], a1[s]);
 }
 
-/* S plans with identical nb */
-JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
+/* S plans with identical nb; raw: plain SHA-256 (k = sha_iv_key, no outer hash) */
+JWT_INLINE void ce_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
     uint32x4_t st0[4], st1[4], m[4][4];
     uint32x4_t ih0 = vld1q_u32(k->ih), ih1 = vld1q_u32(k->ih + 4);
     for (int s = 0; s < S; s++) st0[s] = ih0, st1[s] = ih1;
@@ -662,6 +677,10 @@ JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint
         }
         ce_compress(S, st0, st1, m);
     }
+    if (raw) {
+        for (int s = 0; s < S; s++) vst1q_u32(mac[s], st0[s]), vst1q_u32(mac[s] + 4, st1[s]);
+        return;
+    }
     const uint32_t pad2[4] = {0x80000000u, 0, 0, 0}, pad3[4] = {0, 0, 0, (64 + 32) * 8};
     for (int s = 0; s < S; s++) {
         m[s][0] = st0[s], m[s][1] = st1[s], m[s][2] = vld1q_u32(pad2), m[s][3] = vld1q_u32(pad3);
@@ -671,14 +690,14 @@ JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint
     for (int s = 0; s < S; s++) vst1q_u32(mac[s], st0[s]), vst1q_u32(mac[s] + 4, st1[s]);
 }
 
-static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                     uint32_t (*mac)[8]) {
+JWT_INLINE void ce_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                          uint32_t (*mac)[8]) {
     enum { CH = 64 };
     hplan_t plan[CH];
     const hplan_t *pp[CH];
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH;
-        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
+        for (int i = 0; i < m; i++) hplan_init_off(&plan[i], msg[base + i], len[base + i], raw ? 0 : 64);
         for (int i = 0; i < m; i++) { /* sort by nb so groups of S share a block count */
             const hplan_t *p = &plan[i];
             int j = i;
@@ -694,14 +713,20 @@ static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg
             uint32_t *out[4];
             for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
             switch (s) { /* constant S per call so ce_hmac fully specialises */
-            case 4: ce_hmac(4, k, pp + g, out); break;
-            case 3: ce_hmac(2, k, pp + g, out); ce_hmac(1, k, pp + g + 2, out + 2); break;
-            case 2: ce_hmac(2, k, pp + g, out); break;
-            default: ce_hmac(1, k, pp + g, out); break;
+            case 4: ce_hmac(4, raw, k, pp + g, out); break;
+            case 3: ce_hmac(2, raw, k, pp + g, out); ce_hmac(1, raw, k, pp + g + 2, out + 2); break;
+            case 2: ce_hmac(2, raw, k, pp + g, out); break;
+            default: ce_hmac(1, raw, k, pp + g, out); break;
             }
             g += s;
         }
     }
+}
+static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ce_drive_x(S, 0, k, n, msg, len, mac);
+}
+void jwt_sha256_sha2(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+    ce_drive_x(4, 1, &sha_iv_key, n, msg, len, dig);
 }
 
 void jwt_hmac_sha2_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
@@ -1955,6 +1980,21 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
     verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
 #else
     verify_impl(k, n, tok, len, now, out, jwt_hmac_scalar);
+#endif
+}
+
+/* plain SHA-256 of n messages on the default engine (the RS256 / ES256 signing inputs) */
+void jwt_sha256_batch(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+#if defined(__ARM_FEATURE_SHA2)
+    jwt_sha256_sha2(n, msg, len, dig);
+#elif defined(JWT_AVX512) && defined(__AVX512VL__)
+    jwt_sha256_avx512(n, msg, len, dig);
+#elif defined(__AVX2__)
+    jwt_sha256_avx2(n, msg, len, dig);
+#elif defined(JWT_HAVE_NEON)
+    jwt_sha256_neon(n, msg, len, dig);
+#else
+    jwt_sha256_scalar(n, msg, len, dig);
 #endif
 }
 

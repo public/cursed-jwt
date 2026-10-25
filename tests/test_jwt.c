@@ -292,6 +292,53 @@ static void test_hmac_random(void) {
 }
 
 
+/* plain SHA-256 (the RS256 / ES256 signing-input hash) on every engine vs OpenSSL, random batches of 1-40 messages
+ * of 0-1,100 bytes with block boundaries over-represented, so ragged groups and leftover single streams both run */
+static void test_sha256_raw(void) {
+    static const struct { const char *name; jwt_sha256_fn *fn; } se[] = {
+        {"scalar", jwt_sha256_scalar}, {"default", jwt_sha256_batch},
+#ifdef JWT_HAVE_NEON
+        {"neon4", jwt_sha256_neon},
+#endif
+#if defined(__ARM_FEATURE_SHA2)
+        {"sha2x4", jwt_sha256_sha2},
+#endif
+#if defined(__AVX2__)
+        {"avx2", jwt_sha256_avx2},
+#endif
+#if defined(JWT_AVX512) && defined(__AVX512VL__)
+        {"avx512", jwt_sha256_avx512},
+#endif
+    };
+    static uint8_t data[40][1100 + 64];
+    const uint8_t *msg[40];
+    int len[40], nmsg = 0;
+    uint32_t got[40][8];
+    for (int it = 0; it < (quick ? 300 : 3000); it++) {
+        int n = 1 + (int)(rnd() % 40);
+        for (int i = 0; i < n; i++) {
+            len[i] = rnd() & 1 ? (int)(rnd() % 1101) : 64 * (int)(rnd() % 6) + (int)(rnd() % 3) - 1 + 55 * (int)(rnd() & 1);
+            if (len[i] < 0) len[i] = 0;
+            if (len[i] > 1100) len[i] = 1100;
+            for (int j = 0; j < len[i]; j++) data[i][j] = (uint8_t)rnd();
+            msg[i] = data[i];
+        }
+        for (int e = 0; e < (int)(sizeof se / sizeof se[0]); e++) {
+            se[e].fn(n, msg, len, got);
+            for (int i = 0; i < n; i++) {
+                uint8_t d[32];
+                SHA256_CTX c;
+                SHA256_Init(&c), SHA256_Update(&c, msg[i], (size_t)len[i]), SHA256_Final(d, &c);
+                int ok = 1;
+                for (int j = 0; j < 8; j++) ok &= got[i][j] == be32(d + 4 * j);
+                CHECK(ok, "sha256 %s n=%d i=%d len=%d", se[e].name, n, i, len[i]);
+            }
+        }
+        nmsg += n;
+    }
+    printf("  plain SHA-256 (RS256/ES256 signing inputs): %d messages x %d engines vs OpenSSL\n", nmsg, (int)(sizeof se / sizeof se[0]));
+}
+
 /* simdjson-style fast path vs the strict parser on fuzzed payloads: whenever the fast path
  * answers (>= 0) it must agree with payload_check exactly. */
 static void test_json_diff(int64_t now) {
@@ -755,6 +802,7 @@ int main(int argc, char **argv) {
     test_b64();
     test_jint();
     test_hmac_random();
+    test_sha256_raw();
     printf("  %d generated tokens\n", n);
     test_seed(t, n, now);
     test_cases(now);

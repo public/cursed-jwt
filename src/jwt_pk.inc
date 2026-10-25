@@ -29,6 +29,9 @@
 #define JWT_P256_W 8 /* comb window: 33 windows x 128 points x 64 B = 264 KB per base point (W=7: 148 KB, ~12% slower) */
 #endif
 #define P256_NW ((257 + JWT_P256_W - 1) / JWT_P256_W)
+#ifndef JWT_ES_ILV
+#define JWT_ES_ILV 1 /* ES256 tokens whose point additions run interleaved; no gain measured on an M5 (PK.md) */
+#endif
 #define P256_H (1 << (JWT_P256_W - 1))
 
 typedef uint64_t fe_t[4]; /* little-endian 64-bit limbs; field elements in fiat's Montgomery domain */
@@ -69,33 +72,18 @@ struct jwt_pkey {
 };
 enum { PK_RS256 = 1, PK_ES256 = 2 };
 
-/* ---------------------------------------------------------------------------------- SHA-256 of a message */
-static void sha256_msg(const uint8_t *m, int L, uint8_t out[32]) {
-    uint32_t st[8], w[16];
-    memcpy(st, IV256, 32);
-    int nf = L >> 6, rem = L & 63, nt = rem + 9 > 64 ? 2 : 1;
-    uint8_t last[128] = {0};
-    memcpy(last, m + (nf << 6), rem);
-    last[rem] = 0x80;
-    uint64_t bits = (uint64_t)L * 8;
-    for (int i = 0; i < 8; i++) last[nt * 64 - 1 - i] = (uint8_t)(bits >> (8 * i));
-#if defined(__ARM_FEATURE_SHA2)
-    uint32x4_t s0 = vld1q_u32(st), s1 = vld1q_u32(st + 4), mm[1][4];
-    for (int b = 0; b < nf + nt; b++) {
-        const uint8_t *blk = b < nf ? m + 64 * b : last + 64 * (b - nf);
-        for (int j = 0; j < 4; j++) mm[0][j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(blk + 16 * j)));
-        ce_compress(1, &s0, &s1, mm);
-    }
-    vst1q_u32(st, s0), vst1q_u32(st + 4, s1);
-#else
-    for (int b = 0; b < nf + nt; b++) {
-        const uint8_t *blk = b < nf ? m + 64 * b : last + 64 * (b - nf);
-        for (int i = 0; i < 16; i++) w[i] = be32(blk + 4 * i);
-        compress_scalar(st, w);
-    }
-#endif
-    (void)w;
-    for (int i = 0; i < 8; i++) out[4 * i] = st[i] >> 24, out[4 * i + 1] = st[i] >> 16, out[4 * i + 2] = st[i] >> 8, out[4 * i + 3] = st[i];
+/* ---------------------------------------------------------------------------------- signing-input hashes */
+/* SHA-256 of the m messages of a chunk whose signature length is right, in one multi-buffer call (jwt_sha256_batch:
+ * 8 lanes on AVX-512 / AVX2, 4 interleaved SHA2 streams on ARM), as 4 little-endian limbs of the big-endian digest */
+static void hash_chunk(int m, const uint8_t *const *msg, const int *len, const int *slen, int want, uint64_t (*e)[4]) {
+    const uint8_t *mp[32];
+    int ml[32], at[32], c = 0;
+    uint32_t dig[32][8];
+    for (int i = 0; i < m; i++)
+        if (slen[i] == want) mp[c] = msg[i], ml[c] = len[i], at[c++] = i;
+    jwt_sha256_batch(c, mp, ml, dig);
+    for (int j = 0; j < c; j++)
+        for (int w = 0; w < 4; w++) e[at[j]][3 - w] = (uint64_t)dig[j][2 * w] << 32 | dig[j][2 * w + 1];
 }
 
 /* ---------------------------------------------------------------------------------- P-256 */
@@ -443,17 +431,16 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
     enum { CH = 32 };
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH, c = 0, at[CH];
-        uint64_t r[CH][4], sm[CH][4], em[CH][4], pre[CH][4];
+        uint64_t r[CH][4], sm[CH][4], em[CH][4], pre[CH][4], hs[CH][4];
+        hash_chunk(m, msg + base, len + base, slen + base, 64, hs);
         for (int i = 0; i < m; i++) {
             int t = base + i;
             ok[t] = 0;
             if (slen[t] != 64) continue;
             uint64_t s[4], e[4];
-            uint8_t h[32];
             be_to_limbs4(r[c], sig[t]), be_to_limbs4(s, sig[t] + 32);
             if (fe_iszero(r[c]) || fe_iszero(s) || !u256_lt(r[c], P256_N) || !u256_lt(s, P256_N)) continue;
-            sha256_msg(msg[t], len[t], h);
-            be_to_limbs4(e, h);
+            memcpy(e, hs[i], 32);
             if (!u256_lt(e, P256_N)) { /* e < 2^256 < 2n: one subtraction */
                 fiat_p256_scalar_uint1 b = 0;
                 for (int j = 0; j < 4; j++) fiat_p256_scalar_subborrowx_u64(&e[j], &b, b, e[j], P256_N[j]);
@@ -463,10 +450,11 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             at[c++] = t;
         }
         if (!c) continue;
-        /* all s^-1 with one inversion (Montgomery's trick) */
+        /* all s^-1 with one inversion (Montgomery's trick), then u1 = e/s, u2 = r/s as signed digits */
         memcpy(pre[0], sm[0], 32);
         for (int i = 1; i < c; i++) fiat_p256_scalar_mul(pre[i], pre[i - 1], sm[i]);
         uint64_t inv[4], w[4];
+        int16_t d1[CH][P256_NW], d2[CH][P256_NW];
         sc_inv(inv, pre[c - 1]);
         for (int i = c - 1; i >= 0; i--) {
             if (i) fiat_p256_scalar_mul(w, inv, pre[i - 1]), fiat_p256_scalar_mul(inv, inv, sm[i]);
@@ -477,30 +465,37 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             fiat_p256_scalar_to_montgomery(rm, r[i]);
             fiat_p256_scalar_mul(u2, rm, w);
             fiat_p256_scalar_from_montgomery(u2, u2);
-            int16_t d1[P256_NW], d2[P256_NW];
-            p256_recode(d1, u1), p256_recode(d2, u2);
-            p256_jac_t acc;
-            acc.inf = 1;
+            p256_recode(d1[i], u1), p256_recode(d2[i], u2);
+        }
+        /* the point additions, JWT_ES_ILV tokens in lockstep: each token's 66 additions are one serial chain,
+         * so running several side by side lets the core overlap their multiplications */
+        for (int i0 = 0; i0 < c; i0 += JWT_ES_ILV) {
+            int ni = c - i0 < JWT_ES_ILV ? c - i0 : JWT_ES_ILV;
+            p256_jac_t acc[JWT_ES_ILV];
+            for (int q = 0; q < ni; q++) acc[q].inf = 1;
             for (int j = 0; j < P256_NW; j++) {
-                p256_add_digit(&acc, k->tg[j], d1[j]);
-                p256_add_digit(&acc, k->tq[j], d2[j]);
+                for (int q = 0; q < ni; q++) p256_add_digit(&acc[q], k->tg[j], d1[i0 + q][j]);
+                for (int q = 0; q < ni; q++) p256_add_digit(&acc[q], k->tq[j], d2[i0 + q][j]);
             }
-            if (acc.inf) continue;
-            /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
-            fe_t z2, rf, t;
-            fe_sqr(z2, acc.z);
-            fiat_p256_to_montgomery(rf, r[i]);
-            fe_mul(t, rf, z2);
-            int good = fe_eq(t, acc.x);
-            uint64_t rn[4];
-            fiat_p256_scalar_uint1 cy = 0;
-            for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
-            if (!good && !cy && u256_lt(rn, P256_P)) {
-                fiat_p256_to_montgomery(rf, rn);
+            for (int q = 0; q < ni; q++) {
+                int i = i0 + q;
+                if (acc[q].inf) continue;
+                /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
+                fe_t z2, rf, t;
+                fe_sqr(z2, acc[q].z);
+                fiat_p256_to_montgomery(rf, r[i]);
                 fe_mul(t, rf, z2);
-                good = fe_eq(t, acc.x);
+                int good = fe_eq(t, acc[q].x);
+                uint64_t rn[4];
+                fiat_p256_scalar_uint1 cy = 0;
+                for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
+                if (!good && !cy && u256_lt(rn, P256_P)) {
+                    fiat_p256_to_montgomery(rf, rn);
+                    fe_mul(t, rf, z2);
+                    good = fe_eq(t, acc[q].x);
+                }
+                ok[at[i]] = (uint8_t)good;
             }
-            ok[at[i]] = (uint8_t)good;
         }
     }
 }
@@ -716,10 +711,10 @@ jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size
     return pk;
 }
 
-/* expected EM limbs for message hash h: the template with the hash in limbs 0..3 */
-static void rsa_em(uint64_t *o, const rsa_key_t *k, const uint8_t h[32]) {
+/* expected EM limbs for a message hash (4 limbs): the template with the hash in limbs 0..3 */
+static void rsa_em(uint64_t *o, const rsa_key_t *k, const uint64_t h[4]) {
     memcpy(o, k->em, sizeof(uint64_t) * k->nl);
-    be_to_limbs4(o, h);
+    memcpy(o, h, 32);
 }
 
 static int rsa_lt_n(const uint64_t *s, const rsa_key_t *k) {
@@ -821,16 +816,15 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
     enum { CH = 16 };
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH, c = 0, at[CH];
-        uint64_t s[CH][RSA_MAXL], em[CH][RSA_MAXL];
+        uint64_t s[CH][RSA_MAXL], em[CH][RSA_MAXL], hs[CH][4];
+        hash_chunk(m, msg + base, len + base, slen + base, k->k, hs);
         for (int i = 0; i < m; i++) {
             int t = base + i;
             ok[t] = 0;
             if (slen[t] != k->k) continue;
             be_to_limbs(s[c], k->nl, sig[t], k->k);
             if (!rsa_lt_n(s[c], k)) continue;
-            uint8_t h[32];
-            sha256_msg(msg[t], len[t], h);
-            rsa_em(em[c], k, h);
+            rsa_em(em[c], k, hs[i]);
             at[c++] = t;
         }
 #ifdef JWT_OPENSSL
