@@ -101,16 +101,7 @@ int main(int argc, char **argv) {
                int l[8];
                uint32_t mac[8][8];
                BEST(8, for (int j = 0; j < 8; j++) m[j] = (const uint8_t *)toks[i + j], l[j] = tlen[i + j] - 44;
-                    jwt_hmac_fn *h =
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-                        jwt_hmac_avx512;
-#elif defined(__ARM_FEATURE_SHA2)
-                        jwt_hmac_sha2;
-#elif defined(__AVX2__)
-                        jwt_hmac_avx2;
-#else
-                        jwt_hmac_scalar;
-#endif
+                    jwt_hmac_fn *h = hmac_default();
                     h(&k, 8, m, l, mac); sink += mac[0][0]);
            }));
 #ifdef JWT_HAVE_LANES

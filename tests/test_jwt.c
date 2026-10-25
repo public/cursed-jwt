@@ -128,40 +128,49 @@ typedef struct {
     const char *name;
     jwt_hmac_fn *hmac;
     void (*verify)(const jwt_key_t *, int, const char *const *, const int *, int64_t, jwt_result_t *);
+    unsigned need; /* JWT_CPU_* bits the engine needs; engines the CPU lacks are skipped (and listed) */
 } engine_t;
 
-static engine_t engines[] = {
-    {"scalar", jwt_hmac_scalar, jwt_verify_batch_scalar},
+static const engine_t all_engines[] = {
+    {"scalar", jwt_hmac_scalar, jwt_verify_batch_scalar, 0},
 #ifdef JWT_HAVE_NEON
-    {"neon4", jwt_hmac_neon, jwt_verify_batch_neon},
+    {"neon4", jwt_hmac_neon, jwt_verify_batch_neon, 0},
 #endif
-#if defined(__ARM_FEATURE_SHA2)
-    {"sha2x1", jwt_hmac_sha2_1, NULL},
-    {"sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2},
-    {"sha2x2", jwt_hmac_sha2_2, NULL},
-    {"sha2x4", jwt_hmac_sha2_4, NULL},
+#if defined(__aarch64__)
+    {"sha2x1", jwt_hmac_sha2_1, NULL, JWT_CPU_SHA2},
+    {"sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2, JWT_CPU_SHA2},
+    {"sha2x2", jwt_hmac_sha2_2, NULL, JWT_CPU_SHA2},
+    {"sha2x4", jwt_hmac_sha2_4, NULL, JWT_CPU_SHA2},
 #endif
-#if defined(__AVX2__)
-    {"avx2", jwt_hmac_avx2, jwt_verify_batch_avx2},
-    {"avx2x2", jwt_hmac_avx2x2, NULL},
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-    {"avx512", jwt_hmac_avx512, jwt_verify_batch_avx512},
-    {"avx512x2", jwt_hmac_avx512x2, NULL},
-    {"zmm", jwt_hmac_zmm, NULL},
+#if defined(__x86_64__)
+    {"avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2},
+    {"avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2},
+    {"avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL},
+    {"avx512x2", jwt_hmac_avx512x2, NULL, JWT_CPU_AVX512VL},
+    {"zmm", jwt_hmac_zmm, NULL, JWT_CPU_AVX512VL},
 #endif
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
-    {"ossl", jwt_hmac_ossl, NULL},
-    {"ossl-shaext", hmac_ossl_shaext, NULL},
-    {"ossl-avx2", hmac_ossl_avx2, NULL},
-    {"ossl-avx", hmac_ossl_avx, NULL},
-    {"ossl-ssse3", hmac_ossl_ssse3, NULL},
-    {"ossl-x86", hmac_ossl_x86, NULL},
+    {"ossl", jwt_hmac_ossl, NULL, 0},
+    {"ossl-shaext", hmac_ossl_shaext, NULL, 0},
+    {"ossl-avx2", hmac_ossl_avx2, NULL, 0},
+    {"ossl-avx", hmac_ossl_avx, NULL, 0},
+    {"ossl-ssse3", hmac_ossl_ssse3, NULL, 0},
+    {"ossl-x86", hmac_ossl_x86, NULL, 0},
 #endif
-    {"tlemu", jwt_hmac_tlemu, NULL},
-    {"default", NULL, jwt_verify_batch},
+    {"tlemu", jwt_hmac_tlemu, NULL, 0},
+    {"default", NULL, jwt_verify_batch, 0},
 };
-#define NENG ((int)(sizeof engines / sizeof engines[0]))
+static engine_t engines[sizeof all_engines / sizeof all_engines[0]];
+static int NENG;
+static void pick_engines(void) {
+    unsigned f = jwt_cpu_features();
+    printf("cpu features 0x%x, default engine %s; skipped (CPU lacks them):", f, jwt_engine());
+    for (size_t i = 0; i < sizeof all_engines / sizeof all_engines[0]; i++) {
+        if ((all_engines[i].need & f) == all_engines[i].need) engines[NENG++] = all_engines[i];
+        else printf(" %s", all_engines[i].name);
+    }
+    printf("\n");
+}
 
 /* ---- tokens.json ---- */
 typedef struct {
@@ -295,19 +304,17 @@ static void test_hmac_random(void) {
 /* plain SHA-256 (the RS256 / ES256 signing-input hash) on every engine vs OpenSSL, random batches of 1-40 messages
  * of 0-1,100 bytes with block boundaries over-represented, so ragged groups and leftover single streams both run */
 static void test_sha256_raw(void) {
-    static const struct { const char *name; jwt_sha256_fn *fn; } se[] = {
-        {"scalar", jwt_sha256_scalar}, {"default", jwt_sha256_batch},
+    static const struct { const char *name; jwt_sha256_fn *fn; unsigned need; } se[] = {
+        {"scalar", jwt_sha256_scalar, 0}, {"default", jwt_sha256_batch, 0},
 #ifdef JWT_HAVE_NEON
-        {"neon4", jwt_sha256_neon},
+        {"neon4", jwt_sha256_neon, 0},
 #endif
-#if defined(__ARM_FEATURE_SHA2)
-        {"sha2x4", jwt_sha256_sha2},
+#if defined(__aarch64__)
+        {"sha2x4", jwt_sha256_sha2, JWT_CPU_SHA2},
 #endif
-#if defined(__AVX2__)
-        {"avx2", jwt_sha256_avx2},
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-        {"avx512", jwt_sha256_avx512},
+#if defined(__x86_64__)
+        {"avx2", jwt_sha256_avx2, JWT_CPU_AVX2},
+        {"avx512", jwt_sha256_avx512, JWT_CPU_AVX512VL},
 #endif
     };
     static uint8_t data[40][1100 + 64];
@@ -324,6 +331,7 @@ static void test_sha256_raw(void) {
             msg[i] = data[i];
         }
         for (int e = 0; e < (int)(sizeof se / sizeof se[0]); e++) {
+            if ((se[e].need & jwt_cpu_features()) != se[e].need) continue;
             se[e].fn(n, msg, len, got);
             for (int i = 0; i < n; i++) {
                 uint8_t d[32];
@@ -789,6 +797,7 @@ int main(int argc, char **argv) {
     seedtok_t *t = load_tokens(path, &n);
     int64_t now = (int64_t)time(NULL);
     quick = getenv("JWT_TEST_QUICK") != NULL;
+    pick_engines();
     printf("engines:");
     for (int e = 0; e < NENG; e++) printf(" %s", engines[e].name);
     printf("\n");

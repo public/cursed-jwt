@@ -172,27 +172,28 @@ JWT_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
 }
 #define fe_sqr_c(o, a) fe_mul_c(o, a, a)
 
-#if defined(JWT_S2N) && defined(__x86_64__) && !(defined(__BMI2__) && defined(__ADX__))
-#error "JWT_S2N on x86-64 needs BMI2 and ADX (s2n-bignum uses mulx/adcx/adox): build with -march=broadwell or later"
-#endif
 #ifdef JWT_S2N
 /* -DJWT_S2N: AWS s2n-bignum's formally verified assembly (scripts/fetch-s2n-bignum.sh, MIT-0), Montgomery
  * multiply / square and modular add / sub for p_256.  Same domain and contracts as the C versions above, which
- * tests/test_pk.c still cross-checks against fiat-crypto alongside these. */
+ * tests/test_pk.c still cross-checks against fiat-crypto alongside these.  On x86-64 they need BMI2 + ADX, so they
+ * are used only when the CPU has them (s2n_ok); everything falls back to the C. */
 void bignum_montmul_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 void bignum_montsqr_p256(uint64_t z[4], const uint64_t x[4]);
 void bignum_add_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 void bignum_sub_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
-#define fe_mul(o, a, b) bignum_montmul_p256(o, a, b)
-#define fe_sqr(o, a) bignum_montsqr_p256(o, a)
-#define fe_add(o, a, b) bignum_add_p256(o, a, b)
-#define fe_sub(o, a, b) bignum_sub_p256(o, a, b)
+static int s2n_ok(void) {
+#if defined(__x86_64__)
+    return (jwt_cpu() & JWT_CPU_BMI2_ADX) != 0;
 #else
+    return 1;
+#endif
+}
+#endif
+/* the C field operations, for everything outside the per-token point arithmetic */
 #define fe_mul fe_mul_c
 #define fe_sqr fe_sqr_c
 #define fe_add fe_add_c
 #define fe_sub fe_sub_c
-#endif
 
 /* a^(p-2): init only (table building) */
 static void fe_inv(fe_t o, const fe_t a) {
@@ -208,79 +209,36 @@ static void fe_inv(fe_t o, const fe_t a) {
     memcpy(o, r, 32);
 }
 
-/* dbl-2001-b (a = -3), 3M + 5S */
-static void p256_dbl(p256_jac_t *o, const p256_jac_t *p) {
-    if (p->inf || fe_iszero(p->y)) { o->inf = 1; return; }
-    fe_t delta, gamma, beta, alpha, t, u;
-    fe_sqr(delta, p->z);
-    fe_sqr(gamma, p->y);
-    fe_mul(beta, p->x, gamma);
-    fe_sub(t, p->x, delta);
-    fe_add(u, p->x, delta);
-    fe_mul(alpha, t, u);
-    fe_add(t, alpha, alpha);
-    fe_add(alpha, alpha, t); /* 3 (X - delta)(X + delta) */
-    fe_add(t, p->y, p->z);
-    fe_sqr(t, t);
-    fe_sub(t, t, gamma);
-    fe_sub(o->z, t, delta);
-    fe_add(beta, beta, beta);
-    fe_add(beta, beta, beta); /* 4 beta */
-    fe_sqr(t, alpha);
-    fe_add(u, beta, beta);
-    fe_sub(o->x, t, u);
-    fe_sub(t, beta, o->x);
-    fe_mul(t, alpha, t);
-    fe_sqr(gamma, gamma);
-    fe_add(gamma, gamma, gamma);
-    fe_add(gamma, gamma, gamma);
-    fe_add(gamma, gamma, gamma); /* 8 gamma^2 */
-    fe_sub(o->y, t, gamma);
-    o->inf = 0;
-}
-
-/* p += q (affine), madd-2007-bl, 7M + 4S; exceptional cases (q = +-p) branch */
-static void p256_madd(p256_jac_t *p, const fe_t qx, const fe_t qy) {
-    if (p->inf) {
-        memcpy(p->x, qx, 32), memcpy(p->y, qy, 32), fiat_p256_set_one(p->z), p->inf = 0;
-        return;
-    }
-    fe_t z1z1, u2, s2, h, hh, i, j, r, v, t;
-    fe_sqr(z1z1, p->z);
-    fe_mul(u2, qx, z1z1);
-    fe_mul(s2, qy, p->z);
-    fe_mul(s2, s2, z1z1);
-    fe_sub(h, u2, p->x);
-    fe_sub(r, s2, p->y);
-    if (fe_iszero(h)) {
-        if (fe_iszero(r)) {
-            p256_jac_t d = *p;
-            p256_dbl(p, &d);
-        } else {
-            p->inf = 1;
-        }
-        return;
-    }
-    fe_add(r, r, r);
-    fe_sqr(hh, h);
-    fe_add(i, hh, hh);
-    fe_add(i, i, i);
-    fe_mul(j, h, i);
-    fe_mul(v, p->x, i);
-    fe_sqr(t, r);
-    fe_sub(t, t, j);
-    fe_sub(t, t, v);
-    fe_sub(t, t, v); /* X3 */
-    fe_add(p->z, p->z, h);
-    fe_sqr(p->z, p->z);
-    fe_sub(p->z, p->z, z1z1);
-    fe_sub(p->z, p->z, hh);
-    fe_sub(v, v, t);
-    fe_mul(v, r, v);
-    fe_mul(j, p->y, j);
-    fe_add(j, j, j);
-    fe_sub(p->y, v, j);
-    memcpy(p->x, t, 32);
+#define EC(name) name##_c
+#include "jwt_pk_ec.inc"
+#undef EC
+#ifdef JWT_S2N
+#undef fe_mul
+#undef fe_sqr
+#undef fe_add
+#undef fe_sub
+#define fe_mul(o, a, b) bignum_montmul_p256(o, a, b)
+#define fe_sqr(o, a) bignum_montsqr_p256(o, a)
+#define fe_add(o, a, b) bignum_add_p256(o, a, b)
+#define fe_sub(o, a, b) bignum_sub_p256(o, a, b)
+#define EC(name) name##_s2n
+#include "jwt_pk_ec.inc"
+#undef EC
+#undef fe_mul
+#undef fe_sqr
+#undef fe_add
+#undef fe_sub
+#define fe_mul fe_mul_c
+#define fe_sqr fe_sqr_c
+#define fe_add fe_add_c
+#define fe_sub fe_sub_c
+#endif
+static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
+                      const int *at, uint8_t *ok) {
+#ifdef JWT_S2N
+    if (s2n_ok()) { es_points_s2n(k, c, d1, d2, r, at, ok); return; }
+#endif
+    es_points_c(k, c, d1, d2, r, at, ok);
 }
 
 /* tab[w][k-1] = k * 2^(W w) * P, affine, k = 1..H */
@@ -291,8 +249,8 @@ static void p256_table(p256_aff_t tab[P256_NW][P256_H], const fe_t px, const fe_
     memcpy(bx, px, 32), memcpy(by, py, 32);
     for (int w = 0; w < P256_NW; w++) {
         jac[0].inf = 1;
-        p256_madd(&jac[0], bx, by);
-        for (int k = 1; k < P256_H; k++) jac[k] = jac[k - 1], p256_madd(&jac[k], bx, by);
+        p256_madd_c(&jac[0], bx, by);
+        for (int k = 1; k < P256_H; k++) jac[k] = jac[k - 1], p256_madd_c(&jac[k], bx, by);
         /* to affine with one inversion; no k*B is infinity since k < n */
         memcpy(pre[0], jac[0].z, 32);
         for (int k = 1; k < P256_H; k++) fe_mul(pre[k], pre[k - 1], jac[k].z);
@@ -308,7 +266,7 @@ static void p256_table(p256_aff_t tab[P256_NW][P256_H], const fe_t px, const fe_
         }
         /* next base: 2^W * B = 2 * (H * B) */
         p256_jac_t d = jac[P256_H - 1], d2;
-        p256_dbl(&d2, &d);
+        p256_dbl_c(&d2, &d);
         fe_t z2;
         fe_inv(inv, d2.z);
         fe_sqr(z2, inv);
@@ -365,17 +323,6 @@ static void p256_recode(int16_t d[P256_NW], const uint64_t u[4]) {
         int c = (int)(v & ((1u << JWT_P256_W) - 1)) + carry;
         if (c > P256_H) d[w] = (int16_t)(c - 2 * P256_H), carry = 1;
         else d[w] = (int16_t)c, carry = 0;
-    }
-}
-
-JWT_INLINE void p256_add_digit(p256_jac_t *acc, const p256_aff_t *row, int d) {
-    if (!d) return;
-    if (d > 0) {
-        p256_madd(acc, row[d - 1].x, row[d - 1].y);
-    } else {
-        fe_t ny;
-        fe_opp(ny, row[-d - 1].y);
-        p256_madd(acc, row[-d - 1].x, ny);
     }
 }
 
@@ -467,36 +414,7 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             fiat_p256_scalar_from_montgomery(u2, u2);
             p256_recode(d1[i], u1), p256_recode(d2[i], u2);
         }
-        /* the point additions, JWT_ES_ILV tokens in lockstep: each token's 66 additions are one serial chain,
-         * so running several side by side lets the core overlap their multiplications */
-        for (int i0 = 0; i0 < c; i0 += JWT_ES_ILV) {
-            int ni = c - i0 < JWT_ES_ILV ? c - i0 : JWT_ES_ILV;
-            p256_jac_t acc[JWT_ES_ILV];
-            for (int q = 0; q < ni; q++) acc[q].inf = 1;
-            for (int j = 0; j < P256_NW; j++) {
-                for (int q = 0; q < ni; q++) p256_add_digit(&acc[q], k->tg[j], d1[i0 + q][j]);
-                for (int q = 0; q < ni; q++) p256_add_digit(&acc[q], k->tq[j], d2[i0 + q][j]);
-            }
-            for (int q = 0; q < ni; q++) {
-                int i = i0 + q;
-                if (acc[q].inf) continue;
-                /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
-                fe_t z2, rf, t;
-                fe_sqr(z2, acc[q].z);
-                fiat_p256_to_montgomery(rf, r[i]);
-                fe_mul(t, rf, z2);
-                int good = fe_eq(t, acc[q].x);
-                uint64_t rn[4];
-                fiat_p256_scalar_uint1 cy = 0;
-                for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
-                if (!good && !cy && u256_lt(rn, P256_P)) {
-                    fiat_p256_to_montgomery(rf, rn);
-                    fe_mul(t, rf, z2);
-                    good = fe_eq(t, acc[q].x);
-                }
-                ok[at[i]] = (uint8_t)good;
-            }
-        }
+        es_points(k, c, d1, d2, r, at, ok);
     }
 }
 
@@ -614,11 +532,11 @@ static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
 #endif
 static mont_ops_t mont_for(const rsa_key_t *k) {
     switch (k->nl) {
+    case 32:
 #ifdef JWT_S2N
-    case 32: return (mont_ops_t){mont_mul_s2n, mont_sqr_s2n};
-#else
-    case 32: return (mont_ops_t){mont_mul_32, mont_sqr_32};
+        if (s2n_ok()) return (mont_ops_t){mont_mul_s2n, mont_sqr_s2n};
 #endif
+        return (mont_ops_t){mont_mul_32, mont_sqr_32};
     case 48: return (mont_ops_t){mont_mul_48, mont_sqr_48};
     case 64: return (mont_ops_t){mont_mul_64, mont_sqr_64};
     default: return (mont_ops_t){mont_mul_any, mont_sqr_any};
@@ -761,7 +679,7 @@ static int bn_eq_limbs(const BIGNUM *x, const uint64_t *em, int nl) {
  * 3072/4096-bit moduli s2n-bignum has no fixed-size kernel here and libcrypto beats the C. */
 static int rsa_use_ossl(const rsa_key_t *k) {
 #if defined(JWT_S2N) && defined(__x86_64__)
-    return k->nl != 32;
+    return k->nl != 32 || !s2n_ok();
 #else
     (void)k;
     return 1;

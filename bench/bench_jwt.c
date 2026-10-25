@@ -54,33 +54,38 @@ static void hmac_ossl_mid(const jwt_key_t *k, int n, const uint8_t *const *msg, 
 typedef struct {
     const char *name;
     jwt_hmac_fn *hmac;
+    unsigned need; /* JWT_CPU_* bits; engines this CPU lacks are left out */
 } hengine_t;
-static hengine_t hengines[] = {
-    {"openssl-HMAC()", hmac_ossl_oneshot},
-    {"openssl-midstate", hmac_ossl_mid},
-    {"scalar", jwt_hmac_scalar},
+static const hengine_t all_hengines[] = {
+    {"openssl-HMAC()", hmac_ossl_oneshot, 0},
+    {"openssl-midstate", hmac_ossl_mid, 0},
+    {"scalar", jwt_hmac_scalar, 0},
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
-    {"ossl-asm-1stream", jwt_hmac_ossl},
+    {"ossl-asm-1stream", jwt_hmac_ossl, 0},
 #endif
 #ifdef JWT_HAVE_NEON
-    {"neon-4lane", jwt_hmac_neon},
+    {"neon-4lane", jwt_hmac_neon, 0},
 #endif
-#if defined(__ARM_FEATURE_SHA2)
-    {"sha2-1stream", jwt_hmac_sha2_1},
-    {"sha2-2stream", jwt_hmac_sha2_2},
-    {"sha2-4stream", jwt_hmac_sha2_4},
+#if defined(__aarch64__)
+    {"sha2-1stream", jwt_hmac_sha2_1, JWT_CPU_SHA2},
+    {"sha2-2stream", jwt_hmac_sha2_2, JWT_CPU_SHA2},
+    {"sha2-4stream", jwt_hmac_sha2_4, JWT_CPU_SHA2},
 #endif
-#if defined(__AVX2__)
-    {"avx2-8lane", jwt_hmac_avx2},
-    {"avx2-2x8lane", jwt_hmac_avx2x2},
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-    {"avx512vl-8lane", jwt_hmac_avx512},
-    {"avx512vl-2x8lane", jwt_hmac_avx512x2},
-    {"avx512-zmm16", jwt_hmac_zmm},
+#if defined(__x86_64__)
+    {"avx2-8lane", jwt_hmac_avx2, JWT_CPU_AVX2},
+    {"avx2-2x8lane", jwt_hmac_avx2x2, JWT_CPU_AVX2},
+    {"avx512vl-8lane", jwt_hmac_avx512, JWT_CPU_AVX512VL},
+    {"avx512vl-2x8lane", jwt_hmac_avx512x2, JWT_CPU_AVX512VL},
+    {"avx512-zmm16", jwt_hmac_zmm, JWT_CPU_AVX512VL},
 #endif
 };
-#define NH ((int)(sizeof hengines / sizeof hengines[0]))
+static hengine_t hengines[sizeof all_hengines / sizeof all_hengines[0]];
+static int NH;
+static void pick_hengines(void) {
+    for (size_t i = 0; i < sizeof all_hengines / sizeof all_hengines[0]; i++)
+        if ((all_hengines[i].need & jwt_cpu_features()) == all_hengines[i].need) hengines[NH++] = all_hengines[i];
+    printf("cpu features 0x%x, default engine %s\n", jwt_cpu_features(), jwt_engine());
+}
 
 static char **toks;
 static int *tlen, *mlen, ntok;
@@ -131,6 +136,7 @@ static volatile uint32_t sink;
 int main(int argc, char **argv) {
     load(argc > 1 ? argv[1] : "build/tokens.json");
     if (argc > 2) secs = atof(argv[2]);
+    pick_hengines();
     ossl_mid_init();
     jwt_key_t k;
     jwt_key_init(&k, SECRET, strlen(SECRET));

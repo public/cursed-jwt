@@ -5,14 +5,13 @@
  * key's HMAC ipad/opad midstates, which are a function of the secret alone.  See README.md for
  * the claim semantics and the measured numbers.
  *
- * Build: compile jwt.c (or #include it into your unity TU).  The SHA-256 engine is chosen at
- * compile time from the target:
- *   aarch64 with __ARM_FEATURE_SHA2   -> ARMv8 SHA2 instructions, 4 streams interleaved (default)
- *   aarch64                            -> NEON 4-lane multi-buffer
- *   x86-64 with -mavx2                 -> AVX2 8-lane multi-buffer
- *   x86-64 with -mavx512vl -DJWT_AVX512 -> same 8-lane code on ymm, vprord + vpternlogd
- *                                         (recommended on AVX-512 CPUs: no zmm, no licence drop)
- *   anything else                       -> portable scalar
+ * Build: compile jwt.c (or #include it into your unity TU) for the baseline ISA; no -march is needed.  The engine is
+ * chosen at run time from the CPU (see "CPU dispatch" below):
+ *   x86-64 with AVX-512 F/VL/BW/DQ -> 8 lanes on ymm with vprord + vpternlogd (no zmm, no frequency-licence drop)
+ *   x86-64 with AVX2 + BMI2        -> AVX2 8-lane multi-buffer
+ *   AArch64 with SHA2 instructions -> 4 interleaved SHA2 streams
+ *   AArch64                        -> NEON 4-lane multi-buffer
+ *   anything else                  -> portable scalar
  * Batch 1 and leftover lanes run one message at a time; on x86-64 Linux with -DJWT_OSSL_SHA256 (the Makefile's
  * default there) that is OpenSSL's extracted sha256 block function, src/sha256_x86_64_ossl.S (link it too).
  * Every engine that the target can run is also exported for tests/benchmarks.
@@ -66,6 +65,15 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len);
 void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                       int64_t now_s, jwt_result_t *out);
 
+/* ---- CPU dispatch ----
+ * The engine is chosen at run time from the CPU's features (CPUID / HWCAP), whatever -march the library was built
+ * with: AVX-512VL, then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.  The engine-specific
+ * entry points below exist for tests and benchmarks; call one only if jwt_cpu_features() has its bit. */
+enum { JWT_CPU_AVX2 = 1, JWT_CPU_AVX512VL = 2, JWT_CPU_BMI2_ADX = 4, JWT_CPU_SHANI = 8, JWT_CPU_IFMA = 16,
+       JWT_CPU_SHA2 = 32, JWT_CPU_SHA512 = 64 };
+unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
+const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "avx512vl", "avx2", "sha2", ... */
+
 /* ---- engine-specific entry points (same contract), for tests and benchmarks ---- */
 void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                              int64_t now_s, jwt_result_t *out);
@@ -73,15 +81,15 @@ void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, 
 void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                            int64_t now_s, jwt_result_t *out);
 #endif
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(__aarch64__)
 void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                            int64_t now_s, jwt_result_t *out);
 #endif
-#if defined(__AVX2__)
+#if defined(__x86_64__)
 void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                            int64_t now_s, jwt_result_t *out);
 #endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if defined(__x86_64__)
 void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len,
                              int64_t now_s, jwt_result_t *out);
 #endif
@@ -94,16 +102,16 @@ jwt_hmac_fn jwt_hmac_scalar;
 #if defined(__aarch64__) || defined(_M_ARM64)
 jwt_hmac_fn jwt_hmac_neon;
 #endif
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(__aarch64__)
 jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2, jwt_hmac_sha2_4; /* JWT_SHA2_STREAMS (default 4), 1, 4 */
 #endif
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 block function (batch-1 path) */
 #endif
-#if defined(__AVX2__)
+#if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-lane groups */
 #endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
 #endif
 
@@ -133,14 +141,11 @@ jwt_sha256_fn jwt_sha256_batch, jwt_sha256_scalar;
 #if defined(__aarch64__) || defined(_M_ARM64)
 jwt_sha256_fn jwt_sha256_neon;
 #endif
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(__aarch64__)
 jwt_sha256_fn jwt_sha256_sha2;
 #endif
-#if defined(__AVX2__)
-jwt_sha256_fn jwt_sha256_avx2;
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-jwt_sha256_fn jwt_sha256_avx512;
+#if defined(__x86_64__)
+jwt_sha256_fn jwt_sha256_avx2, jwt_sha256_avx512;
 #endif
 
 /* base64url decode (no padding, canonical trailing bits).  Returns decoded length or -1.

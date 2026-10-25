@@ -131,17 +131,22 @@ static void test_arith(void) {
         uint64_t a[4], b[4], x[4], y[4];
         rand_below(a, P256_P), rand_below(b, P256_P);
         fiat_p256_mul(y, a, b);
-        fe_mul(x, a, b), bad += memcmp(x, y, 32) != 0;
         fe_mul_c(x, a, b), bad += memcmp(x, y, 32) != 0;
         fiat_p256_square(y, a);
-        fe_sqr(x, a), bad += memcmp(x, y, 32) != 0;
         fe_sqr_c(x, a), bad += memcmp(x, y, 32) != 0;
         fiat_p256_add(y, a, b);
-        fe_add(x, a, b), bad += memcmp(x, y, 32) != 0;
         fe_add_c(x, a, b), bad += memcmp(x, y, 32) != 0;
         fiat_p256_sub(y, a, b);
-        fe_sub(x, a, b), bad += memcmp(x, y, 32) != 0;
         fe_sub_c(x, a, b), bad += memcmp(x, y, 32) != 0;
+#ifdef JWT_S2N
+        if (s2n_ok()) {
+            uint64_t z[4];
+            fiat_p256_mul(y, a, b), bignum_montmul_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_square(y, a), bignum_montsqr_p256(z, a), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_add(y, a, b), bignum_add_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_sub(y, a, b), bignum_sub_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+        }
+#endif
         rand_below(a, P256_N);
         if (fe_iszero(a)) continue;
         uint64_t am[4], im[4], one[4];
@@ -153,7 +158,8 @@ static void test_arith(void) {
     }
     CHECK(!bad, "field / scalar arithmetic: %d mismatches against fiat-crypto", bad);
 #ifdef JWT_S2N
-    { /* RSA-2048 Montgomery: s2n-bignum kernels vs the C ones */
+    if (!s2n_ok()) printf("  s2n-bignum kernels: skipped, this CPU lacks BMI2/ADX (the C kernels run instead)\n");
+    else { /* RSA-2048 Montgomery: s2n-bignum kernels vs the C ones */
         uint8_t nb[256], e3[3] = {1, 0, 1};
         for (int i = 0; i < 256; i++) nb[i] = (uint8_t)rnd();
         nb[0] |= 0x80, nb[255] |= 1;

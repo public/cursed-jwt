@@ -20,13 +20,9 @@ CC ?= cc
 PYTHON ?= python3
 B := build
 UNAME_M := $(shell uname -m)
-ifeq ($(UNAME_M),x86_64)
-ARCHFLAGS ?= -march=haswell
-else ifeq ($(UNAME_M),aarch64)
-ARCHFLAGS ?= -march=armv8.2-a+crypto+sha3
-else ifeq ($(UNAME_M),arm64)
-ARCHFLAGS ?= -mcpu=native
-endif
+# No -march by default: the library is built for the baseline ISA and picks its engines at run time from the CPU
+# (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
+ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
 # ELF only).  `make OSSL_SHA=` builds without it.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
@@ -151,7 +147,7 @@ fuzz:
 
 # RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
 PK := -DJWT_PK -Ithird_party/fiat
-PKSRC := $(SRC) src/jwt_pk.inc third_party/fiat/p256_64.c
+PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc third_party/fiat/p256_64.c
 third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
 	./scripts/fetch-fiat.sh
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)

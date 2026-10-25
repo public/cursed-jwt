@@ -16,11 +16,96 @@
 #include <arm_neon.h>
 #define JWT_HAVE_NEON 1
 #endif
-#if defined(__AVX2__)
+#if defined(__x86_64__) || defined(__AVX2__)
 #include <immintrin.h>
 #endif
 
 #define JWT_INLINE static inline __attribute__((always_inline))
+
+/* ---- run-time CPU dispatch ----
+ * The library is compiled for the baseline ISA (x86-64, ARMv8-A) and carries every engine the architecture can
+ * have: the AVX2 and AVX-512VL engines are compiled inside target regions on x86-64, the SHA2 engine inside one on
+ * AArch64.  jwt_cpu (filled by a constructor from CPUID + XGETBV, or HWCAP / sysctl) picks the best one the
+ * machine has at every entry point, falling back down to scalar.  Building with -march=native still works: the
+ * regions are then no-ops, and dispatch still checks the CPU. */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define JWT_X86 1
+#if defined(__clang__)
+#define JWT_BEGIN_AVX2 _Pragma("clang attribute push (__attribute__((target(\"avx2,bmi,bmi2\"))), apply_to = function)")
+#define JWT_BEGIN_AVX512 \
+    _Pragma("clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx2,bmi,bmi2\"))), apply_to = function)")
+#define JWT_END_TARGET _Pragma("clang attribute pop")
+#else
+#define JWT_BEGIN_AVX2 _Pragma("GCC push_options") _Pragma("GCC target(\"avx2,bmi,bmi2\")")
+#define JWT_BEGIN_AVX512 _Pragma("GCC push_options") _Pragma("GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx2,bmi,bmi2\")")
+#define JWT_END_TARGET _Pragma("GCC pop_options")
+#endif
+#endif
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#define JWT_ARM_SHA2 1 /* the SHA2-instruction engine is always compiled on AArch64 */
+#if defined(__ARM_FEATURE_SHA2)
+#define JWT_BEGIN_SHA2
+#define JWT_END_SHA2
+#elif defined(__clang__)
+#define JWT_BEGIN_SHA2 _Pragma("clang attribute push (__attribute__((target(\"sha2\"))), apply_to = function)")
+#define JWT_END_SHA2 _Pragma("clang attribute pop")
+#else
+#define JWT_BEGIN_SHA2 _Pragma("GCC push_options") _Pragma("GCC target(\"+crypto\")")
+#define JWT_END_SHA2 _Pragma("GCC pop_options")
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+#endif
+#endif
+
+#define JWT_CPU_DETECTED (1u << 31) /* the JWT_CPU_* bits are in jwt.h */
+static unsigned jwt_cpu_bits;
+#if defined(JWT_X86)
+#include <cpuid.h>
+#endif
+__attribute__((constructor)) static void jwt_cpu_init(void) {
+    unsigned f = JWT_CPU_DETECTED;
+#if defined(JWT_X86)
+    unsigned a, b, c, d, ecx1 = 0, ebx7 = 0;
+    if (__get_cpuid(1, &a, &b, &c, &d)) ecx1 = c;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b;
+    unsigned xcr0 = 0;
+    if (ecx1 & (1u << 27)) { /* OSXSAVE: the OS manages the vector state that XCR0 lists */
+        unsigned hi;
+        __asm__("xgetbv" : "=a"(xcr0), "=d"(hi) : "c"(0));
+    }
+    int ymm = (xcr0 & 6) == 6, zmm = ymm && (xcr0 & 0xE0) == 0xE0;
+    if (ymm && (ebx7 & (1u << 5)) && (ebx7 & (1u << 3)) && (ebx7 & (1u << 8))) f |= JWT_CPU_AVX2; /* + BMI1, BMI2 */
+    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 17)))
+        f |= JWT_CPU_AVX512VL; /* F, VL, BW, DQ */
+    if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
+    if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
+    if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+#elif defined(JWT_ARM_SHA2)
+#if defined(__APPLE__)
+    int v = 0;
+    size_t vl = sizeof v;
+    if (!sysctlbyname("hw.optional.arm.FEAT_SHA256", &v, &vl, NULL, 0) && v) f |= JWT_CPU_SHA2;
+    v = 0, vl = sizeof v;
+    if (!sysctlbyname("hw.optional.arm.FEAT_SHA512", &v, &vl, NULL, 0) && v) f |= JWT_CPU_SHA512;
+#elif defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+    if (hw & (1ul << 6)) f |= JWT_CPU_SHA2;    /* HWCAP_SHA2 */
+    if (hw & (1ul << 21)) f |= JWT_CPU_SHA512; /* HWCAP_SHA512 */
+#elif defined(__ARM_FEATURE_SHA2)
+    f |= JWT_CPU_SHA2;
+#endif
+#endif
+    if (getenv("JWT_CPU_MASK")) f &= (unsigned)strtoul(getenv("JWT_CPU_MASK"), NULL, 0) | JWT_CPU_DETECTED; /* tests: pretend */
+    jwt_cpu_bits = f;
+}
+static unsigned jwt_cpu(void) {
+    if (!jwt_cpu_bits) jwt_cpu_init(); /* a caller that runs before constructors */
+    return jwt_cpu_bits;
+}
+unsigned jwt_cpu_features(void) { return jwt_cpu() & ~JWT_CPU_DETECTED; }
 
 /* ======================================================================================
  * 1. constants, plans, key
@@ -301,7 +386,8 @@ JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t
 #endif /* NEON */
 
 /* ---- AVX2 8 lanes, and the AVX-512VL flavour of the very same code ---- */
-#if defined(__AVX2__)
+#if defined(JWT_X86)
+JWT_BEGIN_AVX2
 JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
     __m256i t0 = _mm256_unpacklo_epi32(r[0], r[1]), t1 = _mm256_unpackhi_epi32(r[0], r[1]);
     __m256i t2 = _mm256_unpacklo_epi32(r[2], r[3]), t3 = _mm256_unpackhi_epi32(r[2], r[3]);
@@ -371,7 +457,9 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #undef VMAJ
 #undef VSEL
 
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
 /* Identical to the AVX2 instantiation except for these five macros (tested on a Xeon Platinum 8260).
  * vpternlogd immediates (truth table index = a<<2 | b<<1 | c):
  *   0x96 = a^b^c, 0xCA = a ? b : c (Ch, and the lane select), 0xE8 = majority.
@@ -391,6 +479,8 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #undef VCH
 #undef VMAJ
 #undef VSEL
+JWT_END_TARGET
+JWT_BEGIN_AVX2
 #endif
 
 #undef MB_LANES
@@ -499,7 +589,9 @@ V2OP3(v2_sel_avx2, A2_SEL)
 #undef VMAJ
 #undef VSEL
 
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
 #define T2_XOR3(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_XOR3)
 #define T2_CH(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_CH)
 #define T2_MAJ(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_MAJ)
@@ -519,6 +611,8 @@ V2OP3(v2_maj_512, T2_MAJ)
 #undef VCH
 #undef VMAJ
 #undef VSEL
+JWT_END_TARGET
+JWT_BEGIN_AVX2
 #endif
 #undef MB_NO_DRIVER
 #undef MB_LANES
@@ -570,7 +664,9 @@ static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, con
 void jwt_hmac_avx2x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_avx2x2, lanes_avx2, k, n, msg, len, mac);
 }
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
 void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_avx512x2, lanes_avx512, k, n, msg, len, mac);
 }
@@ -637,11 +733,15 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
+JWT_END_TARGET
+JWT_BEGIN_AVX2
 #endif
+JWT_END_TARGET
 #endif /* AVX2 */
 
 /* ---- ARMv8 SHA2 instructions: S independent streams interleaved for latency hiding ---- */
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(JWT_ARM_SHA2)
+JWT_BEGIN_SHA2
 /* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
 JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t (*m)[4]) {
     uint32x4_t a0[4], a1[4];
@@ -744,6 +844,7 @@ void jwt_hmac_sha2_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const
 void jwt_hmac_sha2_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     ce_drive(4, k, n, msg, len, mac);
 }
+JWT_END_SHA2
 #endif /* SHA2 */
 
 /* ======================================================================================
@@ -837,7 +938,8 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
 }
-#elif defined(__AVX2__)
+#elif defined(JWT_X86)
+JWT_BEGIN_AVX2
 /* 32 chars -> 24 bytes (Muła/Lemire packing; base64url translation via range compares).
  * Stores 32 bytes per block: dst needs the 32 bytes of slack jwt.h asks for. */
 JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
@@ -862,7 +964,7 @@ JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
     _mm256_storeu_si256((__m256i *)dst, x);
     return _mm256_xor_si256(ok, _mm256_set1_epi8(-1)); /* 0xFF where invalid */
 }
-int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
+static int b64url_decode_avx2(uint8_t *dst, const char *src, int n) {
     int i = 0, o = 0;
     __m256i bad = _mm256_setzero_si256();
     for (; i + 32 <= n; i += 32, o += 24) bad = _mm256_or_si256(bad, avx2_b64_32(src + i, dst + o));
@@ -877,6 +979,10 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
     if (!_mm256_testz_si256(bad, bad)) return -1;
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
+}
+JWT_END_TARGET
+int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
+    return jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2(dst, src, n) : jwt_b64url_decode_scalar(dst, src, n);
 }
 #else
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_decode_scalar(dst, src, n); }
@@ -1949,53 +2055,79 @@ void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, co
     verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
 }
 #endif
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(JWT_ARM_SHA2)
 void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_sha2);
 }
 #endif
-#if defined(__AVX2__)
+#if defined(JWT_X86)
 void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_avx2);
 }
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
 void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                              jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_avx512);
 }
 #endif
 
+/* the best engine this CPU has (run-time dispatch; see the top of the file) */
+static jwt_hmac_fn *hmac_default(void) {
+    unsigned f = jwt_cpu();
+    (void)f;
+#if defined(JWT_ARM_SHA2)
+    if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
+#endif
+#if defined(JWT_X86)
+    if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
+    if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
+#endif
+#if defined(JWT_HAVE_NEON)
+    return jwt_hmac_neon;
+#else
+    return jwt_hmac_scalar;
+#endif
+}
+static jwt_sha256_fn *sha256_default(void) {
+    unsigned f = jwt_cpu();
+    (void)f;
+#if defined(JWT_ARM_SHA2)
+    if (f & JWT_CPU_SHA2) return jwt_sha256_sha2;
+#endif
+#if defined(JWT_X86)
+    if (f & JWT_CPU_AVX512VL) return jwt_sha256_avx512;
+    if (f & JWT_CPU_AVX2) return jwt_sha256_avx2;
+#endif
+#if defined(JWT_HAVE_NEON)
+    return jwt_sha256_neon;
+#else
+    return jwt_sha256_scalar;
+#endif
+}
+const char *jwt_engine(void) {
+    jwt_hmac_fn *h = hmac_default();
+#if defined(JWT_ARM_SHA2)
+    if (h == jwt_hmac_sha2) return "sha2";
+#endif
+#if defined(JWT_X86)
+    if (h == jwt_hmac_avx512) return "avx512vl";
+    if (h == jwt_hmac_avx2) return "avx2";
+#endif
+#if defined(JWT_HAVE_NEON)
+    if (h == jwt_hmac_neon) return "neon";
+#endif
+    return "scalar";
+}
+
 void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                       jwt_result_t *out) {
-#if defined(__ARM_FEATURE_SHA2)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_sha2);
-#elif defined(JWT_AVX512) && defined(__AVX512VL__)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx512);
-#elif defined(__AVX2__)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx2);
-#elif defined(JWT_HAVE_NEON)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
-#else
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_scalar);
-#endif
+    verify_impl(k, n, tok, len, now, out, hmac_default());
 }
 
 /* plain SHA-256 of n messages on the default engine (the RS256 / ES256 signing inputs) */
 void jwt_sha256_batch(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
-#if defined(__ARM_FEATURE_SHA2)
-    jwt_sha256_sha2(n, msg, len, dig);
-#elif defined(JWT_AVX512) && defined(__AVX512VL__)
-    jwt_sha256_avx512(n, msg, len, dig);
-#elif defined(__AVX2__)
-    jwt_sha256_avx2(n, msg, len, dig);
-#elif defined(JWT_HAVE_NEON)
-    jwt_sha256_neon(n, msg, len, dig);
-#else
-    jwt_sha256_scalar(n, msg, len, dig);
-#endif
+    sha256_default()(n, msg, len, dig);
 }
 
 #ifdef JWT_PK
