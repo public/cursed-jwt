@@ -404,6 +404,44 @@ engine; each figure is the median of 300 trials.
 
 **RS256 / ES256:** [PK.md](PK.md) has every build at every batch size, on both machines.
 
+### Estimating other CPUs (`make mca`)
+
+`scripts/mca/mca.sh` runs each SHA-256 engine's block function (`scripts/mca/kernels.c`) through static pipeline
+models, for CPUs we can't run on. The output is cycles per byte per message, for one 64-byte block per lane.
+- **llvm-mca** (LLVM, Apache-2.0): every x86 and Arm model LLVM has. The script says which models repeat
+  (LLVM 23 has none for Granite Rapids, Zen 5 or Sierra Forest).
+- **uiCA** ([uops.info](https://uops.info), AGPL-3.0, fetched by `scripts/mca/fetch-uica.sh`, never vendored):
+  Intel only, up to Ice Lake / Tiger Lake. `UICA=path` reuses an existing checkout.
+- **`make mca-validate`** measures the same functions with `perf stat` on the machine it runs on
+  (`scripts/mca/validate.sh`, x86-64 Linux) and adds them as columns.
+
+Calibration on the Xeon Platinum 8260 (`make mca-validate`, clang 18), cycles per byte per message:
+
+| engine | measured, one message's blocks | measured, independent | uiCA | llvm-mca |
+|---|---|---|---|---|
+| scalar | 15.4 | 15.6 | 16.1 | 8.9 |
+| AVX2, 8 lanes | 2.43 | 2.35 | 2.23 | 1.31 |
+| AVX2, 2 × 8 lanes | 2.80 | 2.64 | 2.63 | 1.46 |
+| AVX-512VL, 8 lanes (default) | 1.34 | 1.45 | 1.44 | 0.70 |
+| AVX-512VL, 2 × 8 lanes | 1.66 | 1.61 | 1.68 | 0.78 |
+| zmm, 16 lanes | 0.86 | 0.84 | 0.83 | 0.66 |
+
+- **uiCA** is within about 5% of the measurement on every engine.
+- **llvm-mca** gets the order right but is 1.3–2.1× optimistic, so read its other CPUs as relative numbers.
+- **Chained vs independent calls** cost about the same, because one compress is already one long dependency chain.
+- **zmm is the cheapest compress per byte.** It isn't the default because of the frequency-licence drop
+  measured by `make licence`, which cycle counts can't show.
+
+What the models add (llvm-mca, cycles per byte per message, relative):
+- **Zen 4 / Zen 5:**
+  - AVX-512VL 8 lanes: 1.21;
+  - zmm: 0.61, about 2× cheaper, on CPUs without Cascade Lake's licence drop;
+  - AVX2: 1.28.
+- **Arm, SHA2 instructions:** 2.1 on Neoverse N1 (Ampere Altra), 0.69–0.97 on N2 / V1 / V2 / V3.
+- **Arm, NEON 4-lane multi-buffer:** 2.4–5.4 on the same models, so the SHA2-instruction engine should stay the
+  default on every one of them.
+- `apple-m4`'s scalar figure (26) is out of line with every other model; don't use it.
+
 ## Limits
 
 - **Algorithms.** HS256 by default. RS256 and ES256 are an opt-in prototype; there's no EdDSA, no JWE and no

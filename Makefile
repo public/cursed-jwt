@@ -16,6 +16,8 @@
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
 #   make pk-test-fast / pk-bench-fast s2n-bignum for P-256 + OpenSSL's BN asm for RSA (-DJWT_S2N -DJWT_OPENSSL)
 #   make pk-test-ifma / pk-bench-ifma + Intel crypto_mb 8-way AVX-512 IFMA (Linux x86-64; IFMA CPU to exercise it)
+#   make mca          static estimates of every SHA-256 engine per CPU model (llvm-mca; + uiCA, scripts/mca/fetch-uica.sh)
+#   make mca-validate perf-measured cycles of the same engines on this machine (x86-64 Linux; scripts/mca/validate.sh)
 # Engine selection is compile-time, from ARCHFLAGS (see README.md).
 CC ?= cc
 PYTHON ?= python3
@@ -238,6 +240,13 @@ pk-bench-s2n: $(B)/bench_pk_s2n $(B)/bench_pk_s2n_screen $(B)/pk_tokens.txt
 pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
 	ASAN_OPTIONS=detect_leaks=0 ./$(B)/asan_pk $(B)/pk_vectors.txt
 
+# static throughput estimates per engine and CPU model, and the measurement to check them against (README, Benchmarks)
+mca:
+	./scripts/mca/mca.sh
+mca-validate: | $(B)
+	./scripts/mca/validate.sh > $(B)/mca-measured.txt
+	MEASURED=$(B)/mca-measured.txt ./scripts/mca/mca.sh
+
 clean:
 	rm -rf $(B)
-.PHONY: pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
