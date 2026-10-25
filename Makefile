@@ -8,6 +8,9 @@
 #   make compare      full verify vs jwt-cpp and golang-jwt (fetched at pinned commits; go optional)
 #   make avx512       real AVX-512VL build of the test and bench (run them on an AVX-512 CPU)
 #   make licence      AVX-512 frequency-licence probe (meaningful only on AVX-512 hardware)
+#   make fuzz-smoke   fuzz harnesses replaying their seed/saved corpora under ASan + UBSan (seconds, local)
+#   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
+#   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
 #   make pk-test      RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
 #   make pk-bench     RS256 / ES256 ns/token vs OpenSSL (network for the fiat-crypto fetch)
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
@@ -119,6 +122,33 @@ avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
 licence: bench/licence_probe.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< $(X86SHA) -o $(B)/licence_probe && ./$(B)/licence_probe
 
+# property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
+HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run
+$(B)/pyenv-hyp: | $(B)
+	@if $(PYTHON) -c "import cryptography, hypothesis" 2>/dev/null; then echo $(PYTHON) > $@; \
+	  else $(PYTHON) -m venv $(B)/venv && $(B)/venv/bin/pip -q install cryptography "hypothesis==6.*" && echo $(B)/venv/bin/python > $@; fi
+$(B)/libjwtshim.so: tests/pyshim.c $(PKSRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) -shared -fPIC $(INC) $(PK) $< $(X86SHA) -o $@
+test-hypothesis: $(B)/libjwtshim.so $(B)/pyenv-hyp
+	$$(cat $(B)/pyenv-hyp) -I tests/test_hypothesis.py $(B)/libjwtshim.so $(HYP_N)
+
+# fuzz harnesses (fuzz/): fuzz-smoke replays the seed corpora (and any corpus in build/fuzz-*/) under ASan + UBSan,
+# locally, in seconds; fuzz runs libFuzzer in Docker, 10 s per harness by default (FUZZ_SECS, JOBS for longer runs)
+FUZZ_SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all $(ARCHFLAGS) $(WARN) $(INC) $(SSLINC)
+$(B)/replay_verify: fuzz/fuzz_verify.c fuzz/replay.c $(SRC) | $(B)
+	$(CC) $(FUZZ_SAN) fuzz/fuzz_verify.c fuzz/replay.c $(SSLLIB) -lcrypto $(X86SHA) -o $@
+$(B)/replay_b64: fuzz/fuzz_b64.c fuzz/replay.c $(SRC) | $(B)
+	$(CC) $(FUZZ_SAN) fuzz/fuzz_b64.c fuzz/replay.c $(X86SHA) -o $@
+$(B)/replay_pk: fuzz/fuzz_pk.c fuzz/replay.c $(PKSRC) | $(B)
+	$(CC) $(FUZZ_SAN) $(PK) -DJWT_RSA_SCREEN fuzz/fuzz_pk.c fuzz/replay.c $(SSLLIB) -lcrypto $(X86SHA) -o $@
+fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_pk
+	@python3 -I fuzz/seeds.py $(B)/fuzz-seeds >/dev/null
+	@for h in verify b64 pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
+	  $$(ls -d $(B)/fuzz-*/corpus/$$h 2>/dev/null) || exit 1; done
+FUZZ_SECS ?= 10
+fuzz:
+	./scripts/fuzz.sh "" $(FUZZ_SECS)
+
 # RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
 PK := -DJWT_PK -Ithird_party/fiat
 PKSRC := $(SRC) src/jwt_pk.inc third_party/fiat/p256_64.c
@@ -196,4 +226,4 @@ pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
 
 clean:
 	rm -rf $(B)
-.PHONY: pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean

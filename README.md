@@ -186,6 +186,8 @@ make              # build/libcursedjwt.a, build/verify
 make test         # every engine vs OpenSSL + the claim rules (~6 s)
 make test-quick   # fewer random iterations (CI)
 make test-vectors # + RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography vectors (network)
+make test-hypothesis # property-based tests vs an independent Python model (Hypothesis; network for the venv)
+make fuzz-smoke   # fuzz harnesses replaying their corpora under ASan + UBSan (seconds); `make fuzz` = libFuzzer
 make asan         # ASan + UBSan
 make bench        # ns/token per engine and batch size, vs OpenSSL
 make compare      # full verify vs jwt-cpp and golang-jwt, fetched at pinned commits (network; go optional)
@@ -259,6 +261,44 @@ vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SH
   batch. That way invalid signatures sit next to valid ones.
 - **Builds covered:** every backend (portable C, s2n-bignum, libcrypto) and comb window (W = 5, 7, 8), with and
   without screening.
+
+### Generated tests: property-based and fuzzing
+
+Two generators look for cases nobody wrote down.
+
+**Hypothesis** (`make test-hypothesis`, `tests/test_hypothesis.py`):
+- **What it generates:** whole JWTs —
+  - claims of every JSON type near the boundaries: `exp`/`nbf` around now in every number spelling, `sub` around 1
+    and 2^63−1 with leading zeros and escapes, usernames straddling 255 bytes with multibyte characters and lone
+    surrogates;
+  - nesting around the 32-level limit, duplicate and escaped keys, random whitespace;
+  - header variants, wrong secrets;
+  - corruption of the JSON, the base64url and the signature.
+- **What it checks against:** an independent Python model written from the claim table above. Python's `json`
+  (with NaN, duplicates and depth checked by hand) decides JSON validity, `hmac` computes HS256, and
+  pyca/cryptography signs and verifies RS256/ES256 (including near-valid ES256 edge signatures).
+- **Engines and batches:** every token runs on every engine in a random batch, through a ctypes shim
+  (`tests/pyshim.c`).
+- **Cost:** 200 examples per property by default, about 10 s. `HYP_N=20000` gives a long run.
+- **It catches planted bugs:** off-by-one mutants of the `exp` boundary and the username limit both failed it.
+
+**libFuzzer** (`fuzz/`), coverage-guided under ASan + UBSan:
+
+| harness | oracle |
+|---|---|
+| `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher and the simdjson-style path agree with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
+| `fuzz_b64` | SIMD and scalar base64url decoders agree with an RFC 4648 reference written in the harness |
+| `fuzz_pk` | mutated real ES256/RS256 signatures (byte flips, the other valid s, r or s at 0/1/n−1/n/n+1) get OpenSSL's verdict, alone and among valid fillers in a batch; built as portable C, with screening and with libcrypto BN |
+
+```bash
+make fuzz-smoke   # replay the seeds and any saved corpus under ASan + UBSan, locally (~2 s): for every change
+make fuzz         # libFuzzer in Docker, 10 s per harness, one worker: a quick check
+JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in build/fuzz-<arch>/
+```
+
+- **Limit of the fuzzing:** in a 3-minute, 6-worker trial it did not find a planted off-by-one in the shape
+  matcher's username limit. That path only fires on one exact payload layout, so the property tests and the crafted
+  cases are what cover it.
 
 **Platforms run:**
 
