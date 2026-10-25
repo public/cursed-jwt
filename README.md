@@ -1,63 +1,53 @@
 # cursed-jwt
 
-Batch HS256 JWT verification in C. It checks many tokens with **one multi-buffer SIMD HMAC-SHA256 pass**:
+Batch JWT verification in C. HS256 tokens are checked many at a time, with **one multi-buffer SIMD HMAC-SHA256
+pass**:
 - AVX-512VL or AVX2 hash 8 tokens per vector on x86;
 - interleaved ARMv8 SHA2 instructions hash 4 streams on ARM;
-- a portable scalar engine covers everything else.
+- a lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
 
-The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JSON parser with a shape-matched
-fast path. Every signature is recomputed on every call; nothing is cached except the key's HMAC ipad/opad
-midstates.
+The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JSON parser with a shape-matched fast
+path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates.
 
-RS256 and ES256 are an opt-in prototype (`-DJWT_PK`) with the same front end. ES256 builds per-key comb tables, and
-RS256 has an optional batch "screening" mode. Both use s2n-bignum's or libcrypto's asm kernels where those are
-faster. Against OpenSSL that is 3.5–5.1× on ES256 and up to 6.1× on batched RS256; [PK.md](PK.md) has the details.
+RS256 and ES256 are an opt-in prototype with the same front end ([PK.md](PK.md)).
 
-On a Xeon Platinum 8260 (no SHA-NI), a full verify costs **277 ns per token at batch 8** and 938 ns for a lone
-token. On the same box, jwt-cpp takes 6,201 ns and golang-jwt v5 8,739 ns per token: **5–24× faster**.
+## At a glance
 
-### Benchmark comparison at a glance
-
-Full verify (signature + base64url + JSON + claims), ns per token, Intel Xeon Platinum 8260 (Cascade Lake, no
-SHA-NI), Ubuntu 24.04, kernel 6.8, gcc 13.3. Every implementation accepted the same tokens and rejected a forged
-one. Method and full tables are under [Benchmarks](#benchmarks).
+**HS256 full verify** (signature, base64url, JSON, claims), ns per token, on an Intel Xeon Platinum 8260 (Cascade
+Lake, no SHA-NI). Every implementation accepted the same 20,000 tokens and rejected a forged one.
 
 | implementation | batch 1 | batch 3 | batch 8 |
 |---|---|---|---|
-| **cursed-jwt** (AVX-512VL ymm, shape-matched JSON) | **938** | **508** | **277** |
-| cursed-jwt, strict JSON only | 1,276* | 617 | 376 |
-| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,201 | 6,201 | 6,201 |
-| [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,739 | 8,739 | 8,739 |
+| **cursed-jwt** | **922** | **507** | **277** |
+| cursed-jwt, strict JSON only | 1,038 | 615 | 375 |
+| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,236 | 6,236 | 6,236 |
+| [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,673 | 8,673 | 8,673 |
 
-| HMAC-SHA256 only, ns/token | batch 1 | batch 8 |
-|---|---|---|
-| **cursed-jwt AVX-512VL ymm ×8** | **763** | **155** |
-| cursed-jwt AVX2 ×8 | 763 | 222 |
-| OpenSSL, precomputed ipad/opad midstates | 764 | 763 |
-| OpenSSL `HMAC()` | 2,878 | 2,870 |
+That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521.
 
-- **Batch 1 runs OpenSSL's own x86-64 SHA-256 code**, extracted into `src/sha256_x86_64_ossl.S` (Apache-2.0, see
-  [THIRD_PARTY.md](THIRD_PARTY.md)). That's why it ties OpenSSL there: the compiled scalar template took 1,015 ns.
-- \* The strict-JSON batch-1 figure was measured before that change. Expect ~1,040.
+**RS256 / ES256** (prototype, fastest build), µs per token against OpenSSL `EVP_DigestVerify`:
 
-On an Apple M5 Pro (`make compare`): cursed-jwt 116 ns/token at batch 8, jwt-cpp 2,521.
+| | Xeon, batch 1 | Xeon, batch 16 | Xeon, OpenSSL | M5, batch 16 | M5, OpenSSL |
+|---|---|---|---|---|---|
+| ES256 | 21.7 | **15.4** | 78.6 | **9.2** | 32.4 |
+| RS256-2048 | 16.5 | 16.4 | 23.1 | 8.3 | 9.0 |
+| RS256-2048, batch screening | 16.4 | **3.8** | 23.1 | **2.35** | 9.0 |
 
 ## Contents
 
-- [API](#api)
+- [Using it](#using-it)
 - [Claim semantics](#claim-semantics)
-- [Why it's fast](#why-its-fast)
-- [Build matrix](#build-matrix)
-- [Build and test](#build-and-test)
+- [How it works](#how-it-works)
+- [Building](#building)
+- [Testing](#testing)
 - [Benchmarks](#benchmarks)
 - [Limits](#limits)
 - [Licence](#licence)
 
-## API
+## Using it
 
 ```c
-#include "jwt.h"            // link build/libcursedjwt.a (or compile src/jwt.c into your program; on x86-64 Linux
-                            // also assemble src/sha256_x86_64_ossl.S and define JWT_OSSL_SHA256 for the fast batch-1 path)
+#include "jwt.h"            // link build/libcursedjwt.a (see Building to compile the sources yourself)
 
 jwt_key_t key;
 jwt_key_init(&key, secret, secret_len);          // once: HMAC ipad/opad midstates (any key length)
@@ -72,23 +62,25 @@ jwt_verify_batch(&key, n, tok, len, time(NULL), out);   // live iff nbf <= now <
 // out[i].username_escape == 0: the username bytes can go verbatim between JSON quotes
 ```
 
-`out[i].username` points into `out[i].ubuf`, so don't copy the struct and keep the pointer. `jwt_verify_batch` uses
-about 17 KB of stack. It is thread-safe: no global state, and the key is read-only after init.
+- **Lifetime of `username`.** `out[i].username` points into `out[i].ubuf`, so don't copy the struct and keep the
+  pointer.
+- **Stack and threads.** `jwt_verify_batch` uses about 17 KB of stack. It is thread-safe: no global state, and the
+  key is read-only after init.
+- **Lower-level entry points**, for your own claims or for benchmarks:
+  - `jwt_hmac_*`: raw HMAC-SHA256 of n messages per engine;
+  - `jwt_b64url_decode`: base64url decode;
+  - `jwt_verify_batch_<engine>`: the full verify on a chosen engine.
+- **A complete program:** `examples/verify.c`, built as `build/verify SECRET TOKEN...`.
 
-Lower-level entry points, for your own claims or for benchmarks:
-- `jwt_hmac_*`: raw multi-buffer HMAC-SHA256 of n messages per engine;
-- `jwt_b64url_decode`: base64url decode;
-- `jwt_verify_batch_<engine>`: the full verify on a chosen engine.
-
-`examples/verify.c` is a complete program: `build/verify SECRET TOKEN...`.
-
-RS256 / ES256 (prototype, `-DJWT_PK`; the setup and the backends are in [PK.md](PK.md)):
+**RS256 / ES256** (prototype, build with `-DJWT_PK`; see [PK.md](PK.md)):
 
 ```c
 jwt_pkey_t *pk = jwt_pkey_es256(x, y);      // or jwt_pkey_rs256(n, n_len, e, e_len); NULL if the key is invalid
-jwt_verify_batch_pk(pk, n, tok, len, time(NULL), out);   // same results and claim rules; "alg" must match the key
+jwt_verify_batch_pk(pk, n, tok, len, time(NULL), out);   // same results and claim rules
 jwt_pkey_free(pk);
 ```
+
+The key fixes the algorithm: a token's `alg` must equal it.
 
 ## Claim semantics
 
@@ -113,40 +105,51 @@ Other details:
 - a lone surrogate escape in `username` decodes to U+FFFD;
 - `now` is whole seconds.
 
-The claim profile (`sub` as a numeric user id, `username` as a string) is built in. For other claims, use
-`jwt_hmac_*` and the JSON parser in `src/jwt.c` as building blocks.
+The claim profile (`sub` as a numeric user id, `username` as a string) is built in. For other claims, use `jwt_hmac_*`
+and the JSON parser in `src/jwt.c` as building blocks.
 
-## Why it's fast
+For RS256/ES256 the signature length is 342 (RSA-2048) or 86 (ES256) characters instead of 43. `alg` must name the
+key's algorithm; the rest is identical.
+
+## How it works
 
 - **Multi-buffer HMAC.**
   - One SHA-256 "template" (`src/jwt_mb.inc`) is instantiated per ISA. One vector register holds the same state
-    word of 8 (x86) or 4 (NEON) different messages, so 8 tokens hash in roughly the time of 1.
+    word of 8 (x86) or 4 (NEON) messages, so 8 tokens hash in roughly the time of 1.
   - HMAC plans give each message `ceil((L+9)/64)` blocks after the ipad midstate. Only the 1–2 tail blocks are
     copied; full blocks are read in place.
-  - Plans are sorted by block count, so vectors are almost never ragged. When they are, a finished lane keeps
-    its state through a mask select.
+  - Plans are sorted by block count, so vectors are almost never ragged. When they are, a finished lane keeps its
+    state through a mask select.
   - The outer hash never leaves registers: the inner digest becomes W0..7 directly.
-- **AVX-512VL on ymm**, not zmm:
-  - `vprord` for rotates, and `vpternlogd` for the three-input functions (0x96 xor3, 0xCA Ch and the lane select,
+- **AVX-512VL on ymm, not zmm.**
+  - `vprord` does the rotates; `vpternlogd` does the three-input functions (0x96 xor3, 0xCA Ch and the lane select,
     0xE8 Maj).
-  - A zmm burst slows *all following code* by 19.4% for 0.5–1 ms on Cascade Lake (measured, below). ymm costs 0%.
-- **ARM uses SHA2 instructions, interleaved.** NEON multi-buffer is 2.9× slower than one stream of `sha256h`.
-  Interleaving 4 independent streams hides the instruction latency instead (−15%).
+  - A zmm burst slows *all following code* by 19.4% for 0.5–1 ms on Cascade Lake. ymm costs 0% (measured below).
+- **ARM uses the SHA2 instructions, interleaved.** NEON multi-buffer is 2.9× slower than one stream of `sha256h`.
+  Interleaving 4 independent streams hides the instruction latency (−15%).
+- **One token at a time uses the best single-stream code there is.**
+  - A lone token, and any lanes left over when a group is too small for a vector, can't use 8-way parallelism.
+  - On x86-64 Linux they run OpenSSL's `sha256_block_data_order`, extracted and vendored as
+    `src/sha256_x86_64_ossl.S`. It picks SHA-NI, AVX2+BMI2, AVX, SSSE3 or plain x86-64 code at run time.
+  - On the Xeon it is 25% faster than the compiled template (752 vs 1,007 ns per HMAC).
 - **Front end:**
   - base64url uses `vld4q` + `vqtbl4q` on NEON, and range compares + `maddubs`/`pshufb` packing on AVX2;
-  - a shape matcher recognises the common compact payload `{"sub":"…","username":"…","iat":N,"exp":N}` in
-    37 ns, and falls back to the strict parser (131 ns) for anything else;
+  - a shape matcher recognises the common compact payload `{"sub":"…","username":"…","iat":N,"exp":N}` in 37 ns,
+    and falls back to the strict parser (131 ns) for anything else;
   - SWAR integer parsing;
   - `exp`/`nbf` are compared with `now` by digit count, then bytewise, with no number conversion.
-- **Batch 1 on x86-64 Linux runs OpenSSL's own SHA-256 asm**, extracted (`src/sha256_x86_64_ossl.S`). There is
-  no 8-way parallelism to exploit for one token, and OpenSSL's hand-scheduled AVX2+BMI2 code beats the compiled
-  scalar template by 25%.
 - **Identical results either way.** The shape matcher and the opt-in simdjson-style path both defer to the strict
   parser on anything unusual. The tests fuzz each against it.
+- **RS256 / ES256** don't batch like HMAC: SIMD across tokens would need AVX-512 IFMA. Instead:
+  - ES256 precomputes comb tables for the public key at key setup, so a verify is two fixed-base multiplications.
+  - RS256 can check a whole batch with one exponentiation ("screening"), which is opt-in because of a caveat.
+  - Both use AWS s2n-bignum's verified asm or libcrypto's bignum asm where those beat portable C.
+  - [PK.md](PK.md) has the design, the survey of other implementations, the licences and every number.
 
-## Build matrix
+## Building
 
-The engine is chosen at compile time. Every engine the target can run is also exported for tests.
+The library needs only a C compiler. `make` builds `build/libcursedjwt.a` and `build/verify`. The engine is chosen
+at compile time:
 
 | target | flags | default engine |
 |---|---|---|
@@ -156,194 +159,170 @@ The engine is chosen at compile time. Every engine the target can run is also ex
 | AArch64 without SHA2 | `-march=armv8-a` | NEON, 4 lanes |
 | anything else | — | scalar |
 
-A batch of 1 runs one message at a time, because one token through an 8-lane block costs the same as 8. So do
-the leftover lanes of a group too small for a vector.
-- **On x86-64 Linux**, that single-stream path is OpenSSL's `sha256_block_data_order`, extracted and vendored as
-  `src/sha256_x86_64_ossl.S`. It dispatches at run time to SHA-NI, AVX2+BMI2, AVX, SSSE3 or plain x86-64 code.
-  The Makefile builds it with `-DJWT_OSSL_SHA256`; `make OSSL_SHA=` turns it off.
-- **Everywhere else** it's the compiled scalar template, or one stream of the SHA2 instructions on ARM.
-- **With it, the AVX2-only engine starts using vectors at 3 messages, not 2.** Two single streams (2 × 753 ns)
-  beat a 2-lane AVX2 group (822 ns).
+- **On x86-64 Linux** the Makefile also assembles `src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you
+  compile `src/jwt.c` into your own program, do the same (or leave both out to get the compiled scalar code).
+  `make OSSL_SHA=` builds without it.
+- Every engine the target can run is also exported, for tests and benchmarks. The 16-lane `jwt_hmac_zmm` and
+  `jwt_hmac_avx512x2` exist only for that.
 
-Options:
-- `-DJWT_INPUT_PADDED`: every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads.
-- `-DJWT_NO_SHAPE_JSON`: strict parser only.
-- `-DJWT_FAST_JSON`: the simdjson-style path, 3–4% slower on a Xeon.
-- `-DJWT_LANE_JSON`: lane-parallel JSON, which only pays at batch ≥ 32.
-- `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX`: size limits.
-- `-DJWT_OSSL_SHA256`: the extracted OpenSSL single-stream SHA-256 (x86-64 ELF). The Makefile sets it on x86-64
-  Linux.
-- **RS256 / ES256 prototype**, all described in [PK.md](PK.md):
-  - `-DJWT_PK` turns it on. Without the next two it needs only fiat-crypto's generated C (`scripts/fetch-fiat.sh`).
-  - `-DJWT_S2N` uses s2n-bignum's asm (`scripts/fetch-s2n-bignum.sh`; on x86 it needs BMI2 and ADX).
-  - `-DJWT_OPENSSL` uses libcrypto's BN for RSA.
-  - `-DJWT_RSA_SCREEN` turns on RSA batch screening.
+**Options:**
 
-The 16-lane `jwt_hmac_zmm` and `jwt_hmac_avx512x2` exist for benchmarks; neither is the default.
+| flag | effect |
+|---|---|
+| `-DJWT_INPUT_PADDED` | every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads |
+| `-DJWT_NO_SHAPE_JSON` | strict parser only |
+| `-DJWT_FAST_JSON` | the simdjson-style path (3–4% slower on a Xeon) |
+| `-DJWT_LANE_JSON` | lane-parallel JSON, which only pays at batch ≥ 32 |
+| `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
+| `-DJWT_PK` | the RS256 / ES256 prototype; needs fiat-crypto's generated C (`scripts/fetch-fiat.sh`) |
+| `-DJWT_S2N` | with `JWT_PK`: s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
+| `-DJWT_OPENSSL` | with `JWT_PK`: libcrypto's bignum asm for RSA (links `-lcrypto`) |
+| `-DJWT_RSA_SCREEN` | with `JWT_PK`: RSA batch screening (read the caveat in [PK.md](PK.md) first) |
 
-## Build and test
-
-The library needs only a C compiler. The tests need OpenSSL's libcrypto (the reference HMAC) and python3 (token
-generation).
+**Targets:**
 
 ```bash
 make              # build/libcursedjwt.a, build/verify
 make test         # every engine vs OpenSSL + the claim rules (~6 s)
 make test-quick   # fewer random iterations (CI)
-make test-vectors # + external vectors: RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography (network)
-make compare      # full verify vs jwt-cpp and golang-jwt, fetched at pinned commits (network; go optional)
+make test-vectors # + RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography vectors (network)
 make asan         # ASan + UBSan
 make bench        # ns/token per engine and batch size, vs OpenSSL
-make avx512       # real AVX-512VL test + bench binaries (run them on AVX-512 hardware)
+make compare      # full verify vs jwt-cpp and golang-jwt, fetched at pinned commits (network; go optional)
+make avx512       # AVX-512VL test + bench binaries (run them on AVX-512 hardware)
 make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
-make pk-test      # RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
-make pk-bench     # RS256 / ES256 ns/token vs OpenSSL, with and without RSA batch screening
-make pk-test-fast pk-bench-fast   # the same with s2n-bignum + libcrypto BN kernels (fetched pinned / Homebrew)
+make pk-test      # RS256 / ES256: portable C builds vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
+make pk-test-fast # RS256 / ES256 with the s2n-bignum + libcrypto kernels
+make pk-bench pk-bench-fast   # RS256 / ES256 ns/token vs OpenSSL, with and without batch screening
 ```
 
-```bash
-./scripts/docker-test.sh amd64
-```
+- **Test dependencies.** The tests need OpenSSL's libcrypto (the reference) and python3: on macOS, Homebrew's
+  `openssl@3`; on Linux, `libssl-dev`.
+- **Linux in Docker.** `./scripts/docker-test.sh amd64` (or `arm64`) runs the tests on Ubuntu 24.04 with gcc and
+  clang. `DOCKER_CPUS=8-13` pins the container to those CPUs.
 
-```bash
-./scripts/docker-test.sh arm64
-```
+## Testing
 
-The Docker runs use Ubuntu 24.04 with gcc and clang. `DOCKER_CPUS=8-13` pins the container to those CPUs.
+Every engine is tested against independent implementations and published vectors, never only against itself.
+`make test` / `test-quick` use only local generators. `make test-vectors` and `make pk-test` add the external
+vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SHA-256s (they are never committed).
+- **Each vector is cross-checked against pyca/cryptography before use**, by `tests/make_vectors.py` and
+  `tests/make_pk_vectors.py`. A misparsed vector therefore fails the build, rather than testing nothing.
+- **A planted error has to make a run fail.** Flipping one expected result fails it, and so does an always-accept
+  planted in one lane.
 
-On macOS, the Makefile finds Homebrew's `openssl@3`. On Linux, install `libssl-dev`.
+### HS256
 
-**External vectors** (`make test-vectors`). These are independent of OpenSSL's HMAC and of this repository's
-generators:
-- **Sources.** `scripts/fetch-vectors.sh` downloads them and checks each file against a pinned SHA-256:
-  - RFC 4231 test cases 1–7 (one with a truncated tag, and keys longer than the block size);
-  - NIST CAVP `HMAC.rsp` `[L=32]`: 225 vectors, keys of 40–70 bytes, tags of 16–32 bytes;
-  - Wycheproof `hmac_sha256_test.json`: 174 cases, including invalid tags that must be rejected;
-  - the RFC 7515 Appendix A.1 HS256 JWS.
-- **Generator.** `tests/make_vectors.py` checks every parsed vector against **pyca/cryptography** first, so a
-  parsing mistake cannot pass silently. It then adds 5,000 random cases from cryptography: keys of 0–200 bytes,
-  messages of 0–1,100 bytes, and 10% corrupted tags.
-- **Every engine** (scalar, NEON, SHA2 ×1/×2/×4, AVX2, AVX2 ×2, AVX-512VL, 2×ymm, zmm, emulated ternlog) runs
-  every vector in a batch of 1–24 messages under the vector's key, at a random lane. The other lanes are random
-  messages checked against OpenSSL.
-- **The RFC 7515 token** must give BAD_PAYLOAD while live: the signature and time are valid, but it has no
-  `sub`/`username`. It must give INVALID once expired, and INVALID with one signature character changed.
-- A corrupted vector file makes the test fail. This was checked by flipping one expected result.
+| source | what | cases | origin, licence |
+|---|---|---|---|
+| RFC 4231 | HMAC-SHA-256 test cases 1–7, incl. a truncated tag and keys longer than a block | 7 | [rfc-editor.org](https://www.rfc-editor.org/rfc/rfc4231), IETF Trust |
+| NIST CAVP `HMAC.rsp`, `[L=32]` | keys of 40–70 bytes, tags of 16–32 bytes | 225 | [CAVP `hmactestvectors.zip`](https://csrc.nist.gov/projects/cryptographic-algorithm-validation-program), US government work |
+| Wycheproof `hmac_sha256_test.json` | valid tags and invalid ones that must be rejected | 174 | [C2SP/wycheproof](https://github.com/C2SP/wycheproof) @ `d17cc89`, Apache-2.0 |
+| RFC 7515 A.1 | the HS256 JWS: BAD_PAYLOAD while live (no `sub`/`username`), INVALID once expired, INVALID with a signature character changed | 3 | [rfc-editor.org](https://www.rfc-editor.org/rfc/rfc7515), IETF Trust |
+| pyca/cryptography, random | keys of 0–200 bytes, messages of 0–1,100 bytes, 10% corrupted tags | 5,000 | generated by `tests/make_vectors.py` |
+| Python `hmac`, tokens | full JWTs minted by `tests/gen_tokens.py` with an independent HS256 implementation, verified at batch sizes 1–100 | 20,000 | generated |
+| OpenSSL `HMAC()`, differential | random batches of 1–70 messages of 0–699 bytes (ragged lanes, 1-vs-2 tail blocks) | 3,000 batches | `tests/test_jwt.c` |
+| crafted tokens | exact expected status, uid, username and escape flag, at every batch size 1–123 (list below) | 123 | `tests/test_jwt.c` |
+| strict parser, differential | fuzzed payloads: the JSON fast paths must agree with the strict parser | 300,000 | `tests/test_jwt.c` |
+| scalar references | SIMD vs scalar base64url (20k strings) and SWAR integer parsing (200k values) | 220,000 | `tests/test_jwt.c` |
 
-**What the tests check** (`tests/test_jwt.c`, about 1.2M checks per run):
-- **Every engine's raw HMAC against OpenSSL `HMAC()`.** This covers 20,000 generated tokens, and 3,000 random
-  batches of 1–70 messages with lengths 0–699, which exercise ragged lanes and the 1-vs-2 tail-block cases.
-- **Full verify of every token** at batch sizes 1/3/4/8/16/32/64/100.
-  - The tokens are minted by `tests/gen_tokens.py` with Python's `hmac` module, an independent implementation.
-- **123 crafted tokens** with exact expected status, uid, username and escape flag, at every batch size 1–123:
+- **Engines covered.** Every vector runs on every engine the machine has:
+  - scalar, NEON and SHA2 ×1/×2/×4 on ARM;
+  - AVX2, AVX2 ×2, AVX-512VL, 2×ymm and zmm on x86;
+  - each dispatch path of the extracted OpenSSL code (SHA-NI, AVX2, AVX, SSSE3, x86-64);
+  - a C emulation of `vpternlogd` with the same immediates, so the AVX-512 logic is exercised on any machine.
+- **How the external vectors run.** Each one sits in a batch of 1–24 messages, at a random lane. The other lanes are
+  random messages checked against OpenSSL.
+- **The crafted tokens cover:**
   - garbage, bad signature, `alg=none` (with and without a copied signature), HS512, expired;
   - `sub` ∈ {0, 1, true, "0", "-1", "1.5", "abc", null, …};
   - non-string usernames, float and huge `exp`, `nbf` in the future or malformed;
   - duplicate claims, escaped keys and usernames, invalid UTF-8, nesting too deep;
   - a wrong secret, a non-canonical last signature character, padding, extra segments;
   - a 3 KB payload.
-- **Differential fuzz** of the JSON fast paths against the strict parser: 300k payloads.
-- **SIMD vs scalar** for base64url (20k strings) and the SWAR integer parser (200k values).
-- **AVX-512 by construction on any machine.** The template runs with a C emulation of `vpternlogd` using the same
-  immediates.
+
+### RS256 / ES256 (`make pk-test`)
+
+| source | what | cases | origin, licence |
+|---|---|---|---|
+| Wycheproof `ecdsa_secp256r1_sha256_p1363_test.json` | ES256 in JOSE's r‖s format: malleability, out-of-range r/s, edge-case points | 262 | C2SP/wycheproof @ `d17cc89`, Apache-2.0 |
+| Wycheproof `rsa_signature_{2048,3072,4096}_sha256_test.json` | RSASSA-PKCS1-v1_5, mostly invalid encodings that must be rejected | 773 | same |
+| NIST CAVP `SigVer.rsp` [P-256, SHA-256] | ECDSA signature verification | 15 | CAVP `186-4ecdsatestvectors.zip`, US government work |
+| NIST CAVP `SigVer15_186-3.rsp`, SHA-256, mod 2048/3072 | RSA verification, with assorted public exponents | 36 | CAVP `186-3rsatestvectors.zip`, US government work |
+| RFC 7515 A.2, A.3 | the RS256 and ES256 JWS examples: live, expired, tampered | 6 | IETF Trust |
+| pyca/cryptography, random | 8 P-256 keys and 6 RSA keys (2048/3072/4096, e = 3 and 65537); messages of 0–1,100 bytes; 15% corrupted, 15% high-s | 5,000 | generated by `tests/make_pk_vectors.py` |
+| pyca/cryptography, tokens | full JWTs: valid, expired, bad signature, wrong `alg`, padding, missing username, header variants | 360 | generated |
+| screening counterexamples | genuine signatures turned into s₁·x, s₂/x: rejected one at a time, and accepted only by the opt-in screening | 4 pairs | generated |
+| fiat-crypto (formally verified) | the P-256 field and scalar arithmetic, C and s2n-bignum versions, on random and edge inputs | 200,000 | [mit-plv/fiat-crypto](https://github.com/mit-plv/fiat-crypto), MIT |
+
+- **How each vector runs:** alone, then inside random sub-batches, then in its whole key group shuffled into one
+  batch. That way invalid signatures sit next to valid ones.
+- **Builds covered:** every backend (portable C, s2n-bignum, libcrypto) and comb window (W = 5, 7, 8), with and
+  without screening.
 
 **Platforms run:**
 
-| platform | compilers | result |
+| platform | compilers | what ran |
 |---|---|---|
-| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, test-vectors, example, compare (jwt-cpp), pk-test with every backend |
-| Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan, pk-test with every backend |
-| Linux amd64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, test-vectors (AVX2 engines + every OpenSSL sha256 path but SHA-NI), ASan/UBSan, AVX-512 build compiles, pk-test (portable C) |
-| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test + test-vectors on real AVX-512 (AVX-512VL, 2×ymm, zmm, extracted OpenSSL sha256), pk-test with every backend |
+| macOS arm64 (Apple M5 Pro) | Apple clang 21 | test, test-vectors, example, compare; pk-test, every backend |
+| Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan; pk-test, every backend |
+| Linux amd64 (Ubuntu 24.04, Docker on Rosetta) | gcc 13.3, clang 18.1 | test, test-vectors (AVX2 engines, every OpenSSL SHA-256 path but SHA-NI), ASan/UBSan, AVX-512 build; pk-test, portable C |
+| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test, test-vectors on real AVX-512 (every engine); pk-test, every backend |
+| GitHub Actions | gcc, clang | test-quick, test-vectors, ASan, AVX-512 build on Ubuntu x86/ARM and macOS |
 
 ## Benchmarks
 
 **Method.**
-- `bench/bench_jwt.c`, ns per token, best of several 1-second runs, hot cache.
+- `bench/bench_jwt.c`, ns per token, best of several runs, hot cache.
 - Tokens are ~140-byte signing inputs: 3 inner SHA-256 blocks + 1 outer.
 - "Full verify" includes split, header, signature decode, HMAC, payload base64url, JSON and claims.
-- **OpenSSL baselines:**
-  - `HMAC()` as most code calls it, re-keying per call;
-  - precomputed ipad/opad `SHA256_CTX` midstates, OpenSSL's best case.
+- OpenSSL baselines: `HMAC()` as most code calls it, re-keying per call; and precomputed ipad/opad `SHA256_CTX`
+  midstates, OpenSSL's best case.
 
-**Xeon Platinum 8260** (Cascade Lake, 2.4 GHz, no SHA-NI), 1 vCPU VM, Ubuntu 24.04, kernel 6.8, gcc 13.3
+**Xeon Platinum 8260** (Cascade Lake, 2.4 GHz, no SHA-NI), 1 vCPU VM, Ubuntu 24.04, kernel 6.8, gcc 13.3,
 `-O3 -march=cascadelake -DJWT_AVX512`.
 
 HMAC only, ns/token:
 
 | engine \ batch | 1 | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|---|
-| OpenSSL `HMAC()` | 2878 | 2888 | 2870 | 2867 | 2881 |
-| OpenSSL, precomputed midstates | 764 | 763 | 763 | 761 | 763 |
-| scalar (compiled template) | 1015 | 1007 | 1008 | 1004 | 1005 |
-| OpenSSL's sha256 asm, extracted, one stream | 758 | 754 | 752 | 751 | 752 |
-| AVX2 ×8 (`-march=cascadelake` build) | 763* | 422 | 222 | 221 | 221 |
-| **AVX-512VL ymm ×8 (default)** | **763*** | **286** | **155** | 154 | 153 |
-| AVX-512VL 2×ymm ×16 | 764* | 287 | 155 | 177 | 176 |
-| zmm ×16 (not recommended) | 763* | 287 | 155 | 126 | 126 |
+| OpenSSL `HMAC()` | 2,901 | 2,904 | 2,909 | 2,902 | 2,902 |
+| OpenSSL, precomputed midstates | 772 | 766 | 763 | 766 | 762 |
+| compiled scalar template | 1,007 | 1,009 | 1,022 | 1,006 | 1,008 |
+| extracted OpenSSL SHA-256, one stream at a time | 754 | 754 | 752 | 749 | 752 |
+| AVX2 ×8 | 766 | 423 | 222 | 222 | 222 |
+| **AVX-512VL ymm ×8 (default)** | **762** | **286** | **154** | 154 | 154 |
+| AVX-512VL 2×ymm ×16 | 770 | 287 | 154 | 176 | 176 |
+| zmm ×16 (not recommended) | 767 | 287 | 154 | 125 | 125 |
 
-\* A batch of 1 runs one stream of the extracted OpenSSL code (exp112). Before that change it ran the compiled
-scalar template, at 1,014–1,017 ns.
+At batch 1 every vector engine runs the extracted single-stream code.
 
-Full verify, ns/token, default build (AVX-512VL + shape-matched JSON):
+Full verify, ns/token, default engine:
 
 | batch | 1 | 2 | 3 | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|---|---|---|
-| shape-matched JSON (default) | **938** | 691 | 508 | 417 | **277** | 272 | 268 |
-| strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,276† | 801 | 617 | 522 | 376 | 369 | 363 |
+| shape-matched JSON (default) | **935** | 695 | 509 | 417 | **278** | 272 | 268 |
+| strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,046 | 803 | 616 | 519 | 375 | 366 | 362 |
 
-† Measured before batch 1 moved to the extracted OpenSSL code. That change took the default build from 1,173 to
-938 ns at batch 1 (exp112); larger batches are unchanged.
-
-**RS256 / ES256 (opt-in prototype, `-DJWT_PK`).** µs per token, by batch size; OpenSSL is `EVP_DigestVerify`, one
-token at a time. This is the fast build (`-DJWT_S2N -DJWT_OPENSSL`). Batch mode for RS256 is `-DJWT_RSA_SCREEN`,
-which has a caveat about signature malleability. [PK.md](PK.md) has the method, the other builds and the caveat.
-
-| | 1 | 2 | 4 | 8 | 16 | OpenSSL |
-|---|---|---|---|---|---|---|
-| ES256, Xeon | 21.7 | 18.4 | 16.7 | 15.8 | **15.4** | 78.6 |
-| ES256, M5 | 10.8 | 9.6 | 9.4 | 9.3 | **9.2** | 32.4 |
-| RS256-2048 one at a time, Xeon | 16.5 | 16.5 | 16.4 | 16.5 | 16.4 | 23.1 |
-| RS256-2048 batch mode, Xeon | 16.4 | 9.7 | 6.3 | 4.6 | **3.8** | 23.1 |
-| RS256-2048 one at a time, M5 | 8.5 | 8.4 | 8.3 | 8.4 | 8.3 | 9.0 |
-| RS256-2048 batch mode, M5 | 8.5 | 5.5 | 3.7 | 2.8 | **2.35** | 9.0 |
-
-**Against established libraries** on the same box, the same tokens and the same job (HS256, `exp` required, `sub`
-and `username` read). Every implementation accepted the same tokens and rejected a forged one.
-
-| full verify, ns/token | batch 1 | batch 3 | batch 8 |
-|---|---|---|---|
-| **cursed-jwt** (strict-JSON build at the time) | **1,271** | **608** | **371** |
-| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,201 | 6,201 | 6,201 |
-| [golang-jwt v5](https://github.com/golang-jwt/jwt), `MapClaims` | 8,739 | 8,739 | 8,739 |
-
-The libraries verify one token at a time. `make compare` reruns this:
-- it fetches jwt-cpp and golang-jwt at pinned commits into `third_party/`;
-- each harness in `bench/compare/` first checks that every test token is accepted and a forged one rejected, then
-  times it;
-- golang-jwt needs a Go toolchain.
-
-On the Apple M5 Pro (`make compare`), full verify was 116 ns/token at batch 8 for cursed-jwt, against 2,521 for
-jwt-cpp.
-
-**How the comparison is kept fair** (`bench/compare/`):
+**Against established libraries.** `make compare` runs the same 20,000 tokens and the same job through each one:
+HS256 only, `exp` required, `sub` and `username` read. Those are the numbers in [At a glance](#at-a-glance), from
+`bench/compare/e2e.c`, which measures within ~1.5% of `bench_jwt`.
 
 | library | build |
 |---|---|
 | cursed-jwt | `-O3` and the target's `-march` (`-march=cascadelake -DJWT_AVX512` on the Xeon) |
-| jwt-cpp | header-only C++17, `-O3` and the same `-march`. It links the same system OpenSSL libcrypto, whose own runtime-dispatched SHA-256 asm (AVX2, SHA-NI where present) does its HMAC. It uses its default picojson traits |
+| jwt-cpp | header-only C++17, `-O3`, same `-march`, default picojson traits. Its HMAC is the same system OpenSSL libcrypto, with OpenSSL's runtime-dispatched SHA-256 asm |
 | golang-jwt v5 | `go build`; Go has no optimisation flags, and no PGO is applied |
 
-- **Same tokens and job for all three.** They run the same 20,000 tokens and do the same job: HS256 only, `exp`
-  required, `sub` and `username` read.
-- **Correctness gate.** Each implementation must accept all 20,000 tokens and reject a forged one before it's
-  timed.
-- **Verifier setup is done once.** jwt-cpp's verifier and golang-jwt's parser and key are built before the loop,
-  as in a server.
-- **Batch sizes.** The libraries can only verify one token per call, so their number is the same at every batch
-  size. Compare them with our batch-1 column for a like-for-like single call.
-- **What favours us.** Our default build also has the shape-matched JSON fast path, which these compact
-  `{"sub","username","iat","exp"}` payloads hit. The strict-JSON-only row shows the result without it.
+- **Correctness gate.** Each implementation must accept all 20,000 tokens and reject a forged one before it's timed.
+- **Setup is done once.** jwt-cpp's verifier and golang-jwt's parser and key are built before the loop, as in a
+  server.
+- **Batch sizes.** The libraries verify one token per call, so their number is the same at every batch size.
+  Compare them with our batch-1 column for a like-for-like single call.
+- **What favours us.** The default build's shape-matched JSON path fits these compact payloads. The strict-JSON row
+  shows the result without it.
+- **Pinned versions.** The libraries are fetched at pinned commits into `third_party/`. golang-jwt needs a Go
+  toolchain.
 
 **AVX-512 frequency licence** (`make licence`). A fixed scalar workload is timed right after a 2 ms burst of each
 engine; each figure is the median of 300 trials.
@@ -363,22 +342,23 @@ engine; each figure is the median of 300 trials.
 | NEON 4-lane multi-buffer | 246 | 348 |
 | **SHA2 instructions, 4 streams (default)** | **72** | **~142** |
 
+**RS256 / ES256:** [PK.md](PK.md) has every build at every batch size, on both machines.
+
 ## Limits
 
-- **HS256 only by default.** RS256 and ES256 exist as an opt-in prototype (`-DJWT_PK`, `jwt_verify_batch_pk`); see
-  [PK.md](PK.md) for the design, the survey of other implementations and the numbers. No EdDSA, no JWE, no `kid`
-  lookup.
+- **Algorithms.** HS256 by default. RS256 and ES256 are an opt-in prototype; there's no EdDSA, no JWE and no
+  `kid` lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
-- **Batch 1 ties OpenSSL rather than beating it.** On x86-64 Linux it *is* OpenSSL's code (extracted). That
-  includes its SHA-NI path, untested here because the Xeon has no SHA-NI.
-  - **x86-64 macOS / Windows:** they still use the compiled scalar template, since the extracted file is
-    ELF-only.
-  - **From batch 2** the vector engines win.
+- **A lone token ties OpenSSL, it doesn't beat it.** On x86-64 Linux it *is* OpenSSL's code. Its SHA-NI path is
+  untested here: neither the Xeon nor Rosetta has SHA-NI.
+- **x86-64 macOS and Windows** use the compiled scalar template for single tokens: the extracted file is ELF-only.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE). The one vendored file, `src/sha256_x86_64_ossl.S`, is OpenSSL's (Apache-2.0, text in
-[licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)). Fetched dependencies of the optional builds
-(fiat-crypto, s2n-bignum) and credits for techniques (simdjson, cpuminer-opt) are in [THIRD_PARTY.md](THIRD_PARTY.md).
+MIT, see [LICENSE](LICENSE).
+- The one vendored file, `src/sha256_x86_64_ossl.S`, is OpenSSL's, under Apache-2.0
+  ([licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)).
+- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques (simdjson,
+  cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).
