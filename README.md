@@ -29,9 +29,9 @@ That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at bat
 
 | | Xeon, batch 1 | Xeon, batch 16 | Xeon, OpenSSL | M5, batch 16 | M5, OpenSSL |
 |---|---|---|---|---|---|
-| ES256 | 21.7 | **15.4** | 78.6 | **9.2** | 32.4 |
-| RS256-2048 | 16.5 | 16.4 | 23.1 | 8.3 | 9.0 |
-| RS256-2048, batch screening | 16.4 | **3.8** | 23.1 | **2.35** | 9.0 |
+| ES256 | 21.8 | **14.9** | 78.8 | **9.2** | 32.4 |
+| RS256-2048 | 16.5 | 16.0 | 22.9 | 8.3 | 9.0 |
+| RS256-2048, batch screening | 16.2 | **3.16** | 22.9 | **2.35** | 9.0 |
 
 ## Contents
 
@@ -127,6 +127,10 @@ key's algorithm; the rest is identical.
   - A zmm burst slows *all following code* by 19.4% for 0.5–1 ms on Cascade Lake. ymm costs 0% (measured below).
 - **ARM uses the SHA2 instructions, interleaved.** NEON multi-buffer is 2.9× slower than one stream of `sha256h`.
   Interleaving 4 independent streams hides the instruction latency (−15%).
+- **The engine is picked at run time.** Each SIMD engine is compiled in its own target region, and the CPU's
+  features (CPUID / HWCAP) choose among them, so one binary runs anywhere and uses what the machine has.
+  - The AVX-512 region also tells the compiler to prefer 256-bit vectors. Otherwise it auto-vectorises copies with
+    zmm, and the frequency-licence drop makes everything 29% slower.
 - **One token at a time uses the best single-stream code there is.**
   - A lone token, and any lanes left over when a group is too small for a vector, can't use 8-way parallelism.
   - On x86-64 Linux they run OpenSSL's `sha256_block_data_order`, extracted and vendored as
@@ -148,22 +152,35 @@ key's algorithm; the rest is identical.
 
 ## Building
 
-The library needs only a C compiler. `make` builds `build/libcursedjwt.a` and `build/verify`. The engine is chosen
-at compile time:
+The library needs only a C compiler, and no `-march`. `make` builds `build/libcursedjwt.a` and `build/verify`.
 
-| target | flags | default engine |
+**One binary runs on any CPU of its architecture.**
+- **What's in it.** It is compiled for the baseline ISA (x86-64, ARMv8-A) and carries every engine that
+  architecture can have, each compiled in its own target region.
+- **How it chooses.** At start-up it reads CPUID and XGETBV (x86) or HWCAP / sysctl (ARM), then uses the best engine
+  the machine has. Each feature that's missing degrades it one step:
+
+| CPU | HS256 engine | RS256 / ES256 kernels (`-DJWT_PK`) |
 |---|---|---|
-| x86-64, AVX-512VL (Skylake-SP, Cascade Lake, Ice Lake …) | `-march=cascadelake -DJWT_AVX512` (gcc recommended) | AVX-512VL ymm, 8 lanes |
-| x86-64, AVX2 | `-march=haswell` / `-march=native` | AVX2, 8 lanes |
-| AArch64 with SHA2 (`__ARM_FEATURE_SHA2`) | `-march=armv8.2-a+crypto+sha3`, `-mcpu=native` on Apple | SHA2 instructions, 4 streams |
-| AArch64 without SHA2 | `-march=armv8-a` | NEON, 4 lanes |
-| anything else | — | scalar |
+| x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake, Zen 4 …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
+| x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
+| other x86-64 | scalar | portable C |
+| AArch64 with SHA2 instructions | 4 interleaved SHA2 streams | s2n-bignum / libcrypto |
+| other AArch64 | NEON, 4 lanes | portable C |
+| anything else | scalar | portable C |
 
-- **On x86-64 Linux** the Makefile also assembles `src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you
-  compile `src/jwt.c` into your own program, do the same (or leave both out to get the compiled scalar code).
-  `make OSSL_SHA=` builds without it.
-- Every engine the target can run is also exported, for tests and benchmarks. The 16-lane `jwt_hmac_zmm` and
-  `jwt_hmac_avx512x2` exist only for that.
+- **Single tokens.** On x86-64 Linux they run OpenSSL's extracted SHA-256 code, which dispatches itself (SHA-NI,
+  AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile assembles `src/sha256_x86_64_ossl.S` and defines
+  `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own program, do the same, or leave both out to get the
+  compiled scalar code; `make OSSL_SHA=` builds without it.
+- **Inspecting and masking the choice.** `jwt_engine()` names the HS256 engine in use, and `jwt_cpu_features()`
+  returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
+  benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
+- **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
+  within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64 (exp143).
+  `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
+- **Engine-specific functions** are exported for tests and benchmarks; call one only if `jwt_cpu_features()` has
+  its bit. The 16-lane `jwt_hmac_zmm` and `jwt_hmac_avx512x2` exist only for benchmarks.
 
 **Options:**
 
@@ -178,6 +195,7 @@ at compile time:
 | `-DJWT_S2N` | with `JWT_PK`: s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
 | `-DJWT_OPENSSL` | with `JWT_PK`: libcrypto's bignum asm for RSA (links `-lcrypto`) |
 | `-DJWT_RSA_SCREEN` | with `JWT_PK`: RSA batch screening (read the caveat in [PK.md](PK.md) first) |
+| `-DJWT_CRYPTO_MB` | with `JWT_PK`: Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA, used only on IFMA CPUs (`scripts/build-crypto-mb.sh`; Linux x86-64; not yet run on IFMA hardware) |
 
 **Targets:**
 
@@ -196,6 +214,7 @@ make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
 make pk-test      # RS256 / ES256: portable C builds vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
 make pk-test-fast # RS256 / ES256 with the s2n-bignum + libcrypto kernels
 make pk-bench pk-bench-fast   # RS256 / ES256 ns/token vs OpenSSL, with and without batch screening
+make pk-test-ifma pk-bench-ifma   # + crypto_mb (needs scripts/build-crypto-mb.sh; an IFMA CPU to exercise it)
 ```
 
 - **Test dependencies.** The tests need OpenSSL's libcrypto (the reference) and python3: on macOS, Homebrew's
@@ -320,7 +339,8 @@ JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in bu
   midstates, OpenSSL's best case.
 
 **Xeon Platinum 8260** (Cascade Lake, 2.4 GHz, no SHA-NI), 1 vCPU VM, Ubuntu 24.04, kernel 6.8, gcc 13.3,
-`-O3 -march=cascadelake -DJWT_AVX512`.
+`-O3 -march=cascadelake` (exp121; the default build, with no `-march` and run-time dispatch, has the same HMAC
+speed and full verify within 2–7%).
 
 HMAC only, ns/token:
 
@@ -350,7 +370,7 @@ HS256 only, `exp` required, `sub` and `username` read. Those are the numbers in 
 
 | library | build |
 |---|---|
-| cursed-jwt | `-O3` and the target's `-march` (`-march=cascadelake -DJWT_AVX512` on the Xeon) |
+| cursed-jwt | `-O3` and the target's `-march` (`-march=cascadelake` on the Xeon) |
 | jwt-cpp | header-only C++17, `-O3`, same `-march`, default picojson traits. Its HMAC is the same system OpenSSL libcrypto, with OpenSSL's runtime-dispatched SHA-256 asm |
 | golang-jwt v5 | `go build`; Go has no optimisation flags, and no PGO is applied |
 

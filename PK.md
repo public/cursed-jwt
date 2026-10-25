@@ -26,13 +26,16 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
     `mulx`.
   - Intel's multi-buffer RSA/ECDSA/Ed25519 (`crypto_mb` in ipp-crypto) requires IFMA. So on both targets the
     levers are algebraic, not SIMD.
+  - The library still uses crypto_mb on CPUs that do have IFMA (`-DJWT_CRYPTO_MB`, below). It's chosen at run
+    time, like every other kernel here.
 - **ES256: per-key comb tables, then two fixed-base multiplications.**
   - A JWT verifier holds a few long-lived public keys, so key setup precomputes a comb table for **Q** as well as
     for G (2.4 ms and 528 KB per key on the M5).
   - A verify is then 2 × 33 mixed additions with no doublings. Compare OpenSSL's ~256 doublings + ~90 additions.
   - The x-coordinate check is projective, so a token needs no field inversion. All the s⁻¹ of a batch share one
     inversion.
-  - **Fast build, batch 16: 3.5× faster than OpenSSL on the M5, 5.1× on the Xeon.** Already 3.0× / 3.6× at batch 1.
+  - **Fast build, batch 16: 3.5× faster than OpenSSL on the M5, 5.3× on the Xeon** (14.9 vs 78.8 µs). Already
+    3.0× / 3.6× at batch 1.
 - **RS256: one-at-a-time verification is at OpenSSL parity (it's the same 19 Montgomery operations); batch
   screening is far ahead.**
   - **Screening** (Bellare–Garay–Rabin) checks a whole batch with one exponentiation:
@@ -40,7 +43,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
     (∏ sᵢ)^e ≡ ∏ EMᵢ (mod n)
 
     That's 2 multiplications per token + 17 per batch, instead of 19 per token.
-  - Fast build, RSA-2048 at batch 16: **3.8× faster than OpenSSL on the M5, 6.1× on the Xeon.**
+  - Fast build, RSA-2048 at batch 16: **3.8× faster than OpenSSL on the M5, 7.2× on the Xeon** (3.16 vs 22.9 µs).
   - **The catch:** screening proves that every *message* was signed. It does not prove that every *signature string*
     is the canonical one: s₁·x and s₂/x pass together. So it's opt-in (`-DJWT_RSA_SCREEN`); see below.
 - **EdDSA isn't prototyped yet, but it is where the biggest ratio is.** OpenSSL's Ed25519 verify is slow (38 µs on
@@ -74,7 +77,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | M5, portable C | 11.0 | 9.6 | 9.4 | 9.1 | 9.0 | 9.0 | 32.4 |
 | M5, fast (s2n-bignum P-256) | 10.8 | 9.6 | 9.4 | 9.3 | 9.2 | 9.2 | 32.4 |
 | Xeon, portable C | 28.2 | 24.7 | 23.0 | 22.1 | 21.6 | 21.4 | 78.6 |
-| **Xeon, fast (s2n-bignum P-256)** | **21.7** | 18.4 | 16.7 | 15.8 | **15.4** | 15.3 | 78.6 |
+| **Xeon, fast (s2n-bignum P-256)** | **21.8** | 18.3 | 16.3 | 15.3 | **14.9** | 14.8 | 78.8 |
 
 **RS256-2048, one at a time (screening off)**
 
@@ -95,7 +98,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | **M5, fast (libcrypto BN)** | 8.5 | 5.5 | 3.7 | 2.8 | **2.35** | 2.34 | 9.0 |
 | Xeon, portable C | 35.0 | 20.0 | 12.4 | 8.8 | 6.9 | 6.9 | 23.1 |
 | Xeon, libcrypto BN | 20.8 | 12.8 | 8.3 | 6.1 | 4.95 | 4.96 | 23.1 |
-| **Xeon, fast (s2n-bignum)** | 16.4 | 9.7 | 6.3 | 4.6 | **3.8** | 3.8 | 23.1 |
+| **Xeon, fast (s2n-bignum)** | 16.2 | 9.3 | 5.8 | 4.1 | **3.16** | 3.15 | 22.9 |
 
 **RS256-3072** (the fast build uses libcrypto BN at this size on both machines)
 
@@ -106,13 +109,21 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | M5, portable C, screened | 27.9 | 16.1 | 10.2 | 7.2 | 5.9 | 5.8 | 18.7 |
 | **M5, fast, screened** | 18.0 | 11.3 | 7.4 | 5.5 | **4.6** | 4.6 | 18.7 |
 | Xeon, fast, one at a time | 41.7 | 41.2 | 41.1 | 41.0 | 40.9 | 40.9 | 43.7 |
-| **Xeon, fast, screened** | 41.2 | 25.3 | 16.1 | 11.5 | **9.1** | 9.1 | 43.7 |
+| **Xeon, fast, screened** | 41.4 | 25.1 | 15.7 | 10.9 | **8.6** | 8.6 | 43.9 |
 
 - **ES256's batch gain is small (~1.4× from batch 1 to 16):** it comes only from sharing the s⁻¹ inversion.
 - **RSA's batch gain is the screening:** c tokens cost 2c + 17 multiplications against 19c.
   - Predicted speedups at batches 2, 4, 8 and 16: 1.8×, 3.0×, 4.6× and 6.2×.
-  - Measured on the Xeon fast build: 1.7×, 2.6×, 3.6× and 4.3×.
-  - The gap is per-token work that doesn't batch: SHA-256, building the PKCS#1 block, the base64url decode.
+  - Measured on the Xeon fast build: 1.7×, 2.8×, 3.9× and 5.1×.
+  - The gap is per-token work that doesn't batch: building the PKCS#1 block, the base64url decode, converting the
+    signature.
+  - **The signing-input SHA-256 is now batched.** Each chunk's inputs go through the multi-buffer engines: 8 lanes
+    on AVX-512VL/AVX2, 4 SHA2 streams on ARM. On the Xeon that took screened RS256-2048 from 3.78 to 3.16 µs and
+    ES256 from 15.4 to 14.9 µs (exp144). On the M5 it's within noise, because a single SHA2 stream was already
+    ~0.1 µs per token.
+- **Interleaving ES256 tokens** (`JWT_ES_ILV`, running the point additions of 2–4 tokens in lockstep) gained
+  nothing on either machine: 8.86–8.90 vs 8.87 µs on the M5, 14.78–14.90 vs 14.80 on the Xeon. The out-of-order
+  cores already overlap the chains, so the default is 1.
 - **Batch 32 equals batch 16**, because the screening chunk is 16 tokens.
 - **gcc vs clang on the Xeon:**
   - with the asm backends the two are within 6%;
@@ -133,10 +144,41 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   2048-bit square, `armv8-mont` sqr8x through the BN API, costs 343 ns. That's why libcrypto wins on arm.
 - **x86-64:** s2n-bignum's `mulx`/`adcx`/`adox` code beats OpenSSL's `x86_64-mont5`, by 20% in a full RSA-2048
   verify.
-- **The selection is `rsa_use_ossl()` in `src/jwt_pk.inc`.** x86-64 with `JWT_S2N` uses s2n-bignum for 2048-bit
-  moduli and libcrypto above that; everything else uses libcrypto.
-- **The x86 s2n-bignum build needs BMI2 and ADX** (Broadwell or later); it refuses to compile without them.
-  Rosetta doesn't implement ADX, so it can't be run under Docker on a Mac. It was tested on the real Xeon.
+- **The choice is made at run time** from the CPU's features, so a build containing every backend runs on any
+  machine:
+  - `s2n_ok()`: on x86-64, s2n-bignum's kernels run only with BMI2 + ADX. The P-256 point arithmetic is compiled
+    twice (`src/jwt_pk_ec.inc`, with C and with s2n-bignum field operations), and one is picked per batch.
+  - `rsa_use_ossl()` / `mont_for()`: RSA-2048 on x86-64 uses s2n-bignum when BMI2 + ADX are present, otherwise
+    libcrypto (if built in), otherwise C. Larger moduli and ARM use libcrypto.
+  - `cmb_ok()`: crypto_mb runs only with AVX-512 IFMA (below).
+  - On the Xeon, the fast build passes every vector both with s2n-bignum and with BMI2/ADX masked off
+    (`JWT_CPU_MASK=0x3`, exp135).
+- **Rosetta doesn't implement ADX,** so the x86 s2n-bignum kernels can't run under Docker on a Mac. They were
+  tested on the real Xeon.
+
+### AVX-512 IFMA: Intel crypto_mb (`-DJWT_CRYPTO_MB`)
+
+- **What it gives.** On CPUs with IFMA (Ice Lake and later Xeons; Zen 4 has IFMA too), Intel's crypto_mb verifies
+  8 ES256 signatures, or runs 8 RSA-65537 public-key operations, per call, in 52-bit vector lanes. That's the SIMD
+  across tokens that Cascade Lake can't do.
+  - It's cryptography-primitives v2.3.0, Apache-2.0. `scripts/build-crypto-mb.sh` fetches it pinned and
+    SHA-256-checked, and builds it.
+- **How it's wired in:**
+  - **ES256:** after the structural checks and the batched hashing, groups of 8 go to
+    `mbx_nistp256_ecdsa_verify_mb8`.
+  - **RS256:** with e = 65537 and a 2048/3072/4096-bit modulus, the exponentiations go to `mbx_rsa_public_mb8`,
+    and the result is compared with the expected PKCS#1 block as before. Screening, when enabled, still runs
+    first, because it's cheaper per token.
+  - **Byte order** comes from Intel's own known-answer tests: big-endian r, s, digests and RSA strings;
+    little-endian key limbs.
+- **Status: compile-tested only.**
+  - The integration is syntax-checked for x86-64 against crypto_mb's real headers.
+  - crypto_mb's build needs CMake ≥ 3.18, NASM and OpenSSL ≥ 3.5.5 headers (Ubuntu 24.04 ships 3.0).
+  - Neither test machine has IFMA. `make pk-test-ifma` runs the full vector set through it, and the test prints
+    whether the IFMA path was active, so it's ready for an IFMA machine.
+  - `make pk-bench-ifma` benchmarks it, then repeats the same binary with IFMA masked off for comparison.
+  - It isn't yet known whether crypto_mb beats the fixed-key comb tables on ES256. Intel's code doesn't exploit
+    a fixed key; ours does.
 
 ## Comparison: algorithm × implementation × ns/token × licence
 
@@ -336,9 +378,8 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
    - Tests: Wycheproof `ed25519_test.json` and RFC 8037.
 2. **JWKS input.** `jwt_pkey_from_jwk()` for `{"kty":"RSA","n","e"}` and `{"kty":"EC","crv":"P-256","x","y"}`,
    plus `kid` selection across keys.
-3. **Batch the SHA-256 of signing inputs** through the multi-buffer engine.
-   - It's ~0.7 µs per token on the Xeon's scalar path: ~5% of ES256, but ~20% of screened RS256 at batch 16.
-   - It's also part of why the measured screening ratios trail the predicted ones.
+3. **Run the crypto_mb path on an IFMA machine:** `make pk-test-ifma pk-bench-ifma`. Then decide, per algorithm,
+   whether it or the existing path is the default on IFMA CPUs.
 4. **Make the fast build the `-DJWT_PK` default.**
    - It currently needs libcrypto and the s2n-bignum fetch.
    - A build that has neither falls back to the portable C, which is still 2.8–3.6× ahead of OpenSSL on ES256.
