@@ -13,14 +13,15 @@ Every vector is first checked against pyca/cryptography, so a parsing mistake ca
 Output, one per line (hex, "-" = empty):
   es SRC X Y MSG SIG EXPECT                         EXPECT 1 = valid, 0 = invalid; SIG is r || s (any length)
   rs SRC N E MSG SIG EXPECT
-  jwt SRC ALG K1 K2 TOKEN NOW STATUS UID USERNAME   ALG ES256 (K1, K2 = x, y) or RS256 (n, e); USERNAME hex
+  ed SRC A MSG SIG EXPECT                           EdDSA (Ed25519): A = the 32-byte public key
+  jwt SRC ALG K1 K2 TOKEN NOW STATUS UID USERNAME   ALG ES256 (K1, K2 = x, y), RS256 (n, e) or EdDSA (A, -); USERNAME hex
   rspair SRC N E MSG1 SIG1 MSG2 SIG2                two genuine signatures turned into s1*x, s2/x: each is invalid,
                                                     but their product is unchanged (what -DJWT_RSA_SCREEN accepts)
 """
 import base64, json, os, random, re, sys, zipfile
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
 
 N256 = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
@@ -54,6 +55,59 @@ def rs_ok(n, e, msg, sig):
         rsa.RSAPublicNumbers(e, n).public_key().verify(sig, msg, padding.PKCS1v15(), hashes.SHA256()); return True
     except (InvalidSignature, ValueError):
         return False
+
+
+def ed_ok(a, msg, sig):
+    """pyca's verdict on an Ed25519 signature (OpenSSL underneath: RFC 8032 with S < L, cofactorless)."""
+    if len(sig) != 64: return False
+    try:
+        ed25519.Ed25519PublicKey.from_public_bytes(a).verify(sig, msg); return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+def wycheproof_ed(path):
+    out = []
+    for g in json.load(open(path))["testGroups"]:
+        a = bytes.fromhex(g["publicKey"]["pk"])
+        for t in g["tests"]:
+            if t["result"] == "acceptable": continue   # small- / mixed-order keys: either answer is allowed
+            out.append(("ed", f"wycheproof-ed-{t['tcId']}", a, None, bytes.fromhex(t["msg"]), bytes.fromhex(t["sig"]),
+                        int(t["result"] == "valid")))
+    return out
+
+
+def rfc8032_ed(path):
+    """section 7.1: TEST 1, 2, 3, 1024 and SHA(abc); hex blocks span lines and page breaks"""
+    text = open(path).read()
+    text = "\n".join(l for l in text.split("\n") if not re.match(r"^(Josefsson & Liusvaara|RFC 8032  )", l)).replace("\f", "")
+    sec = text[text.rindex("\n7.1.  Test Vectors for Ed25519"):text.rindex("\n7.2.  Test Vectors for Ed25519ctx")]
+    out = []
+    for blk in sec.split("-----TEST ")[1:]:
+        lines = blk.split("\n")
+        name, fields, cur = lines[0].strip(), {}, None
+        for l in lines[1:]:
+            t = l.strip()
+            if not t: continue
+            if t.endswith(":"): cur = t.split(" (")[0].rstrip(":"); fields[cur] = ""; continue
+            if cur and re.fullmatch(r"[0-9a-f]+", t): fields[cur] += t
+            elif cur: cur = None   # prose after the block
+        a, msg, sig = (bytes.fromhex(fields[k]) for k in ("PUBLIC KEY", "MESSAGE", "SIGNATURE"))
+        out.append(("ed", f"rfc8032-test-{name}", a, None, msg, sig, 1))
+    assert len(out) == 5, [o[1] for o in out]
+    return out
+
+
+def rfc8037_ed(path):
+    """A.4: the Ed25519 JWS (payload is not a JWT claims set, so it is checked as a raw signature)"""
+    text = open(path).read()
+    a = unb64u(re.search(r'"x":"([^"]+)"', text).group(1))
+    m = re.search(r"So the compact serialization of the JWS is.*?\n\n(.*?)\n\n", text, re.S)
+    tok = re.sub(r"\s+", "", m.group(1))
+    h, p, sg = tok.split(".")
+    si, sig = (h + "." + p).encode(), unb64u(sg)
+    bad = sig[:10] + bytes([sig[10] ^ 1]) + sig[11:]
+    return [("ed", "rfc8037-a4", a, None, si, sig, 1), ("ed", "rfc8037-a4-tampered", a, None, si, bad, 0)]
 
 
 def wycheproof_es(path):
@@ -133,6 +187,14 @@ def rfc7515(path):
     return out
 
 
+L25519 = 2**252 + 27742317777372353535851937790883648493
+
+
+def ed_pub(kp):
+    from cryptography.hazmat.primitives import serialization
+    return kp.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
 def es_sign(priv, msg):
     r, s = decode_dss_signature(priv.sign(msg, ec.ECDSA(hashes.SHA256())))
     return i2b(r, 32) + i2b(s, 32)
@@ -146,10 +208,18 @@ def randoms(rnd, nrand):
     es_keys = [ec.generate_private_key(ec.SECP256R1()) for _ in range(8)]
     global rs_keys_for_pairs
     rs_keys = rs_keys_for_pairs = [rsa.generate_private_key(65537, b) for b in (2048, 2048, 2048, 3072, 4096)] + [rsa.generate_private_key(3, 2048)]
+    ed_keys = [ed25519.Ed25519PrivateKey.generate() for _ in range(6)]
     for i in range(nrand):
         ml = rnd.choice([0, 1, 55, 56, 63, 64, 65, 119, 120, 128, rnd.randrange(0, 1101)])
         msg = rnd.randbytes(ml)
-        if i % 3:   # ES256
+        if i % 4 == 3:   # EdDSA: corrupted signatures, S + L (non-canonical), R flipped
+            kp = rnd.choice(ed_keys); a = ed_pub(kp); sig = kp.sign(msg)
+            r = rnd.random()
+            if r < 0.1: sig = sig[:32] + (int.from_bytes(sig[32:], "little") + L25519).to_bytes(32, "little")
+            elif r < 0.25:
+                j = rnd.randrange(64); sig = sig[:j] + bytes([sig[j] ^ (1 << rnd.randrange(8))]) + sig[j + 1:]
+            out.append(("ed", f"random-ed-{i}", a, None, msg, sig, None))
+        elif i % 3:   # ES256
             kp = rnd.choice(es_keys); pn = kp.public_key().public_numbers()
             x, y = i2b(pn.x, 32), i2b(pn.y, 32); sig = es_sign(kp, msg)
             if rnd.random() < 0.15:   # the other valid s (ECDSA is malleable; JWS does not forbid high s)
@@ -163,11 +233,14 @@ def randoms(rnd, nrand):
                 j = rnd.randrange(len(sig)); sig = sig[:j] + bytes([sig[j] ^ (1 << rnd.randrange(8))]) + sig[j + 1:]
             out.append(("rs", f"random-rs-{i}", pn.n, pn.e, msg, sig, None))
     # whole tokens, through jwt_verify_batch_pk
-    for alg, keys in (("ES256", es_keys[:3]), ("RS256", rs_keys)):
+    for alg, keys in (("ES256", es_keys[:3]), ("RS256", rs_keys), ("EdDSA", ed_keys[:3])):
         for ki, kp in enumerate(keys):
-            pn = kp.public_key().public_numbers()
-            k1, k2 = (i2b(pn.x, 32), i2b(pn.y, 32)) if alg == "ES256" else (pn.n, pn.e)
-            sign = es_sign if alg == "ES256" else rs_sign
+            if alg == "EdDSA":
+                k1, k2, sign = ed_pub(kp), None, lambda k, m: k.sign(m)
+            else:
+                pn = kp.public_key().public_numbers()
+                k1, k2 = (i2b(pn.x, 32), i2b(pn.y, 32)) if alg == "ES256" else (pn.n, pn.e)
+                sign = es_sign if alg == "ES256" else rs_sign
             for t in range(40):
                 uid = rnd.randrange(1, 10**12); user = ("user%d" % rnd.randrange(10**6)).encode()
                 hdr = rnd.choice([{"alg": alg, "typ": "JWT"}, {"typ": "JWT", "alg": alg}, {"alg": alg, "kid": "k%d" % ki}])
@@ -175,7 +248,7 @@ def randoms(rnd, nrand):
                 kind = rnd.choice(["ok"] * 5 + ["expired", "badsig", "badalg", "nouser", "padding"])
                 if kind == "expired": claims["exp"] = now - rnd.randrange(0, 1000)
                 if kind == "nouser": del claims["username"]
-                if kind == "badalg": hdr["alg"] = "RS256" if alg == "ES256" else "ES256"
+                if kind == "badalg": hdr["alg"] = {"ES256": "EdDSA", "RS256": "ES256", "EdDSA": "ES256"}[alg]
                 h = b64u(json.dumps(hdr, separators=(",", ":")).encode()); p = b64u(json.dumps(claims, separators=(",", ":")).encode())
                 sig = sign(kp, (h + "." + p).encode()); s64 = b64u(sig)
                 if kind == "badsig": j = rnd.randrange(len(s64) - 1); s64 = s64[:j] + ("A" if s64[j] != "A" else "B") + s64[j + 1:]
@@ -192,21 +265,25 @@ def main():
     vec = wycheproof_es(V("ecdsa_secp256r1_sha256_p1363_test.json")) + cavp_es(V("186-4ecdsatestvectors.zip"))
     for b in (2048, 3072, 4096): vec += wycheproof_rs(V(f"rsa_signature_{b}_sha256_test.json"), b)
     vec += cavp_rs(V("186-3rsatestvectors.zip"))
+    vec += wycheproof_ed(V("ed25519_test.json")) + rfc8032_ed(V("rfc8032.txt")) + rfc8037_ed(V("rfc8037.txt"))
     rnd = random.Random(seed)
     vec += randoms(rnd, nrand)
     w, counts = sys.stdout.write, {}
     for v in vec:
-        if v[0] in ("es", "rs"):
+        if v[0] in ("es", "rs", "ed"):
             kind, src, k1, k2, msg, sig, expect = v
-            got = (es_ok if kind == "es" else rs_ok)(k1, k2, msg, sig)
+            got = es_ok(k1, k2, msg, sig) if kind == "es" else rs_ok(k1, k2, msg, sig) if kind == "rs" else ed_ok(k1, msg, sig)
             if expect is None: expect = int(got)
             elif got != bool(expect): raise SystemExit(f"{src}: parsed vector disagrees with cryptography (expect {expect})")
-            k1h, k2h = (hx(k1), hx(k2)) if kind == "es" else (hx(i2b(k1)), hx(i2b(k2)))
-            w(f"{kind} {src} {k1h} {k2h} {hx(msg)} {hx(sig)} {expect}\n")
+            if kind == "ed": w(f"ed {src} {hx(k1)} {hx(msg)} {hx(sig)} {expect}\n")
+            else:
+                k1h, k2h = (hx(k1), hx(k2)) if kind == "es" else (hx(i2b(k1)), hx(i2b(k2)))
+                w(f"{kind} {src} {k1h} {k2h} {hx(msg)} {hx(sig)} {expect}\n")
             counts[src.split("-")[0] + "-" + kind] = counts.get(src.split("-")[0] + "-" + kind, 0) + 1
     for v in rfc7515(V("rfc7515.txt")) + [v for v in vec if v[0] == "jwt"]:
         _, src, alg, k1, k2, tok, now, st, uid, user = v
         if alg == "ES256": k1h, k2h = hx(k1), hx(k2)
+        elif alg == "EdDSA": k1h, k2h = hx(k1), "-"
         else: k1h, k2h = hx(i2b(k1)), hx(i2b(k2))
         w(f"jwt {src} {alg} {k1h} {k2h} {tok} {now} {st} {uid} {hx(user)}\n")
         counts["jwt"] = counts.get("jwt", 0) + 1

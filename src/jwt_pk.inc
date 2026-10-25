@@ -64,12 +64,13 @@ static int rsa_ossl_init(rsa_key_t *k);
 #endif
 
 struct jwt_pkey {
-    int alg; /* 1 RS256, 2 ES256 */
+    int alg; /* 1 RS256, 2 ES256, 3 EdDSA (Ed25519) */
     const char *name, *canon;
     int sig_bytes, sig_chars;
     rsa_key_t rsa;
     p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
     uint64_t qx[4], qy[4];                   /* ES256: the public point, plain little-endian limbs */
+    struct ed_key *ed;                       /* EdDSA: comb tables for B and -A (jwt_ed25519.inc) */
 };
 
 #ifdef JWT_CRYPTO_MB
@@ -83,14 +84,14 @@ struct jwt_pkey {
 #include <crypto_mb/status.h>
 static int cmb_ok(void) { return (jwt_cpu() & JWT_CPU_IFMA) != 0; }
 #endif
-enum { PK_RS256 = 1, PK_ES256 = 2 };
+enum { PK_RS256 = 1, PK_ES256 = 2, PK_ED25519 = 3 };
 
 /* ---------------------------------------------------------------------------------- signing-input hashes */
 /* SHA-256 of the m messages of a chunk whose signature length is right, in one multi-buffer call (jwt_sha256_batch:
  * 8 lanes on AVX-512 / AVX2, 4 interleaved SHA2 streams on ARM), as 4 little-endian limbs of the big-endian digest */
 static void hash_chunk(int m, const uint8_t *const *msg, const int *len, const int *slen, int want, uint64_t (*e)[4]) {
-    const uint8_t *mp[32];
-    int ml[32], at[32], c = 0;
+    const uint8_t *mp[32] = {0};
+    int ml[32] = {0}, at[32], c = 0;
     uint32_t dig[32][8];
     for (int i = 0; i < m; i++)
         if (slen[i] == want) mp[c] = msg[i], ml[c] = len[i], at[c++] = i;
@@ -853,9 +854,22 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
     }
 }
 
+/* ---------------------------------------------------------------------------------- EdDSA */
+#include "jwt_ed25519.inc"
+
+jwt_pkey_t *jwt_pkey_ed25519(const uint8_t pub[32]) {
+    jwt_pkey_t *k = calloc(1, sizeof *k);
+    if (!k) return NULL;
+    if (!(k->ed = (struct ed_key *)ed_key_new(pub))) { free(k); return NULL; }
+    k->alg = PK_ED25519, k->name = "EdDSA", k->canon = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9"; /* {"alg":"EdDSA","typ":"JWT"} */
+    k->sig_bytes = 64, k->sig_chars = 86;
+    return k;
+}
+
 /* ---------------------------------------------------------------------------------- front end */
 void jwt_pkey_free(jwt_pkey_t *k) {
     if (!k) return;
+    free(k->ed);
 #ifdef JWT_OPENSSL
     if (k->alg == PK_RS256) rsa_ossl_free(&k->rsa);
 #endif
@@ -865,6 +879,7 @@ void jwt_pkey_free(jwt_pkey_t *k) {
 void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
                        const uint8_t *const *sig, const int *slen, uint8_t *ok) {
     if (k->alg == PK_ES256) es256_raw(k, n, msg, len, sig, slen, ok);
+    else if (k->alg == PK_ED25519) ed25519_raw((const ed_key_t *)k->ed, n, msg, len, sig, slen, ok);
     else rs256_raw(k, n, msg, len, sig, slen, ok);
 }
 

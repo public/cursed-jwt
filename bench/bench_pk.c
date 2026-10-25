@@ -77,22 +77,31 @@ static void bench_set(set_t *S) {
 
     EVP_MD_CTX *mctx = EVP_MD_CTX_new();
     EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new(S->ossl, NULL);
-    EVP_PKEY_verify_init(pctx);
-    if (S->alg[0] == 'R') EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING);
-    EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256());
+    int ed = S->alg[1] == 'd'; /* EdDSA: one-shot only, no message digest, no prehashed mode */
     double t;
-    TIMEIT(t, 1, {
-        EVP_DigestVerifyInit(mctx, NULL, EVP_sha256(), NULL, S->ossl);
-        EVP_DigestVerifyUpdate(mctx, S->tok[base], (size_t)S->mlen[base]);
-        sink += EVP_DigestVerifyFinal(mctx, S->der[base], (size_t)S->derlen[base]);
-    });
-    printf("  %-34s %8.0f ns/token\n", "openssl EVP_DigestVerify", t);
-    TIMEIT(t, 1, {
+    if (ed) {
+        TIMEIT(t, 1, {
+            EVP_DigestVerifyInit(mctx, NULL, NULL, NULL, S->ossl);
+            sink += EVP_DigestVerify(mctx, S->der[base], (size_t)S->derlen[base], (const uint8_t *)S->tok[base], (size_t)S->mlen[base]);
+        });
+        printf("  %-34s %8.0f ns/token\n", "openssl EVP_DigestVerify", t);
+    } else {
+        EVP_PKEY_verify_init(pctx);
+        if (S->alg[0] == 'R') EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING);
+        EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256());
+        TIMEIT(t, 1, {
+            EVP_DigestVerifyInit(mctx, NULL, EVP_sha256(), NULL, S->ossl);
+            EVP_DigestVerifyUpdate(mctx, S->tok[base], (size_t)S->mlen[base]);
+            sink += EVP_DigestVerifyFinal(mctx, S->der[base], (size_t)S->derlen[base]);
+        });
+        printf("  %-34s %8.0f ns/token\n", "openssl EVP_DigestVerify", t);
+    }
+    if (!ed) TIMEIT(t, 1, {
         uint8_t h[32];
         SHA256((const uint8_t *)S->tok[base], (size_t)S->mlen[base], h);
         sink += EVP_PKEY_verify(pctx, S->der[base], (size_t)S->derlen[base], h, 32);
     });
-    printf("  %-34s %8.0f ns/token\n", "openssl prehashed, reused ctx", t);
+    if (!ed) printf("  %-34s %8.0f ns/token\n", "openssl prehashed, reused ctx", t);
     printf("  %-34s", "cursed raw verify, batch");
     for (int b = 0; b < 6; b++) printf(" %8d", B[b]);
     printf("\n  %-34s", "");
@@ -132,9 +141,10 @@ int main(int argc, char **argv) {
             uint8_t k1[600], k2[600], spki[2000];
             int l1 = unhex(a, k1), l2 = unhex(b, k2), ld = unhex(c, spki);
             double t0 = now_ns();
-            S->k = S->alg[0] == 'E' ? jwt_pkey_es256(k1, k2) : jwt_pkey_rs256(k1, (size_t)l1, k2, (size_t)l2);
+            S->k = S->alg[1] == 'd' ? jwt_pkey_ed25519(k1) : S->alg[0] == 'E' ? jwt_pkey_es256(k1, k2)
+                                                                      : jwt_pkey_rs256(k1, (size_t)l1, k2, (size_t)l2);
             double t1 = now_ns();
-            S->bits = S->alg[0] == 'E' ? 256 : l1 * 8;
+            S->bits = S->alg[1] == 'd' ? 255 : S->alg[0] == 'E' ? 256 : l1 * 8;
             const uint8_t *p = spki;
             S->ossl = d2i_PUBKEY(NULL, &p, ld);
             if (!S->k || !S->ossl) { printf("key setup failed\n"); return 1; }
@@ -149,7 +159,7 @@ int main(int argc, char **argv) {
             S->mlen[i] = (int)(d2 - S->tok[i]);
             S->sig[i] = malloc(600);
             S->slen[i] = jwt_b64url_decode(S->sig[i], d2 + 1, (int)strlen(d2 + 1));
-            if (S->alg[0] == 'E') { /* r || s -> DER */
+            if (S->alg[0] == 'E' && S->alg[1] == 'S') { /* ES256: r || s -> DER */
                 ECDSA_SIG *es = ECDSA_SIG_new();
                 ECDSA_SIG_set0(es, BN_bin2bn(S->sig[i], 32, NULL), BN_bin2bn(S->sig[i] + 32, 32, NULL));
                 S->der[i] = NULL;

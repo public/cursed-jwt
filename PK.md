@@ -15,7 +15,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   The **fast build** is `-DJWT_S2N -DJWT_OPENSSL`. It picks the kernel that measured fastest per platform and key
   size (see [Backends](#backends)).
 - **Tests:** `make pk-test` / `pk-test-s2n` / `pk-test-fast` check every build against Wycheproof, NIST CAVP,
-  RFC 7515 A.2/A.3 and pyca/cryptography.
+  RFC 7515 A.2/A.3, RFC 8032, RFC 8037 and pyca/cryptography.
 
 ## Summary
 
@@ -46,14 +46,16 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - Fast build, RSA-2048 at batch 16: **3.8× faster than OpenSSL on the M5, 7.2× on the Xeon** (3.16 vs 22.9 µs).
   - **The catch:** screening proves that every *message* was signed. It does not prove that every *signature string*
     is the canonical one: s₁·x and s₂/x pass together. So it's opt-in (`-DJWT_RSA_SCREEN`); see below.
-- **EdDSA isn't prototyped yet, but it is where the biggest ratio is.** OpenSSL's Ed25519 verify is slow (38 µs on
-  the M5, 141 µs on the Xeon). The ES256 fixed-key trick applies unchanged (verify = [S]B − [k]A, with A fixed per
-  key), and Edwards additions are cheaper.
+- **EdDSA (Ed25519): the biggest ratio.** OpenSSL's Ed25519 verify is slow (40 µs on the M5, 150 µs on the Xeon).
+  The ES256 fixed-key trick applies unchanged: verify = [S]B + [k](−A), with comb tables for B and −A built at key
+  setup, and Edwards additions are cheaper than Jacobian ones.
+  - **Portable C, batch 32: 8.8× faster than OpenSSL on the M5 (4.6 vs 40.4 µs), 9.2× on the Xeon (16.3 vs
+    150.2 µs).** Already 6.2× / 7.0× at batch 1.
 - **Recommendation:**
   1. Ship the fast build's backend choice as the default for `-DJWT_PK`, and keep the portable C as the fallback
      when it has no dependencies.
   2. Keep RS256 screening as an explicit batch option.
-  3. Do Ed25519 next, the same way.
+  3. Ed25519 is done the same way; give it s2n-bignum's verified `p25519` field asm next (see Next steps).
   4. RS256 is what most OIDC providers default to (Google, Microsoft Entra, Auth0, Okta), so it matters most in
      practice, even though it gains least without screening.
 
@@ -78,6 +80,13 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | M5, fast (s2n-bignum P-256) | 10.8 | 9.6 | 9.4 | 9.3 | 9.2 | 9.2 | 32.4 |
 | Xeon, portable C | 28.2 | 24.7 | 23.0 | 22.1 | 21.6 | 21.4 | 78.6 |
 | **Xeon, fast (s2n-bignum P-256)** | **21.8** | 18.3 | 16.3 | 15.3 | **14.9** | 14.8 | 78.8 |
+
+**EdDSA (Ed25519)**, portable C only (fiat-crypto curve25519 field; Xeon exp168, clang 18)
+
+| build \ batch | 1 | 2 | 4 | 8 | 16 | 32 | OpenSSL |
+|---|---|---|---|---|---|---|---|
+| **M5, portable C** | **6.5** | – | – | – | – | **4.6** | 40.4 |
+| **Xeon, portable C** | **21.5** | 18.9 | 17.5 | 17.0 | 16.5 | **16.3** | 150.2 |
 
 **RS256-2048, one at a time (screening off)**
 
@@ -112,6 +121,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | **Xeon, fast, screened** | 41.4 | 25.1 | 15.7 | 10.9 | **8.6** | 8.6 | 43.9 |
 
 - **ES256's batch gain is small (~1.4× from batch 1 to 16):** it comes only from sharing the s⁻¹ inversion.
+  EdDSA's (~1.3×) is the same thing for the Z⁻¹ that encodes R′: one inversion per chunk of 32 tokens.
 - **RSA's batch gain is the screening:** c tokens cost 2c + 17 multiplications against 19c.
   - Predicted speedups at batches 2, 4, 8 and 16: 1.8×, 3.0×, 4.6× and 6.2×.
   - Measured on the Xeon fast build: 1.7×, 2.8×, 3.9× and 5.1×.
@@ -220,28 +230,30 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **SME2 on the M5.** It has 16×16→64-bit outer products (`FEAT_SME_I16I64`). In principle that's a 2048-bit
   schoolbook product in tiles, but nothing public does it. It's research, not a borrowable implementation.
 
-### EdDSA (Ed25519), for comparison (not prototyped)
+### EdDSA (Ed25519)
 
 | implementation | technique | M5 µs | Xeon µs | licence |
 |---|---|---|---|---|
-| OpenSSL 3.x | ref10-style, one at a time | **38.0** meas. (`openssl speed`) | **140.6** meas. (`openssl speed`) | Apache-2.0 |
+| OpenSSL 3.x | ref10-style, one at a time | **40.4** meas. | **150.2** meas. | Apache-2.0 |
 | libsodium | ref10, strict RFC 8032 checks | ~30 est. | ~60 est. | ISC |
 | curve25519-dalek / ed25519-dalek (AVX2 backend; `verify_batch`) | 4-way parallel field ops inside one point op; batch = Straus/Pippenger with random 128-bit coefficients, ~2× at batch 64 | ~20 single, ~10 batch est. | ~45 single, ~22 batch est. | BSD-3-Clause |
 | ed25519-donna | 64-bit / SSE2; Bos–Coster batch verify | ~25 / ~12 est. | ~55 / ~28 est. | public domain |
 | Firedancer `fd_ed25519` (AVX-512 IFMA) | 8-way IFMA, batch | n/a | n/a (IFMA) | Apache-2.0 |
-| **fixed-key comb for A + B (the ES256 design)** | 2 × 32 extended-coordinate mixed adds, batched inversion for the R comparison | ~4 est. | ~15 est. | — |
+| **cursed-jwt, portable C** | **fixed-key combs for B and −A (W=7)**, batched Z⁻¹ for the R comparison | **6.5** b1 / **4.6** b32 meas. | **21.5** b1 / **16.3** b32 meas. | MIT (+ fiat-crypto, MIT) |
 
-- **Why the fixed-key estimate is that low.** A mixed addition in extended twisted Edwards coordinates is 7M
-  (P-256 Jacobian: 11). A 2²⁵⁵−19 multiply (5×51-bit limbs) is ~0.7× a P-256 Montgomery multiply in C. So the
-  cost is ~0.45× ES256, plus SHA-512 of R‖A‖M.
-- **The semantics risk.** Batch Ed25519 (dalek, donna) can accept different signatures from single verification
-  unless both use the cofactored equation (ZIP-215). A fixed-key single verify avoids that question entirely.
-- **What it needs.** SHA-512 of R‖A‖M, which ties in with the SHA-512 work below. Tests: Wycheproof `ed25519_test.json` and RFC 8037 A.4.
+- **Why it's this cheap.** A mixed addition in extended twisted Edwards coordinates is 7M (P-256 Jacobian: 11),
+  and a verify is 2 × 37 of them with no doublings. The estimate before building it was ~4 µs on the M5 and ~15 on
+  the Xeon.
+- **The semantics.** It is a single-signature verify, not a random-linear-combination batch, so it can't accept
+  anything single verification rejects. The equation is the cofactorless one, compared as bytes: accept iff
+  S < L, A and R decode, and encode([S]B − [k]A) = R. That matches RFC 8032 §5.1.7 as OpenSSL, libsodium and
+  Wycheproof's "valid" set read it. Non-canonical encodings of A (y ≥ p) are rejected at key setup.
+- **Not constant-time,** like the ES256 code: every input is public.
 
 ## The prototype
 
 ```c
-jwt_pkey_t *k = jwt_pkey_es256(x, y);        // or jwt_pkey_rs256(n, nlen, e, elen); NULL if invalid
+jwt_pkey_t *k = jwt_pkey_es256(x, y);        // or jwt_pkey_rs256(n, nlen, e, elen), jwt_pkey_ed25519(pub); NULL if invalid
 jwt_verify_batch_pk(k, n, tok, len, time(NULL), out);   // same results and claim rules as jwt_verify_batch
 jwt_pkey_free(k);
 ```
@@ -288,6 +300,18 @@ jwt_pkey_free(k);
     `bignum_emontredc_8n`, which is how AWS-LC uses them. Cross-checked against the C on 20,000 random operands.
   - **`-DJWT_OPENSSL`:** libcrypto's `BN_mod_exp_mont` and `BN_mod_mul_montgomery`, with a `BN_MONT_CTX` cached in
     the key. The exact block compare and the screening algebra stay ours.
+- **EdDSA (Ed25519, `alg` "EdDSA", RFC 8037):**
+  - Key setup decodes A (rejecting y ≥ p and points off the curve) and builds signed-digit comb tables of
+    `k·2^(7j)·P`, k = 1..64, for B and −A, in Niels form (y+x, y−x, 2dxy): 37 rows each, 568 KB per key, 0.77 ms
+    on the M5 and 2.9 ms on the Xeon.
+  - Verify, in chunks of 32 tokens:
+    1. reject unless the signature is exactly 64 bytes and S < L;
+    2. k = SHA-512(R ‖ A ‖ M) mod L (a C SHA-512; the reduction goes through fiat's Montgomery scalar code);
+    3. S and k recoded to signed base-128 digits; 2 × 37 complete mixed additions (no exceptional cases);
+    4. all the Z of the chunk inverted together (Montgomery's trick + the ref10 addition chain);
+    5. accept iff the encoding of the result equals R byte for byte.
+  - Field arithmetic is fiat-crypto's `curve25519_64.c` and `curve25519_scalar_64.c` (MIT), fetched by
+    `scripts/fetch-fiat.sh` like the P-256 files. `JWT_ED_W` sets the window.
 - **Screening (`-DJWT_RSA_SCREEN`):**
   - A = ∏ sᵢ and B = ∏ EMᵢ, each by chained Montgomery products of the raw values, so both carry R^−(c−1).
   - Accept the whole batch iff mont(pow(A·R, e), K_c) = B, where K_c = R^((c−1)(e−1)) mod n is precomputed per
@@ -296,11 +320,12 @@ jwt_pkey_free(k);
   - Cost: 2c + 17 multiplications for c tokens, against 19c one at a time.
 
 **Tests:** `make pk-test` runs 4 builds (portable C, screening, W=5, W=7); `pk-test-s2n` and `pk-test-fast` run
-the asm backends with and without screening. Each build makes about 12,100 checks. All pass on:
+the asm backends with and without screening. Each build makes about 14,500 checks. All pass on:
 - macOS arm64 (Apple clang), every build;
 - Linux arm64 in Docker (gcc 13.3, clang 18.1), every build, plus ASan/UBSan on the fast screening build;
 - Linux amd64 in Docker, the portable C builds plus ASan/UBSan (Rosetta can't run the ADX asm);
-- the real Xeon: portable C with gcc (exp75/79), and the s2n, libcrypto and fast builds with clang (exp107/109/110).
+- the real Xeon: portable C with gcc (exp75/79), and the s2n, libcrypto and fast builds with clang (exp107/109/110);
+  EdDSA with clang (exp168).
 
 HS256 is unchanged by the shared front end (`claims_one`, `header_ok` taking the alg). On the Xeon (exp79), full
 verify is 277.9 ns at batch 8 and 1,178.7 at batch 1. The README had 277 and 1,178 at the time; batch 1 has since
@@ -312,11 +337,15 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 |---|---|
 | Wycheproof `ecdsa_secp256r1_sha256_p1363_test.json` (JOSE r‖s format) | 262 (173 valid, 89 invalid) |
 | Wycheproof `rsa_signature_{2048,3072,4096}_sha256_test.json` | 773 (non-"acceptable"; mostly invalid encodings) |
+| Wycheproof `ed25519_test.json` | 181 (117 valid, 64 invalid: S ≥ L, bad encodings, truncation) |
+| RFC 8032 §7.1 Ed25519 tests (empty, 1-, 2-, 1023-byte and SHA(abc) messages) | 5 |
+| RFC 8037 A.4 (the JWS Ed25519 example) | raw + tampered, and the token |
 | NIST CAVP `SigVer.rsp` [P-256,SHA-256] | 15 |
 | NIST CAVP `SigVer15_186-3.rsp`, SHA256, mod 2048/3072, assorted e | 36 |
 | RFC 7515 A.2 (RS256) and A.3 (ES256) | live → BAD_PAYLOAD (no sub), expired → INVALID, tampered → INVALID |
-| pyca/cryptography random: 6 RSA keys (2048/3072/4096, e = 3 and 65537), 8 P-256 keys, messages 0–1100 B, 15% corrupted, 15% high-s | 600 |
-| pyca/cryptography tokens: alg mismatch, expired, bad signature, padding, missing username, header variants | 360 |
+| pyca/cryptography random: 6 RSA keys (2048/3072/4096, e = 3 and 65537), 8 P-256 keys, messages 0–1100 B, 15% corrupted, 15% high-s | 450 |
+| pyca/cryptography random Ed25519: 6 keys, 10% with S + L, 15% bit-flipped | 150 |
+| pyca/cryptography tokens: alg mismatch, expired, bad signature, padding, missing username, header variants | 486 (120 EdDSA) |
 
 - **Every vector is checked against pyca/cryptography first** (`tests/make_pk_vectors.py`), so a parsing mistake
   can't pass silently.
@@ -328,6 +357,7 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 - **Screening's documented weakness is a test.** 4 pairs (s₁·x, s₂/x) must be rejected one at a time and by
   default. The screening build reports that it accepts them (4/4).
 - **Mutation checks.**
+  - Removing EdDSA's S < L check fails 85 checks; ignoring the sign bit of x fails 1,262.
   - Flipping one expected result fails the run.
   - Planting an always-accept for one lane fails 64 checks.
   - A W=8 build first failed 22/64 tokens: the signed digit ±128 overflowed `int8_t`. That's why `pk-test` now runs
@@ -371,11 +401,10 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 
 ## Next steps
 
-1. **Ed25519 with fixed-key combs and SHA-512.**
-   - Same API.
-   - s2n-bignum has verified `edwards25519` field and point code to borrow (`bignum_mul_p25519`,
-     `edwards25519_scalarmuldouble`).
-   - Tests: Wycheproof `ed25519_test.json` and RFC 8037.
+1. **Ed25519 speed-ups.**
+   - s2n-bignum's verified `bignum_mul_p25519` / `bignum_sqr_p25519` asm in place of fiat's C, as for P-256.
+   - The SHA-512 of R ‖ A ‖ M through the ARMv8.2 SHA512 instructions and a multi-buffer x86 engine (see HS384 /
+     HS512 below); it is ~0.4 µs of the 4.6 on the M5.
 2. **JWKS input.** `jwt_pkey_from_jwk()` for `{"kty":"RSA","n","e"}` and `{"kty":"EC","crv":"P-256","x","y"}`,
    plus `kid` selection across keys.
 3. **Run the crypto_mb path on an IFMA machine:** `make pk-test-ifma pk-bench-ifma`. Then decide, per algorithm,

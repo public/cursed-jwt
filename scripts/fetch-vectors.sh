@@ -8,6 +8,7 @@
 # and, for the RS256 / ES256 prototype (make pk-test):
 #   Wycheproof ecdsa_secp256r1_sha256_p1363, rsa_signature_{2048,3072,4096}_sha256   (same commit)
 #   NIST CAVP  186-4ecdsatestvectors.zip SigVer.rsp [P-256,SHA-256]; 186-3rsatestvectors.zip SigVer15_186-3.rsp
+#   Wycheproof ed25519_test.json; RFC 8032 section 7.1 (Ed25519 test vectors); RFC 8037 A.4 (the EdDSA JWS)
 set -e
 cd "$(dirname "$0")/.."
 V=third_party/vectors; mkdir -p $V
@@ -28,3 +29,6 @@ get rsa_signature_3072_sha256_test.json https://raw.githubusercontent.com/C2SP/w
 get rsa_signature_4096_sha256_test.json https://raw.githubusercontent.com/C2SP/wycheproof/d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9/testvectors_v1/rsa_signature_4096_sha256_test.json 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667
 get 186-4ecdsatestvectors.zip https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-4ecdsatestvectors.zip fe47cc92b4cee418236125c9ffbcd9bb01c8c34e74a4ba195d954bcb72824752
 get 186-3rsatestvectors.zip https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/186-3rsatestvectors.zip 8405aeb3572a4f98ed4b1a3ccb3f2f49e725462dd28ec4759d6a15d88855d19c
+get ed25519_test.json https://raw.githubusercontent.com/C2SP/wycheproof/d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9/testvectors_v1/ed25519_test.json ea80ffebac085e21cb9d3e903e7fa2b448d96702da5b31f061d0b83b430b74b3
+get rfc8032.txt https://www.rfc-editor.org/rfc/rfc8032.txt ed63657ff389301282b169b0abde9b5dd2c7e4d524fdfa5da6ff3094fc93c4c3
+get rfc8037.txt https://www.rfc-editor.org/rfc/rfc8037.txt f14347f9d8eead78ef6e7a1ea3d795d35d664033095a76a80fcd567904aaedaa

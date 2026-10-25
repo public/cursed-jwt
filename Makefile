@@ -150,7 +150,7 @@ fuzz:
 
 # RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
 PK := -DJWT_PK -Ithird_party/fiat
-PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc third_party/fiat/p256_64.c
+PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc third_party/fiat/p256_64.c
 third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
 	./scripts/fetch-fiat.sh
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)

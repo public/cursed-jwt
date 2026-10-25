@@ -9,7 +9,7 @@ pass**:
 The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JSON parser with a shape-matched fast
 path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates.
 
-RS256 and ES256 are an opt-in prototype with the same front end ([PK.md](PK.md)).
+RS256, ES256 and EdDSA (Ed25519) are an opt-in prototype with the same front end ([PK.md](PK.md)).
 
 ## At a glance
 
@@ -25,13 +25,14 @@ Lake, no SHA-NI). Every implementation accepted the same 20,000 tokens and rejec
 
 That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521.
 
-**RS256 / ES256** (prototype, fastest build), µs per token against OpenSSL `EVP_DigestVerify`:
+**RS256 / ES256 / EdDSA** (prototype, fastest build), µs per token against OpenSSL `EVP_DigestVerify`:
 
 | | Xeon, batch 1 | Xeon, batch 16 | Xeon, OpenSSL | M5, batch 16 | M5, OpenSSL |
 |---|---|---|---|---|---|
 | ES256 | 21.8 | **14.9** | 78.8 | **9.2** | 32.4 |
 | RS256-2048 | 16.5 | 16.0 | 22.9 | 8.3 | 9.0 |
 | RS256-2048, batch screening | 16.2 | **3.16** | 22.9 | **2.35** | 9.0 |
+| EdDSA (Ed25519), portable C | 21.5 | **16.5** | 150.2 | **4.6** (b32) | 40.4 |
 
 ## Contents
 
@@ -72,10 +73,10 @@ jwt_verify_batch(&key, n, tok, len, time(NULL), out);   // live iff nbf <= now <
   - `jwt_verify_batch_<engine>`: the full verify on a chosen engine.
 - **A complete program:** `examples/verify.c`, built as `build/verify SECRET TOKEN...`.
 
-**RS256 / ES256** (prototype, build with `-DJWT_PK`; see [PK.md](PK.md)):
+**RS256 / ES256 / EdDSA** (prototype, build with `-DJWT_PK`; see [PK.md](PK.md)):
 
 ```c
-jwt_pkey_t *pk = jwt_pkey_es256(x, y);      // or jwt_pkey_rs256(n, n_len, e, e_len); NULL if the key is invalid
+jwt_pkey_t *pk = jwt_pkey_es256(x, y);      // or jwt_pkey_rs256(n, n_len, e, e_len), jwt_pkey_ed25519(pub32); NULL if invalid
 jwt_verify_batch_pk(pk, n, tok, len, time(NULL), out);   // same results and claim rules
 jwt_pkey_free(pk);
 ```
@@ -108,7 +109,7 @@ Other details:
 The claim profile (`sub` as a numeric user id, `username` as a string) is built in. For other claims, use `jwt_hmac_*`
 and the JSON parser in `src/jwt.c` as building blocks.
 
-For RS256/ES256 the signature length is 342 (RSA-2048) or 86 (ES256) characters instead of 43. `alg` must name the
+For RS256/ES256/EdDSA the signature length is 342 (RSA-2048) or 86 (ES256, EdDSA) characters instead of 43. `alg` must name the
 key's algorithm; the rest is identical.
 
 ## How it works
@@ -162,7 +163,8 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 
 | CPU | HS256 engine | RS256 / ES256 kernels (`-DJWT_PK`) |
 |---|---|---|
-| x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake, Zen 4 …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
+| AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512 | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
+| x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
 | x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
 | other x86-64 | scalar | portable C |
 | AArch64 with SHA2 instructions | 4 interleaved SHA2 streams | s2n-bignum / libcrypto |
@@ -176,11 +178,14 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 - **Inspecting and masking the choice.** `jwt_engine()` names the HS256 engine in use, and `jwt_cpu_features()`
   returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
+- **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine.
+  It has only been run on the Xeon, by forcing it with `JWT_CPU_FORCE_ZMM=1` (every vector passes, exp168); it
+  hasn't been timed on a Zen yet.
 - **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
   within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64 (exp143).
   `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
 - **Engine-specific functions** are exported for tests and benchmarks; call one only if `jwt_cpu_features()` has
-  its bit. The 16-lane `jwt_hmac_zmm` and `jwt_hmac_avx512x2` exist only for benchmarks.
+  its bit. `jwt_hmac_avx512x2` exists only for benchmarks.
 
 **Options:**
 
@@ -191,7 +196,7 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 | `-DJWT_FAST_JSON` | the simdjson-style path (3–4% slower on a Xeon) |
 | `-DJWT_LANE_JSON` | lane-parallel JSON, which only pays at batch ≥ 32 |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
-| `-DJWT_PK` | the RS256 / ES256 prototype; needs fiat-crypto's generated C (`scripts/fetch-fiat.sh`) |
+| `-DJWT_PK` | the RS256 / ES256 / EdDSA prototype; needs fiat-crypto's generated C (`scripts/fetch-fiat.sh`) |
 | `-DJWT_S2N` | with `JWT_PK`: s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
 | `-DJWT_OPENSSL` | with `JWT_PK`: libcrypto's bignum asm for RSA (links `-lcrypto`) |
 | `-DJWT_RSA_SCREEN` | with `JWT_PK`: RSA batch screening (read the caveat in [PK.md](PK.md) first) |
@@ -211,9 +216,9 @@ make bench        # ns/token per engine and batch size, vs OpenSSL
 make compare      # full verify vs jwt-cpp and golang-jwt, fetched at pinned commits (network; go optional)
 make avx512       # AVX-512VL test + bench binaries (run them on AVX-512 hardware)
 make licence      # AVX-512 frequency-licence probe (AVX-512 hardware)
-make pk-test      # RS256 / ES256: portable C builds vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
+make pk-test      # RS256 / ES256 / EdDSA: portable C builds vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 make pk-test-fast # RS256 / ES256 with the s2n-bignum + libcrypto kernels
-make pk-bench pk-bench-fast   # RS256 / ES256 ns/token vs OpenSSL, with and without batch screening
+make pk-bench pk-bench-fast   # RS256 / ES256 / EdDSA ns/token vs OpenSSL, with and without batch screening
 make pk-test-ifma pk-bench-ifma   # + crypto_mb (needs scripts/build-crypto-mb.sh; an IFMA CPU to exercise it)
 ```
 
@@ -262,19 +267,21 @@ vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SH
   - a wrong secret, a non-canonical last signature character, padding, extra segments;
   - a 3 KB payload.
 
-### RS256 / ES256 (`make pk-test`)
+### RS256 / ES256 / EdDSA (`make pk-test`)
 
 | source | what | cases | origin, licence |
 |---|---|---|---|
 | Wycheproof `ecdsa_secp256r1_sha256_p1363_test.json` | ES256 in JOSE's r‖s format: malleability, out-of-range r/s, edge-case points | 262 | C2SP/wycheproof @ `d17cc89`, Apache-2.0 |
 | Wycheproof `rsa_signature_{2048,3072,4096}_sha256_test.json` | RSASSA-PKCS1-v1_5, mostly invalid encodings that must be rejected | 773 | same |
+| Wycheproof `ed25519_test.json` | Ed25519: S ≥ L, non-canonical and off-curve encodings, truncation | 181 | same |
 | NIST CAVP `SigVer.rsp` [P-256, SHA-256] | ECDSA signature verification | 15 | CAVP `186-4ecdsatestvectors.zip`, US government work |
 | NIST CAVP `SigVer15_186-3.rsp`, SHA-256, mod 2048/3072 | RSA verification, with assorted public exponents | 36 | CAVP `186-3rsatestvectors.zip`, US government work |
 | RFC 7515 A.2, A.3 | the RS256 and ES256 JWS examples: live, expired, tampered | 6 | IETF Trust |
-| pyca/cryptography, random | 8 P-256 keys and 6 RSA keys (2048/3072/4096, e = 3 and 65537); messages of 0–1,100 bytes; 15% corrupted, 15% high-s | 5,000 | generated by `tests/make_pk_vectors.py` |
+| RFC 8032 §7.1, RFC 8037 A.4 | the Ed25519 test vectors and the EdDSA JWS example (plus a tampered copy) | 8 | IETF Trust |
+| pyca/cryptography, random | 8 P-256 keys, 6 RSA keys (2048/3072/4096, e = 3 and 65537) and 6 Ed25519 keys; messages of 0–1,100 bytes; 15% corrupted, 15% high-s, 10% EdDSA S + L | 5,000 | generated by `tests/make_pk_vectors.py` |
 | pyca/cryptography, tokens | full JWTs: valid, expired, bad signature, wrong `alg`, padding, missing username, header variants | 360 | generated |
 | screening counterexamples | genuine signatures turned into s₁·x, s₂/x: rejected one at a time, and accepted only by the opt-in screening | 4 pairs | generated |
-| fiat-crypto (formally verified) | the P-256 field and scalar arithmetic, C and s2n-bignum versions, on random and edge inputs | 200,000 | [mit-plv/fiat-crypto](https://github.com/mit-plv/fiat-crypto), MIT |
+| fiat-crypto (formally verified) | the P-256 and curve25519 field and scalar arithmetic come from it; the P-256 code (C and s2n-bignum versions) is cross-checked against it on random and edge inputs | 200,000 | [mit-plv/fiat-crypto](https://github.com/mit-plv/fiat-crypto), MIT |
 
 - **How each vector runs:** alone, then inside random sub-batches, then in its whole key group shuffled into one
   batch. That way invalid signatures sit next to valid ones.
@@ -295,7 +302,7 @@ Two generators look for cases nobody wrote down.
   - corruption of the JSON, the base64url and the signature.
 - **What it checks against:** an independent Python model written from the claim table above. Python's `json`
   (with NaN, duplicates and depth checked by hand) decides JSON validity, `hmac` computes HS256, and
-  pyca/cryptography signs and verifies RS256/ES256 (including near-valid ES256 edge signatures).
+  pyca/cryptography signs and verifies RS256/ES256/EdDSA (including near-valid ES256 edge signatures).
 - **Engines and batches:** every token runs on every engine in a random batch, through a ctypes shim
   (`tests/pyshim.c`).
 - **Cost:** 200 examples per property by default, about 10 s. `HYP_N=20000` gives a long run.
@@ -307,7 +314,7 @@ Two generators look for cases nobody wrote down.
 |---|---|
 | `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher and the simdjson-style path agree with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
 | `fuzz_b64` | SIMD and scalar base64url decoders agree with an RFC 4648 reference written in the harness |
-| `fuzz_pk` | mutated real ES256/RS256 signatures (byte flips, the other valid s, r or s at 0/1/n−1/n/n+1) get OpenSSL's verdict, alone and among valid fillers in a batch; built as portable C, with screening and with libcrypto BN |
+| `fuzz_pk` | mutated real ES256/RS256/EdDSA signatures (byte flips; the other valid s and r or s at 0/1/n−1/n/n+1 for ES256; S + L and R's sign bit for EdDSA) get OpenSSL's verdict, alone and among valid fillers in a batch; built as portable C, with screening and with libcrypto BN |
 
 ```bash
 make fuzz-smoke   # replay the seeds and any saved corpus under ASan + UBSan, locally (~2 s): for every change
@@ -402,7 +409,7 @@ engine; each figure is the median of 300 trials.
 | NEON 4-lane multi-buffer | 246 | 348 |
 | **SHA2 instructions, 4 streams (default)** | **72** | **~142** |
 
-**RS256 / ES256:** [PK.md](PK.md) has every build at every batch size, on both machines.
+**RS256 / ES256 / EdDSA:** [PK.md](PK.md) has every build at every batch size, on both machines.
 
 ### Estimating other CPUs (`make mca`)
 
@@ -444,7 +451,7 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 
 ## Limits
 
-- **Algorithms.** HS256 by default. RS256 and ES256 are an opt-in prototype; there's no EdDSA, no JWE and no
+- **Algorithms.** HS256 by default. RS256, ES256 and EdDSA (Ed25519 only) are an opt-in prototype; there's no Ed448, no JWE and no
   `kid` lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
 - **A lone token ties OpenSSL, it doesn't beat it.** On x86-64 Linux it *is* OpenSSL's code. Its SHA-NI path is

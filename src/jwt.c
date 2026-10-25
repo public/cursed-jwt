@@ -88,6 +88,19 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
     if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+    /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
+     * drop Intel's do, so there the 16-lane zmm engine is the better one (llvm-mca/uiCA models: ~2x per byte vs 8-lane
+     * ymm; not yet measured on hardware).  Intel always keeps the ymm engine. */
+    if (f & JWT_CPU_AVX512VL) {
+        unsigned vb = 0, vc = 0, vd = 0, fam;
+        __get_cpuid(0, &a, &vb, &vc, &vd);
+        int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
+        __get_cpuid(1, &a, &b, &c, &d);
+        fam = ((a >> 8) & 0xF) == 0xF ? ((a >> 8) & 0xF) + ((a >> 20) & 0xFF) : (a >> 8) & 0xF;
+        if (amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
+    }
+    /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
+    if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1') f |= JWT_CPU_FAST_ZMM;
 #elif defined(JWT_ARM_SHA2)
 #if defined(__APPLE__)
     int v = 0;
@@ -2096,6 +2109,7 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
+    if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
     if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
 #endif
@@ -2127,6 +2141,7 @@ const char *jwt_engine(void) {
     if (h == jwt_hmac_sha2) return "sha2";
 #endif
 #if defined(JWT_X86)
+    if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
     if (h == jwt_hmac_avx2) return "avx2";
 #endif

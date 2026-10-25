@@ -60,8 +60,12 @@ class Reject(Exception): pass
 def no_constant(name): raise Reject(name)   # NaN, Infinity, -Infinity are not JSON
 
 
+class Obj(list):
+    """a JSON object as the list of all its (key, value) pairs: duplicates included, so depth sees every value"""
+
+
 def depth(v):
-    if isinstance(v, dict): return 1 + max((depth(x) for x in v.values()), default=0)
+    if isinstance(v, Obj): return 1 + max((depth(x) for _, x in v), default=0)
     if isinstance(v, list): return 1 + max((depth(x) for x in v), default=0)
     return 0
 
@@ -73,16 +77,12 @@ def strict_json(raw):
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    pairs_of = []
-    def hook(pairs):
-        pairs_of.append(pairs)
-        return dict(pairs)
     try:
-        v = json.loads(text, object_pairs_hook=hook, parse_constant=no_constant)
+        v = json.loads(text, object_pairs_hook=Obj, parse_constant=no_constant)
     except (ValueError, Reject, RecursionError):
         return None
-    if depth(v) > 32: return None
-    return (pairs_of[-1] if isinstance(v, dict) else None), v   # the hook sees the top-level object last
+    if depth(v) > 32: return None   # every value counts, including one a later duplicate key replaces
+    return (list(v) if isinstance(v, Obj) else None), v
 
 
 def utf8(s):   # what the C decoder produces: lone surrogates become U+FFFD
@@ -345,7 +345,8 @@ def test_hs256(data):
 try:
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
     from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
     HAVE_PK = hasattr(lib, "jwt_verify_batch_pk")
 except ImportError:
@@ -355,6 +356,14 @@ if HAVE_PK:
     N256 = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
     EC_KEYS = [ec.generate_private_key(ec.SECP256R1()) for _ in range(3)]
     RS_KEYS = [rsa.generate_private_key(65537, 2048), rsa.generate_private_key(65537, 3072)]
+    ED_KEYS = [ed25519.Ed25519PrivateKey.generate() for _ in range(3)]
+    L25519 = 2**252 + 27742317777372353535851937790883648493
+    lib.jwt_pkey_ed25519.restype = ctypes.c_void_p
+
+    def ed_ok(pub, m, sig):
+        if len(sig) != 64: return False
+        try: pub.verify(sig, m); return True
+        except InvalidSignature: return False
 
     def es_sign(k, m):
         r, s = decode_dss_signature(k.sign(m, ec.ECDSA(hashes.SHA256())))
@@ -382,6 +391,10 @@ if HAVE_PK:
             return sig[:i // 8] + bytes([sig[i // 8] ^ (1 << (i % 8))]) + sig[i // 8 + 1:]
         if k == "short": return sig[:-1]
         if k == "zero": return bytes(len(sig))
+        if order == "ed":   # S + L, S + 1, R with the sign bit flipped
+            if k == "high_s": return sig[:32] + (int.from_bytes(sig[32:], "little") + L25519).to_bytes(32, "little")
+            if k == "edge_r": return sig[:31] + bytes([sig[31] ^ 0x80]) + sig[32:]
+            return sig[:32] + ((int.from_bytes(sig[32:], "little") + 1) % 2**256).to_bytes(32, "little")
         if order is None: return sig[:-1] + bytes([sig[-1] ^ 1])
         v = draw(st.sampled_from([0, 1, order - 1, order, order + 1, 2**256 - 1]))
         if k == "high_s": return sig[:32] + (order - int.from_bytes(sig[32:], "big")).to_bytes(32, "big")
@@ -392,13 +405,19 @@ if HAVE_PK:
     @given(st.data())
     def test_pk(data):
         draw = data.draw
-        alg = draw(st.sampled_from(["ES256", "RS256"]))
-        priv = draw(st.sampled_from(EC_KEYS if alg == "ES256" else RS_KEYS))
-        pub = priv.public_key(); pn = pub.public_numbers()
-        if alg == "ES256":
+        alg = draw(st.sampled_from(["ES256", "RS256", "EdDSA"]))
+        priv = draw(st.sampled_from({"ES256": EC_KEYS, "RS256": RS_KEYS, "EdDSA": ED_KEYS}[alg]))
+        pub = priv.public_key()
+        if alg == "EdDSA":
+            raw = pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+            pk = lib.jwt_pkey_ed25519(raw)
+            sign, ok, order = (lambda k, m: k.sign(m)), ed_ok, "ed"
+        elif alg == "ES256":
+            pn = pub.public_numbers()
             pk = lib.jwt_pkey_es256(pn.x.to_bytes(32, "big"), pn.y.to_bytes(32, "big"))
             sign, ok, order = es_sign, es_ok, N256
         else:
+            pn = pub.public_numbers()
             nb = pn.n.to_bytes((pn.n.bit_length() + 7) // 8, "big"); eb = pn.e.to_bytes(3, "big")
             pk = lib.jwt_pkey_rs256(nb, ctypes.c_size_t(len(nb)), eb, ctypes.c_size_t(len(eb)))
             sign, ok, order = (lambda k, m: k.sign(m, padding.PKCS1v15(), hashes.SHA256())), rs_ok, None
@@ -435,5 +454,5 @@ if __name__ == "__main__":
     print(f"  HS256: {stats['hs']} tokens (OK {stats['hs_O']}, INVALID {stats['hs_I']}, BAD_PAYLOAD {stats['hs_B']}) x {len(ENGINES)} engines")
     if HAVE_PK:
         test_pk()
-        print(f"  RS256/ES256: {stats['pk']} tokens (OK {stats['pk_O']}, INVALID {stats['pk_I']}, BAD_PAYLOAD {stats['pk_B']})")
+        print(f"  RS256/ES256/EdDSA: {stats['pk']} tokens (OK {stats['pk_O']}, INVALID {stats['pk_I']}, BAD_PAYLOAD {stats['pk_B']})")
     print("OK: every token matched the model")

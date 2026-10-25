@@ -35,9 +35,11 @@ typedef struct {
     int ml, sl, expect;
 } rv_t;
 
+/* es: 0 RS256 (a = n, b = e), 1 ES256 (x, y), 2 EdDSA (a = the public key, b unused) */
 static jwt_pkey_t *make_key(int es, const char *a, const char *b) {
     uint8_t k1[600], k2[600];
     int l1 = unhex(a, k1), l2 = unhex(b, k2);
+    if (es == 2) return l1 == 32 ? jwt_pkey_ed25519(k1) : NULL;
     if (es) {
         if (l1 != 32 || l2 != 32) return NULL;
         return jwt_pkey_es256(k1, k2);
@@ -198,7 +200,7 @@ int main(int argc, char **argv) {
     char *gk1 = calloc(2048, 1), *gk2 = calloc(2048, 1);
     int gkind = -1, gn = 0;
     rv_t *grp = calloc(4096, sizeof(rv_t));
-    long counts[2] = {0, 0}, nrej = 0, nj = 0;
+    long counts[3] = {0, 0, 0}, nrej = 0, nj = 0;
     /* tokens are grouped by key too */
     jt_t *toks = calloc(4096, sizeof(jt_t));
     int tn = 0, tes = 0;
@@ -225,9 +227,12 @@ int main(int argc, char **argv) {
         char kind[8], src[96], alg[8];
         long long x, y, z;
         if (sscanf(line, "%7s", kind) != 1) continue;
-        if (!strcmp(kind, "es") || !strcmp(kind, "rs")) {
-            int es = kind[0] == 'e';
-            if (sscanf(line, "%*s %95s %s %s %s %s %lld", src, a, b, c, d, &x) != 6) { CHECK(0, "bad line"); continue; }
+        if (!strcmp(kind, "es") || !strcmp(kind, "rs") || !strcmp(kind, "ed")) {
+            int es = !strcmp(kind, "es") ? 1 : !strcmp(kind, "ed") ? 2 : 0;
+            int got = es == 2 ? sscanf(line, "%*s %95s %s %s %s %lld", src, a, c, d, &x) + 1
+                              : sscanf(line, "%*s %95s %s %s %s %s %lld", src, a, b, c, d, &x);
+            if (es == 2) strcpy(b, "-");
+            if (got != 6) { CHECK(0, "bad line"); continue; }
             if (es != gkind || strcmp(a, gk1) || strcmp(b, gk2) || gn == 4096) {
                 FLUSH_GROUP();
                 gkind = es, strcpy(gk1, a), strcpy(gk2, b);
@@ -240,7 +245,7 @@ int main(int argc, char **argv) {
         } else if (!strcmp(kind, "jwt")) {
             char uh[700];
             if (sscanf(line, "%*s %95s %7s %s %s %s %lld %lld %lld %699s", src, alg, a, b, c, &x, &y, &z, uh) != 9) { CHECK(0, "bad jwt line"); continue; }
-            int es = !strcmp(alg, "ES256");
+            int es = !strcmp(alg, "ES256") ? 1 : !strcmp(alg, "EdDSA") ? 2 : 0;
             if (!tkey || es != tes || strcmp(a, tk1) || strcmp(b, tk2) || tn == 4096) {
                 FLUSH_TOKENS();
                 tes = es, strcpy(tk1, a), strcpy(tk2, b);
@@ -279,6 +284,7 @@ int main(int argc, char **argv) {
     fclose(f);
     printf("  ES256: %ld raw vectors, RS256: %ld raw vectors (%ld under keys the prototype refuses), %ld tokens, %d s*x / s/x pairs\n",
            counts[1], counts[0], nrej, nj, npair);
+    printf("  EdDSA (Ed25519): %ld raw vectors\n", counts[2]);
 #ifdef JWT_RSA_SCREEN
     printf("  screening (-DJWT_RSA_SCREEN) accepted %d of %d mangled pairs batched together (expected: all; see PK.md)\n", pair_screened, npair);
 #endif

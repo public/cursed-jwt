@@ -39,7 +39,8 @@ cursed-jwt credits these projects for techniques and data:
 
 - **fiat-crypto** (https://github.com/mit-plv/fiat-crypto, MIT / Apache-2.0 / BSD-1-Clause, used under MIT,
   Copyright the fiat-crypto authors): the RS256/ES256 prototype (`-DJWT_PK`, `src/jwt_pk.inc`) `#include`s its
-  generated, formally verified `p256_64.c` and `p256_scalar_64.c`. They are fetched by `scripts/fetch-fiat.sh` at a
+  generated, formally verified `p256_64.c`, `p256_scalar_64.c`, and for Ed25519 `curve25519_64.c` and
+  `curve25519_scalar_64.c`. They are fetched by `scripts/fetch-fiat.sh` at a
   pinned commit and never committed. The P-256-specific `fe_mul` follows the reduction structure of OpenSSL's
   `ecp_nistz256` (Gueron and Krasnov); no code is copied.
 - **s2n-bignum** (https://github.com/awslabs/s2n-bignum, Apache-2.0 OR ISC OR MIT-0, used under MIT-0, Copyright
