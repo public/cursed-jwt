@@ -105,12 +105,19 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
 #endif
     const char *mask = getenv("JWT_CPU_MASK"); /* tests and benchmarks: pretend features are missing */
     if (mask && *mask) f &= (unsigned)strtoul(mask, NULL, 0) | JWT_CPU_DETECTED;
-    jwt_cpu_bits = f;
+    __atomic_store_n(&jwt_cpu_bits, f, __ATOMIC_RELAXED); /* every racing writer stores the same value */
 }
 static unsigned jwt_cpu(void) {
-    if (!jwt_cpu_bits) jwt_cpu_init(); /* a caller that runs before constructors */
-    return jwt_cpu_bits;
+    unsigned f = __atomic_load_n(&jwt_cpu_bits, __ATOMIC_RELAXED);
+    if (!f) jwt_cpu_init(), f = __atomic_load_n(&jwt_cpu_bits, __ATOMIC_RELAXED); /* called before constructors ran */
+    return f;
 }
+
+/* Resolve-once dispatch: each entry point calls through a pointer that starts at a resolver stub.  The constructor
+ * at the end of this file (or the first call, if it comes earlier) replaces it with the chosen engine, so a call
+ * is one indirect call with no feature tests.  Relaxed atomics: racing resolvers all store the same pointer. */
+#define JWT_LOAD_FN(p) __atomic_load_n(&(p), __ATOMIC_RELAXED)
+#define JWT_STORE_FN(p, f) __atomic_store_n(&(p), (f), __ATOMIC_RELAXED)
 unsigned jwt_cpu_features(void) { return jwt_cpu() & ~JWT_CPU_DETECTED; }
 
 /* ======================================================================================
@@ -985,9 +992,14 @@ static int b64url_decode_avx2(uint8_t *dst, const char *src, int n) {
     return r < 0 ? -1 : o + r;
 }
 JWT_END_TARGET
-int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
-    return jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2(dst, src, n) : jwt_b64url_decode_scalar(dst, src, n);
+static int b64url_decode_resolve(uint8_t *dst, const char *src, int n);
+static int (*b64url_impl)(uint8_t *, const char *, int) = b64url_decode_resolve;
+static int b64url_decode_resolve(uint8_t *dst, const char *src, int n) {
+    int (*f)(uint8_t *, const char *, int) = jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2 : jwt_b64url_decode_scalar;
+    JWT_STORE_FN(b64url_impl, f);
+    return f(dst, src, n);
 }
+int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return JWT_LOAD_FN(b64url_impl)(dst, src, n); }
 #else
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_decode_scalar(dst, src, n); }
 #endif
@@ -2124,14 +2136,37 @@ const char *jwt_engine(void) {
     return "scalar";
 }
 
+static void hmac_resolve(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]);
+static void sha256_resolve(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]);
+static jwt_hmac_fn *hmac_impl = hmac_resolve;
+static jwt_sha256_fn *sha256_impl = sha256_resolve;
+static void hmac_resolve(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    jwt_hmac_fn *f = hmac_default();
+    JWT_STORE_FN(hmac_impl, f);
+    f(k, n, msg, len, mac);
+}
+static void sha256_resolve(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+    jwt_sha256_fn *f = sha256_default();
+    JWT_STORE_FN(sha256_impl, f);
+    f(n, msg, len, dig);
+}
+/* at load time: pick everything once, before any call */
+__attribute__((constructor)) static void jwt_resolve_all(void) {
+    JWT_STORE_FN(hmac_impl, hmac_default());
+    JWT_STORE_FN(sha256_impl, sha256_default());
+#if defined(JWT_X86)
+    JWT_STORE_FN(b64url_impl, jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2 : jwt_b64url_decode_scalar);
+#endif
+}
+
 void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                       jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, hmac_default());
+    verify_impl(k, n, tok, len, now, out, JWT_LOAD_FN(hmac_impl));
 }
 
 /* plain SHA-256 of n messages on the default engine (the RS256 / ES256 signing inputs) */
 void jwt_sha256_batch(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
-    sha256_default()(n, msg, len, dig);
+    JWT_LOAD_FN(sha256_impl)(n, msg, len, dig);
 }
 
 #ifdef JWT_PK
