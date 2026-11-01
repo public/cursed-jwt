@@ -27,11 +27,9 @@ K k_x1_scalar(void *s, void *w) { MCA("x1_scalar", compress_scalar((uint32_t *)s
 #if defined(JWT_X86)
 JWT_BEGIN_AVX2
 K k_x8_avx2(void *s, void *w) { MCA("x8_avx2", compress_avx2((__m256i *)s, (__m256i *)w)); }
-K k_x16_avx2x2(void *s, void *w) { MCA("x16_avx2x2", compress_avx2x2((v2_t *)s, (v2_t *)w)); }
 JWT_END_TARGET
 JWT_BEGIN_AVX512
 K k_x8_avx512(void *s, void *w) { MCA("x8_avx512", compress_avx512((__m256i *)s, (__m256i *)w)); }
-K k_x16_avx512x2(void *s, void *w) { MCA("x16_avx512x2", compress_avx512x2((v2_t *)s, (v2_t *)w)); }
 K k_x16_zmm(void *s, void *w) { MCA("x16_zmm", compress_zmm((__m512i *)s, (__m512i *)w)); }
 JWT_END_TARGET
 #endif

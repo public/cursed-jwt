@@ -224,7 +224,7 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
   within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64.
   `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
 - **Engine-specific functions** are exported for tests and benchmarks; call one only if `jwt_cpu_features()` has
-  its bit. `jwt_hmac_avx512x2` exists only for benchmarks.
+  its bit.
 
 **Options:**
 
@@ -293,7 +293,7 @@ vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SH
 
 - **Engines covered.** Every vector runs on every engine the machine has:
   - scalar, NEON and SHA2 ×1/×2/×4 on ARM;
-  - AVX2, AVX2 ×2, AVX-512VL, 2×ymm and zmm on x86;
+  - AVX2, AVX-512VL and zmm on x86;
   - each dispatch path of the extracted OpenSSL code (SHA-NI, AVX2, AVX, SSSE3, x86-64);
   - a C emulation of `vpternlogd` with the same immediates, so the AVX-512 logic is exercised on any machine.
 - **How the external vectors run.** Each one sits in a batch of 1–24 messages, at a random lane. The other lanes are
@@ -398,10 +398,11 @@ HMAC only, ns/token:
 | extracted OpenSSL SHA-256, one stream at a time | 754 | 754 | 752 | 749 | 752 |
 | AVX2 ×8 | 766 | 423 | 222 | 222 | 222 |
 | **AVX-512VL ymm ×8 (default)** | **762** | **286** | **154** | 154 | 154 |
-| AVX-512VL 2×ymm ×16 | 770 | 287 | 154 | 176 | 176 |
 | zmm ×16 (not recommended) | 767 | 287 | 154 | 125 | 125 |
 
-At batch 1 every vector engine runs the extracted single-stream code.
+At batch 1 every vector engine runs the extracted single-stream code. Two interleaved 8-lane ymm groups (16 lanes;
+AVX2 ×2 and AVX-512VL 2×ymm) were slower than one group at every batch size (AVX-512VL: 176 vs 154 ns at 16 and 32;
+2.80 vs 2.43 and 1.66 vs 1.34 cycles/byte measured) and were removed.
 
 Full verify, ns/token, default engine:
 
@@ -467,9 +468,7 @@ Calibration on the Xeon Platinum 8260 (`make mca-validate`, clang 18), cycles pe
 |---|---|---|---|---|
 | scalar | 15.4 | 15.6 | 16.1 | 8.9 |
 | AVX2, 8 lanes | 2.43 | 2.35 | 2.23 | 1.31 |
-| AVX2, 2 × 8 lanes | 2.80 | 2.64 | 2.63 | 1.46 |
 | AVX-512VL, 8 lanes (default) | 1.34 | 1.45 | 1.44 | 0.70 |
-| AVX-512VL, 2 × 8 lanes | 1.66 | 1.61 | 1.68 | 0.78 |
 | zmm, 16 lanes | 0.86 | 0.84 | 0.83 | 0.66 |
 
 - **uiCA** is within about 5% of the measurement on every engine.

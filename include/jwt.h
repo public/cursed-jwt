@@ -116,10 +116,10 @@ jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2, jwt_hmac_sha2_4; /*
 jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 block function (batch-1 path) */
 #endif
 #if defined(__x86_64__)
-jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-lane groups */
+jwt_hmac_fn jwt_hmac_avx2;
 #endif
 #if defined(__x86_64__)
-jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
+jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs (AMD Zen 4/5 default) */
 #endif
 
 /* ---- RS256 / ES256 / EdDSA (built by default; -DJWT_NO_PK leaves them out; see PK.md) ----
