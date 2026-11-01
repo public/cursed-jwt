@@ -130,9 +130,9 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
     on AVX-512VL/AVX2, 4 SHA2 streams on ARM. On the Xeon that took screened RS256-2048 from 3.78 to 3.16 µs and
     ES256 from 15.4 to 14.9 µs. On the M5 it's within noise, because a single SHA2 stream was already
     ~0.1 µs per token.
-- **Interleaving ES256 tokens** (running the point additions of 2–4 tokens in lockstep) gained nothing on either
-  machine: 8.86–8.90 vs 8.87 µs on the M5, 14.78–14.90 vs 14.80 on the Xeon (exp144). The out-of-order cores
-  already overlap the chains, so the option (`JWT_ES_ILV`) was removed.
+- **Interleaving ES256 tokens** (`JWT_ES_ILV`, running the point additions of 2–4 tokens in lockstep) gained
+  nothing on either machine: 8.86–8.90 vs 8.87 µs on the M5, 14.78–14.90 vs 14.80 on the Xeon. The out-of-order
+  cores already overlap the chains, so the default is 1.
 - **Batch 32 equals batch 16**, because the screening chunk is 16 tokens.
 - **gcc vs clang on the Xeon:**
   - with the asm backends the two are within 6%;
