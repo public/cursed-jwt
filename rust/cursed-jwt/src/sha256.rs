@@ -298,9 +298,9 @@ impl<'a> Plan<'a> {
         }
     }
 
-    /// The 1 or 2 padded tail blocks, written into a zeroed `t`.
+    /// The 1 or 2 padded tail blocks, written into a zeroed 128-byte `t`.
     #[inline(always)]
-    pub fn tail(&self, t: &mut [u8; 128]) {
+    pub fn tail(&self, t: &mut [u8]) {
         let full = (self.nf as usize) << 6;
         let rem = self.m.get(full..).unwrap_or(&[]);
         let nt = (self.nb - self.nf) as usize;
@@ -309,23 +309,6 @@ impl<'a> Plan<'a> {
         t[rem.len()] = 0x80;
         t[nt * 64 - 8..nt * 64].copy_from_slice(&bits.to_be_bytes());
     }
-
-    /// Block `b` (< nf) of the message itself.
-    #[inline(always)]
-    pub fn full_block(&self, b: u32) -> &'a [u8; 64] {
-        let o = (b as usize) << 6;
-        self.m
-            .get(o..o + 64)
-            .and_then(|s| s.try_into().ok())
-            .unwrap_or(&ZERO_BLOCK)
-    }
-}
-
-#[inline(always)]
-fn tail_block(t: &[u8; 128], i: u32) -> &[u8; 64] {
-    let (a, b) = t.split_at(64);
-    let s = if i == 0 { a } else { b };
-    s.try_into().unwrap_or(&ZERO_BLOCK)
 }
 
 /// The secret's HMAC midstates: SHA-256 state after compressing key ^ ipad, and after key ^ opad.
@@ -379,69 +362,58 @@ impl Midstates {
 }
 
 /// A group of up to `L` messages, prepared outside the vector code: plans, block counts and padded tails.
-pub(crate) struct Group<'p, 'a, const L: usize> {
-    pl: [&'p Plan<'a>; L],
-    n: usize,
+pub(crate) struct Group<'a, const L: usize> {
+    /// each lane's whole message blocks, read in place
+    full: [&'a [[u8; 64]]; L],
+    /// each lane's 1 or 2 padded tail blocks (zeros after them, and for absent lanes)
+    tails: [[[u8; 64]; 2]; L],
     nb: [u32; L],
-    nf: [u32; L],
     maxnb: u32,
     ragged: bool,
-    tails: [[u8; 128]; L],
 }
 
-impl<'p, 'a, const L: usize> Group<'p, 'a, L> {
+impl<'a, const L: usize> Group<'a, L> {
     /// The plans `idx[..]` of `plans` (at most `L`).
     #[inline(always)]
-    pub fn new(plans: &'p [Plan<'a>], idx: &[u8]) -> Self {
+    pub fn new(plans: &[Plan<'a>], idx: &[u8]) -> Self {
         let mut g = Group {
-            pl: [&Plan::EMPTY; L],
-            n: 0,
+            full: [&[]; L],
+            tails: [[[0; 64]; 2]; L],
             nb: [0; L],
-            nf: [0; L],
             maxnb: 0,
             ragged: false,
-            tails: [[0; 128]; L],
         };
+        let mut n = 0;
         for (l, &i) in idx.iter().take(L).enumerate() {
             let Some(p) = plans.get(i as usize) else {
                 continue;
             };
-            g.pl[l] = p;
+            g.full[l] = p.m.as_chunks::<64>().0;
             g.nb[l] = p.nb;
-            g.nf[l] = p.nf;
-            p.tail(&mut g.tails[l]);
+            p.tail(g.tails[l].as_flattened_mut());
             g.maxnb = g.maxnb.max(p.nb);
-            g.n = l + 1;
+            n = l + 1;
         }
-        g.ragged = g.nb[..g.n].iter().any(|&b| b != g.maxnb);
+        g.ragged = g.nb[..n].iter().any(|&b| b != g.maxnb);
         g
     }
 
     /// Lane `l`'s block `b`: the message itself, then its tail, then (for lanes that ran out) a zero block.
+    /// After the kernel's unrolling `l` is a constant, so this is one compare and a load.
     #[inline(always)]
     fn blk(&self, l: usize, b: u32) -> &[u8; 64] {
-        match (
-            self.pl.get(l),
-            self.nf.get(l),
-            self.nb.get(l),
-            self.tails.get(l),
-        ) {
-            (Some(p), Some(&nf), Some(&nb), Some(t)) => {
-                if b < nf {
-                    p.full_block(b)
-                } else if b < nb {
-                    tail_block(t, b - nf)
-                } else {
-                    &ZERO_BLOCK
-                }
-            }
-            _ => &ZERO_BLOCK,
+        let f = self.full[l];
+        match f.get(b as usize) {
+            Some(x) => x,
+            None => self.tails[l]
+                .get(b as usize - f.len())
+                .unwrap_or(&ZERO_BLOCK),
         }
     }
 
     #[inline(always)]
     fn live(&self, l: usize, b: u32) -> bool {
-        self.nb.get(l).is_some_and(|&nb| b < nb)
+        b < self.nb[l]
     }
 }
 
@@ -455,7 +427,7 @@ impl<'p, 'a, const L: usize> Group<'p, 'a, L> {
 #[inline(always)]
 pub(crate) fn kernel<V: Simd<L>, const L: usize, const RAW: bool>(
     k: &Midstates,
-    g: &Group<'_, '_, L>,
+    g: &Group<'_, L>,
     mac: &mut [[u32; 8]; L],
 ) {
     let ih = &k.ih;
@@ -529,7 +501,7 @@ pub(crate) fn kernel<V: Simd<L>, const L: usize, const RAW: bool>(
 /// An engine's group function: runs [`kernel`] for one prepared group inside the engine's target-feature
 /// region.  Implemented by zero-sized tokens that exist only once the CPU has been checked for the engine.
 pub(crate) trait Kernel<const L: usize>: Copy {
-    fn lanes<const RAW: bool>(self, k: &Midstates, g: &Group<'_, '_, L>, mac: &mut [[u32; 8]; L]);
+    fn lanes<const RAW: bool>(self, k: &Midstates, g: &Group<'_, L>, mac: &mut [[u32; 8]; L]);
     /// One message alone (groups below the engine's minimum size).
     fn one<const RAW: bool>(self, k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
         one::<RAW>(k, p)
@@ -542,7 +514,7 @@ pub(crate) struct Scalar;
 
 impl Kernel<1> for Scalar {
     #[inline(always)]
-    fn lanes<const RAW: bool>(self, k: &Midstates, g: &Group<'_, '_, 1>, mac: &mut [[u32; 8]; 1]) {
+    fn lanes<const RAW: bool>(self, k: &Midstates, g: &Group<'_, 1>, mac: &mut [[u32; 8]; 1]) {
         kernel::<u32, 1, RAW>(k, g, mac)
     }
 }

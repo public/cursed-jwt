@@ -6,6 +6,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::arch;
 use crate::sha256::{self, Midstates};
 
+static BITS: AtomicU32 = AtomicU32::new(0);
+
 /// CPU features the engines care about (the same bits as the C library's `JWT_CPU_*`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuFeatures(u32);
@@ -32,12 +34,18 @@ impl CpuFeatures {
     /// The features of this CPU, detected once.  With the `std` feature, the environment variable
     /// `JWT_CPU_MASK=0x..` masks them (for tests and benchmarks: `JWT_CPU_MASK=0` runs everything on the
     /// fallbacks), and `JWT_CPU_FORCE_ZMM=1` claims `FAST_ZMM` on any AVX-512 CPU.
+    #[inline(always)]
     pub fn get() -> Self {
-        static BITS: AtomicU32 = AtomicU32::new(0);
         let f = BITS.load(Ordering::Relaxed);
         if f != 0 {
             return CpuFeatures(f & !Self::DETECTED);
         }
+        Self::init()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn init() -> Self {
         let f = Self::detect() | Self::DETECTED;
         BITS.store(f, Ordering::Relaxed); // racing detectors all store the same value
         CpuFeatures(f & !Self::DETECTED)

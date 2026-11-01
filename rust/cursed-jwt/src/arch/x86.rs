@@ -12,6 +12,8 @@ use super::{CpuFeatures, Engine, Midstates};
 use crate::sha256::{self, drive, drive_x2, Group, Kernel, Plan, Simd, SHA_IV, X2};
 
 pub(crate) fn detect() -> u32 {
+    #[cfg(cjwt_ossl)]
+    ossl::init();
     let mut f = 0;
     macro_rules! has {
         ($($t:tt),+) => {{
@@ -408,9 +410,62 @@ impl Simd<16> for Zmm {
     }
 }
 
-/// Fewest live messages for an 8-lane group; one message alone runs through the scalar template, compiled with
-/// BMI2 here so that its rotates are `rorx`.
+/// Fewest live messages for an 8-lane group; smaller groups run one message at a time (OpenSSL's extracted code
+/// with the `asm` feature on Linux, else the scalar template compiled with BMI2, so its rotates are `rorx`).
+/// AVX2 with the OpenSSL code: two messages one at a time (2 x 753 ns) beat one 2-lane group (822 ns) on a Xeon
+/// Platinum 8260 (C library measurements); from 3 lanes the vector wins.
 const MIN_LANES: usize = 2;
+const MIN_AVX2: usize = if cfg!(cjwt_ossl) { 3 } else { 2 };
+
+/// OpenSSL's sha256_block_data_order for x86-64 (SHA-NI, AVX2+BMI2, AVX, SSSE3 and plain x86-64 paths, chosen
+/// by its own capability word), assembled by build.rs from the C library's `src/sha256_x86_64_ossl.S`.
+#[cfg(cjwt_ossl)]
+mod ossl {
+    use crate::sha256::{Midstates, Plan};
+
+    extern "C" {
+        fn cjwt_rs_sha256_block(h: *mut u32, blocks: *const u8, n: usize);
+        fn cjwt_rs_ossl_init();
+    }
+
+    /// Fills the capability word from CPUID.  Before it runs the word is zero, which selects the plain x86-64
+    /// path: correct, only slower.
+    pub(super) fn init() {
+        // SAFETY: writes the library's own static capability array; idempotent (racing callers store equal
+        // values, and the block function only reads it).
+        unsafe { cjwt_rs_ossl_init() }
+    }
+
+    fn blocks(st: &mut [u32; 8], b: &[[u8; 64]]) {
+        if !b.is_empty() {
+            // SAFETY: reads `b.len()` 64-byte blocks, exactly the slice, and updates the 8 state words of `st`.
+            unsafe { cjwt_rs_sha256_block(st.as_mut_ptr(), b.as_ptr().cast(), b.len()) }
+        }
+    }
+
+    /// One message: the full blocks in place, then the tail, then (unless RAW) the outer hash.
+    #[inline(always)]
+    pub(super) fn one<const RAW: bool>(k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
+        let mut st = k.ih;
+        blocks(&mut st, p.m.as_chunks::<64>().0);
+        let mut tail = [[0u8; 64]; 2];
+        p.tail(tail.as_flattened_mut());
+        let nt = (p.nb - p.nf) as usize;
+        blocks(&mut st, &tail[..nt]);
+        if RAW {
+            return st;
+        }
+        let mut ob = [0u8; 64];
+        for (c, w) in ob.as_chunks_mut::<4>().0.iter_mut().zip(st) {
+            *c = w.to_be_bytes();
+        }
+        ob[32] = 0x80;
+        ob[62..].copy_from_slice(&(((64 + 32) * 8) as u16).to_be_bytes());
+        let mut mac = k.oh;
+        blocks(&mut mac, &[ob]);
+        mac
+    }
+}
 
 /// Engine tokens: zero-sized, constructed only in `hmac` / `sha256` below, after `available` checked the CPU
 /// features the engine's functions enable.
@@ -425,6 +480,7 @@ struct KAvx512x2(());
 #[derive(Clone, Copy)]
 struct KZmm(());
 
+#[cfg(not(cjwt_ossl))]
 #[target_feature(enable = "bmi1,bmi2")]
 fn one_bmi2<const RAW: bool>(k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
     sha256::one::<RAW>(k, p)
@@ -433,7 +489,7 @@ fn one_bmi2<const RAW: bool>(k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
 macro_rules! kernel {
     ($tok:ident, $v:ty, $l:literal, $fname:ident, $feat:literal) => {
         #[target_feature(enable = $feat)]
-        fn $fname<const RAW: bool>(k: &Midstates, g: &Group<'_, '_, $l>, mac: &mut [[u32; 8]; $l]) {
+        fn $fname<const RAW: bool>(k: &Midstates, g: &Group<'_, $l>, mac: &mut [[u32; 8]; $l]) {
             sha256::kernel::<$v, $l, RAW>(k, g, mac)
         }
         impl Kernel<$l> for $tok {
@@ -441,7 +497,7 @@ macro_rules! kernel {
             fn lanes<const RAW: bool>(
                 self,
                 k: &Midstates,
-                g: &Group<'_, '_, $l>,
+                g: &Group<'_, $l>,
                 mac: &mut [[u32; 8]; $l],
             ) {
                 // SAFETY: a token exists only after the CPU check for these features (see the token types).
@@ -449,9 +505,14 @@ macro_rules! kernel {
             }
             #[inline(always)]
             fn one<const RAW: bool>(self, k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
+                #[cfg(cjwt_ossl)]
+                return ossl::one::<RAW>(k, p);
                 // SAFETY: every x86 engine requires BMI1 and BMI2 (see `available`), checked before the token
                 // was made.
-                unsafe { one_bmi2::<RAW>(k, p) }
+                #[cfg(not(cjwt_ossl))]
+                unsafe {
+                    one_bmi2::<RAW>(k, p)
+                }
             }
         }
     };
@@ -489,9 +550,9 @@ pub(crate) fn hmac(e: Engine, k: &Midstates, msgs: &[&[u8]], out: &mut [[u32; 8]
     // `available` checked the CPU features each engine's functions enable (AVX2 + BMI1/2, plus AVX-512
     // F/VL/BW/DQ/CD for the AVX-512 ones), so the tokens may be made
     match e {
-        Engine::Avx2 => drive::<KAvx2, 8, false, MIN_LANES>(KAvx2(()), k, msgs, out),
+        Engine::Avx2 => drive::<KAvx2, 8, false, MIN_AVX2>(KAvx2(()), k, msgs, out),
         Engine::Avx2x2 => {
-            drive_x2::<KAvx2x2, KAvx2, MIN_LANES>(KAvx2x2(()), KAvx2(()), k, msgs, out)
+            drive_x2::<KAvx2x2, KAvx2, MIN_AVX2>(KAvx2x2(()), KAvx2(()), k, msgs, out)
         }
         Engine::Avx512 => drive::<KAvx512, 8, false, MIN_LANES>(KAvx512(()), k, msgs, out),
         Engine::Avx512x2 => {
@@ -511,7 +572,7 @@ pub(crate) fn sha256(e: Engine, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
     // as in `hmac`
     match e {
         Engine::Avx2 | Engine::Avx2x2 => {
-            drive::<KAvx2, 8, true, MIN_LANES>(KAvx2(()), &SHA_IV, msgs, out)
+            drive::<KAvx2, 8, true, MIN_AVX2>(KAvx2(()), &SHA_IV, msgs, out)
         }
         Engine::Avx512 | Engine::Avx512x2 | Engine::Zmm => {
             drive::<KAvx512, 8, true, MIN_LANES>(KAvx512(()), &SHA_IV, msgs, out)
@@ -524,9 +585,10 @@ pub(crate) fn sha256(e: Engine, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
 // ---- base64url: 32 chars -> 24 bytes per step (Mula/Lemire packing; base64url via range compares) ----
 
 #[inline(always)]
-fn b64_32(src: &[u8; 32], dst: &mut [u8; 24]) -> __m256i {
-    // SAFETY: _mm256_loadu_si256 reads 32 bytes (`src`), _mm256_storeu_si256 writes 32 bytes into the local
-    // `t`; the rest are register-only AVX2 intrinsics, and this is only reached from the AVX2-enabled decoder.
+/// Decodes 32 characters into the low 24 bytes of the result; also returns 0xFF in every invalid byte.
+fn b64_32(src: &[u8; 32]) -> (__m256i, __m256i) {
+    // SAFETY: _mm256_loadu_si256 reads 32 bytes (`src`); the rest are register-only AVX2 intrinsics, and this is
+    // only reached from the AVX2-enabled decoder.
     unsafe {
         let v = _mm256_loadu_si256(src.as_ptr().cast());
         let rng = |lo: u8, hi: u8| {
@@ -566,10 +628,7 @@ fn b64_32(src: &[u8; 32], dst: &mut [u8; 24]) -> __m256i {
             ),
         );
         x = _mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 7, 7));
-        let mut t = [0u8; 32];
-        _mm256_storeu_si256(t.as_mut_ptr().cast(), x);
-        dst.copy_from_slice(&t[..24]);
-        _mm256_xor_si256(ok, _mm256_set1_epi8(-1)) // 0xFF where invalid
+        (x, _mm256_xor_si256(ok, _mm256_set1_epi8(-1))) // 0xFF where invalid
     }
 }
 
@@ -579,19 +638,37 @@ fn b64_avx2(dst: &mut [u8], src: &[u8]) -> Option<usize> {
         return None;
     }
     let (blocks, rest) = src.as_chunks::<32>();
-    let (out, _) = dst.as_chunks_mut::<24>();
     let mut bad = _mm256_setzero_si256();
-    for (b, o) in blocks.iter().zip(out.iter_mut()) {
-        bad = _mm256_or_si256(bad, b64_32(b, o));
+    let mut o = 0;
+    for b in blocks {
+        let (x, e) = b64_32(b);
+        bad = _mm256_or_si256(bad, e);
+        // the 32-byte store writes 8 bytes past the 24 decoded ones: directly when dst has room, else via a copy
+        match dst
+            .get_mut(o..o + 32)
+            .and_then(|d| <&mut [u8; 32]>::try_from(d).ok())
+        {
+            // SAFETY: _mm256_storeu_si256 writes 32 bytes, exactly the referenced [u8; 32].
+            Some(d) => unsafe { _mm256_storeu_si256(d.as_mut_ptr().cast(), x) },
+            None => {
+                let mut t = [0u8; 32];
+                // SAFETY: as above, into the local array.
+                unsafe { _mm256_storeu_si256(t.as_mut_ptr().cast(), x) };
+                dst.get_mut(o..o + 24)?.copy_from_slice(&t[..24]);
+            }
+        }
+        o += 24;
     }
-    let mut o = blocks.len() * 24;
     let q = rest.len() & !3;
     if q != 0 {
         // whole quanta of the tail: one more step over an 'A'-padded copy
         let mut buf = [b'A'; 32];
         buf[..q].copy_from_slice(&rest[..q]);
-        let mut t = [0u8; 24];
-        bad = _mm256_or_si256(bad, b64_32(&buf, &mut t));
+        let (x, e) = b64_32(&buf);
+        bad = _mm256_or_si256(bad, e);
+        let mut t = [0u8; 32];
+        // SAFETY: _mm256_storeu_si256 writes 32 bytes, exactly the local array.
+        unsafe { _mm256_storeu_si256(t.as_mut_ptr().cast(), x) };
         dst.get_mut(o..o + q / 4 * 3)?
             .copy_from_slice(&t[..q / 4 * 3]);
         o += q / 4 * 3;

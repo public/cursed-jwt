@@ -180,7 +180,7 @@ impl sha256::Kernel<4> for KNeon {
     fn lanes<const RAW: bool>(
         self,
         k: &Midstates,
-        g: &sha256::Group<'_, '_, 4>,
+        g: &sha256::Group<'_, 4>,
         mac: &mut [[u32; 8]; 4],
     ) {
         sha256::kernel::<Neon, 4, RAW>(k, g, mac)
@@ -274,15 +274,17 @@ fn ce_lanes<const S: usize, const RAW: bool>(
         p[s].tail(&mut tails[s]);
     }
     let nb = p[0].nb;
-    let nf = p.map(|q| q.nf);
+    let full = p.map(|q| q.m.as_chunks::<64>().0);
     let mut m = [[ih0; 4]; S];
-    for b in 0..nb {
+    for b in 0..nb as usize {
         for s in 0..S {
-            let blk = if b < nf[s] {
-                p[s].full_block(b)
-            } else {
-                let (c, _) = tails[s].as_chunks::<64>();
-                c.get((b - nf[s]) as usize).unwrap_or(&ZERO_BLOCK)
+            let blk = match full[s].get(b) {
+                Some(x) => x,
+                None => tails[s]
+                    .as_chunks::<64>()
+                    .0
+                    .get(b - full[s].len())
+                    .unwrap_or(&ZERO_BLOCK),
             };
             m[s] = [
                 ld_be(sub16(blk, 0)),

@@ -299,6 +299,7 @@ dependencies = [
 name = "cursed-jwt"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cjwt-sys",
  "fiat-crypto 0.3.0",
  "hmac",
