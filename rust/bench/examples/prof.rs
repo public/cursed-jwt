@@ -50,17 +50,34 @@ fn main() {
     let mut cout = cjwt_sys::results(n);
     let mut tags = vec![[0u8; 32]; n];
     let e = Engine::best();
+    // EdDSA: one key, n tokens signed by ed25519-dalek
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let edk = cursed_jwt::Ed25519Key::new(&sk.verifying_key().to_bytes()).unwrap();
+    let edc = cjwt_sys::PKey::ed25519(&sk.verifying_key().to_bytes()).unwrap();
+    let ehead = b64u(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let etoks: Vec<Vec<u8>> = (1..=n)
+        .map(|i| {
+            use ed25519_dalek::Signer;
+            let pl = format!(r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#);
+            let msg = format!("{ehead}.{}", b64u(pl.as_bytes()));
+            format!("{msg}.{}", b64u(&sk.sign(msg.as_bytes()).to_bytes())).into_bytes()
+        })
+        .collect();
+    let (ep, el) = cjwt_sys::token_ptrs(&etoks);
+    let reps = if mode.starts_with("ed") { 10 } else { 1000 };
     let start = Instant::now();
     let mut iters = 0u64;
     while start.elapsed() < Duration::from_secs_f64(secs) {
-        for _ in 0..1000 {
+        for _ in 0..reps {
             match mode {
+                "ed-rust" => edk.verify_batch(black_box(&etoks), 1_800_000_000, &mut out),
+                "ed-c" => edc.verify_raw(black_box(&ep), &el, 1_800_000_000, &mut cout),
                 "c" => ck.verify_raw(black_box(&p), &l, 1_800_000_000, &mut cout),
                 "rust-hmac" => k.hmac_batch(e, black_box(&msgs), &mut tags),
                 _ => k.verify_batch(black_box(&toks), 1_800_000_000, &mut out),
             }
         }
-        iters += 1000;
+        iters += reps;
     }
     let ns = start.elapsed().as_nanos() as f64 / (iters as f64 * n as f64);
     println!("{mode} batch {n} engine {}: {ns:.1} ns/token", e.name());
