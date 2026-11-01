@@ -12,12 +12,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 static long ran;
 static void one(const char *path) {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); exit(2); }
+    if (!f) {
+        perror(path);
+        exit(2);
+    }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
     uint8_t *buf = malloc((size_t)n + 1);
-    if (fread(buf, 1, (size_t)n, f) != (size_t)n) { perror(path); exit(2); }
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        perror(path);
+        exit(2);
+    }
     fclose(f);
     LLVMFuzzerTestOneInput(buf, (size_t)n);
     free(buf);
@@ -26,8 +32,14 @@ static void one(const char *path) {
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         struct stat st;
-        if (stat(argv[i], &st)) { perror(argv[i]); return 2; }
-        if (!S_ISDIR(st.st_mode)) { one(argv[i]); continue; }
+        if (stat(argv[i], &st)) {
+            perror(argv[i]);
+            return 2;
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            one(argv[i]);
+            continue;
+        }
         DIR *d = opendir(argv[i]);
         struct dirent *e;
         while ((e = readdir(d))) {

@@ -1,4 +1,4 @@
-/* fuzz_pk.c — libFuzzer harness for the RS256 / ES256 / EdDSA prototype (-DJWT_PK), with OpenSSL as the oracle.
+/* fuzz_pk.c — libFuzzer harness for the RS256 / ES256 / EdDSA, with OpenSSL as the oracle.
  *
  * At start-up it makes one P-256, one RSA-2048 and one Ed25519 key with OpenSSL.  Each input picks an algorithm, a message and a
  * list of mutations; the message is signed with OpenSSL, the signature is mutated (byte XORs, ECDSA's other valid s,
@@ -17,8 +17,9 @@
 
 static EVP_PKEY *ek, *rk, *dk;
 static jwt_pkey_t *jek, *jrk, *jdk;
-static const uint8_t N256[32] = {0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51};
+static const uint8_t N256[32] = { 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff,
+                                  0xff, 0xff, 0xff, 0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17,
+                                  0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51 };
 
 static int bn_bytes(EVP_PKEY *k, const char *name, uint8_t *out, int width) {
     BIGNUM *b = NULL;
@@ -56,7 +57,10 @@ static int sign(int rsa, const uint8_t *m, size_t ml, uint8_t *sig) {
     size_t dl = sizeof der;
     if (!EVP_DigestSignInit(c, NULL, EVP_sha256(), NULL, rsa ? rk : ek) || !EVP_DigestSign(c, der, &dl, m, ml)) abort();
     EVP_MD_CTX_free(c);
-    if (rsa) { memcpy(sig, der, dl); return (int)dl; }
+    if (rsa) {
+        memcpy(sig, der, dl);
+        return (int)dl;
+    }
     const uint8_t *p = der;
     ECDSA_SIG *es = d2i_ECDSA_SIG(NULL, &p, (long)dl);
     BN_bn2binpad(ECDSA_SIG_get0_r(es), sig, 32), BN_bn2binpad(ECDSA_SIG_get0_s(es), sig + 32, 32);
@@ -72,7 +76,8 @@ static int ossl_ok(int rsa, const uint8_t *m, size_t ml, const uint8_t *sig, int
     uint8_t der[300];
     if (rsa == 2) {
         EVP_MD_CTX *c = EVP_MD_CTX_new();
-        int r = sl == 64 && EVP_DigestVerifyInit(c, NULL, NULL, NULL, dk) == 1 && EVP_DigestVerify(c, sig, 64, m, ml) == 1;
+        int r =
+            sl == 64 && EVP_DigestVerifyInit(c, NULL, NULL, NULL, dk) == 1 && EVP_DigestVerify(c, sig, 64, m, ml) == 1;
         EVP_MD_CTX_free(c);
         return r;
     }
@@ -87,7 +92,8 @@ static int ossl_ok(int rsa, const uint8_t *m, size_t ml, const uint8_t *sig, int
         ECDSA_SIG_free(es);
     }
     EVP_MD_CTX *c = EVP_MD_CTX_new();
-    int r = EVP_DigestVerifyInit(c, NULL, EVP_sha256(), NULL, rsa ? rk : ek) == 1 && EVP_DigestVerify(c, s, dl, m, ml) == 1;
+    int r =
+        EVP_DigestVerifyInit(c, NULL, EVP_sha256(), NULL, rsa ? rk : ek) == 1 && EVP_DigestVerify(c, s, dl, m, ml) == 1;
     EVP_MD_CTX_free(c);
     return r;
 }
@@ -95,17 +101,21 @@ static int ossl_ok(int rsa, const uint8_t *m, size_t ml, const uint8_t *sig, int
 /* sub-into-place helpers on 32-byte big-endian numbers */
 static void be_sub(uint8_t r[32], const uint8_t a[32], const uint8_t b[32]) {
     int bw = 0;
-    for (int i = 31; i >= 0; i--) { int d = a[i] - b[i] - bw; bw = d < 0; r[i] = (uint8_t)d; }
+    for (int i = 31; i >= 0; i--) {
+        int d = a[i] - b[i] - bw;
+        bw = d < 0;
+        r[i] = (uint8_t)d;
+    }
 }
 static void set_edge(uint8_t v[32], int which) {
-    static const uint8_t one[32] = {[31] = 1};
+    static const uint8_t one[32] = { [31] = 1 };
     switch (which % 6) {
-    case 0: memset(v, 0, 32); break;
-    case 1: memcpy(v, one, 32); break;
-    case 2: be_sub(v, N256, one); break;
-    case 3: memcpy(v, N256, 32); break;
-    case 4: memcpy(v, N256, 32), v[31] += 1; break;
-    default: memset(v, 0xff, 32); break;
+        case 0: memset(v, 0, 32); break;
+        case 1: memcpy(v, one, 32); break;
+        case 2: be_sub(v, N256, one); break;
+        case 3: memcpy(v, N256, 32); break;
+        case 4: memcpy(v, N256, 32), v[31] += 1; break;
+        default: memset(v, 0xff, 32); break;
     }
 }
 
@@ -120,15 +130,22 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     int sl = sign(rsa, m, (size_t)ml, sig);
     for (const uint8_t *o = ops; o + 3 <= end; o += 3) { /* (kind, a, b) */
         int kind = o[0] % 8, pos = (o[1] << 8 | o[2]) % sl;
-        if (kind < 5) sig[pos] ^= o[1] | 1;                      /* byte flips (most ops) */
-        else if (rsa == 2) { /* EdDSA: S + L (non-canonical), the sign bit of R */
-            static const uint8_t L[32] = {0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-                                          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
-            if (kind == 5) { int c = 0; for (int i = 0; i < 32; i++) { int v = sig[32 + i] + L[i] + c; sig[32 + i] = (uint8_t)v; c = v >> 8; } }
-            else sig[31] ^= 0x80;
+        if (kind < 5) sig[pos] ^= o[1] | 1; /* byte flips (most ops) */
+        else if (rsa == 2) {                /* EdDSA: S + L (non-canonical), the sign bit of R */
+            static const uint8_t L[32] = { 0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+                                           0xa2, 0xde, 0xf9, 0xde, 0x14, 0,    0,    0,    0,    0,    0,
+                                           0,    0,    0,    0,    0,    0,    0,    0,    0,    0x10 };
+            if (kind == 5) {
+                int c = 0;
+                for (int i = 0; i < 32; i++) {
+                    int v = sig[32 + i] + L[i] + c;
+                    sig[32 + i] = (uint8_t)v;
+                    c = v >> 8;
+                }
+            } else sig[31] ^= 0x80;
         } else if (rsa) sig[pos] ^= 0x80;
-        else if (kind == 5) be_sub(sig + 32, N256, sig + 32);  /* the other valid s */
-        else set_edge(kind == 6 ? sig : sig + 32, o[2]);     /* r or s at an edge value */
+        else if (kind == 5) be_sub(sig + 32, N256, sig + 32); /* the other valid s */
+        else set_edge(kind == 6 ? sig : sig + 32, o[2]);      /* r or s at an edge value */
     }
     const jwt_pkey_t *k = rsa == 2 ? jdk : rsa ? jrk : jek;
     int want = ossl_ok(rsa, m, (size_t)ml, sig, sl);
@@ -137,15 +154,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     uint8_t ok[16], fsig[16][256], fmsg[16][8];
     mp[0] = m, sp[0] = sig, mlen[0] = ml, slen[0] = sl;
     jwt_pk_verify_raw(k, 1, mp, mlen, sp, slen, ok);
-    if (ok[0] != want) { fprintf(stderr, "%s alone: cursed %d, OpenSSL %d\n", rsa == 2 ? "EdDSA" : rsa ? "RS256" : "ES256", ok[0], want); abort(); }
+    if (ok[0] != want) {
+        fprintf(stderr, "%s alone: cursed %d, OpenSSL %d\n", rsa == 2 ? "EdDSA" : rsa ? "RS256" : "ES256", ok[0], want);
+        abort();
+    }
     int n = 1 + nfill, at = ml % n;
     for (int i = 0, f = 0; i < n; i++) {
-        if (i == at) { mp[i] = m, sp[i] = sig, mlen[i] = ml, slen[i] = sl; continue; }
+        if (i == at) {
+            mp[i] = m, sp[i] = sig, mlen[i] = ml, slen[i] = sl;
+            continue;
+        }
         memcpy(fmsg[f], "filler", 6), fmsg[f][6] = (uint8_t)f, fmsg[f][7] = data[0];
         slen[i] = sign(rsa, fmsg[f], 8, fsig[f]), mp[i] = fmsg[f], sp[i] = fsig[f], mlen[i] = 8, f++;
     }
     jwt_pk_verify_raw(k, n, mp, mlen, sp, slen, ok);
     for (int i = 0; i < n; i++)
-        if (ok[i] != (i == at ? want : 1)) { fprintf(stderr, "%s batch of %d, lane %d: cursed %d, want %d\n", rsa == 2 ? "EdDSA" : rsa ? "RS256" : "ES256", n, i, ok[i], i == at ? want : 1); abort(); }
+        if (ok[i] != (i == at ? want : 1)) {
+            fprintf(stderr, "%s batch of %d, lane %d: cursed %d, want %d\n",
+                    rsa == 2 ? "EdDSA"
+                    : rsa    ? "RS256"
+                             : "ES256",
+                    n, i, ok[i], i == at ? want : 1);
+            abort();
+        }
     return 0;
 }

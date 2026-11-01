@@ -74,16 +74,16 @@ int main(void) {
         pn *= 2;
     }
     cond_t c[] = {
-        {"scalar", jwt_hmac_scalar, 0},
-        {"avx2 ymm x8", jwt_hmac_avx2, 0},
-        {"avx512vl ymm x8 (default)", jwt_hmac_avx512, 0},
-        {"avx512vl 2x ymm x16", jwt_hmac_avx512x2, 0},
-        {"zmm x16", jwt_hmac_zmm, 0},
-        {"zmm x16, then 200us scalar", jwt_hmac_zmm, 200},
-        {"zmm x16, then 500us scalar", jwt_hmac_zmm, 500},
-        {"zmm x16, then 1000us scalar", jwt_hmac_zmm, 1000},
-        {"zmm x16, then 2000us scalar", jwt_hmac_zmm, 2000},
-        {"avx512vl ymm, then 500us scalar", jwt_hmac_avx512, 500},
+        { "scalar", jwt_hmac_scalar, 0 },
+        { "avx2 ymm x8", jwt_hmac_avx2, 0 },
+        { "avx512vl ymm x8 (default)", jwt_hmac_avx512, 0 },
+        { "avx512vl 2x ymm x16", jwt_hmac_avx512x2, 0 },
+        { "zmm x16", jwt_hmac_zmm, 0 },
+        { "zmm x16, then 200us scalar", jwt_hmac_zmm, 200 },
+        { "zmm x16, then 500us scalar", jwt_hmac_zmm, 500 },
+        { "zmm x16, then 1000us scalar", jwt_hmac_zmm, 1000 },
+        { "zmm x16, then 2000us scalar", jwt_hmac_zmm, 2000 },
+        { "avx512vl ymm, then 500us scalar", jwt_hmac_avx512, 500 },
     };
     int nc = sizeof c / sizeof c[0];
     for (int i = 0; i < nc; i++) burst(c[i].f, &k, 5); /* warm up code paths */

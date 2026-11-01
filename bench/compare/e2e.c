@@ -15,17 +15,17 @@ static volatile long sink;
 static char **toks;
 static int *tlen, ntok;
 
-#define BEST(B, ...)                                                            \
-    ({                                                                          \
-        double best_ = 1e30;                                                    \
-        for (int rep_ = 0; rep_ < 7; rep_++) {                                  \
-            double t0_ = now_ns();                                              \
-            int done_ = 0;                                                      \
-            for (int i = 0; i + (B) <= ntok; i += (B), done_ += (B)) { __VA_ARGS__; }  \
-            double v_ = (now_ns() - t0_) / done_;                               \
-            if (v_ < best_) best_ = v_;                                         \
-        }                                                                       \
-        best_;                                                                  \
+#define BEST(B, ...)                                                                                                   \
+    ({                                                                                                                 \
+        double best_ = 1e30;                                                                                           \
+        for (int rep_ = 0; rep_ < 7; rep_++) {                                                                         \
+            double t0_ = now_ns();                                                                                     \
+            int done_ = 0;                                                                                             \
+            for (int i = 0; i + (B) <= ntok; i += (B), done_ += (B)) { __VA_ARGS__; }                                  \
+            double v_ = (now_ns() - t0_) / done_;                                                                      \
+            if (v_ < best_) best_ = v_;                                                                                \
+        }                                                                                                              \
+        best_;                                                                                                         \
     })
 
 int main(int argc, char **argv) {
@@ -74,13 +74,14 @@ int main(int argc, char **argv) {
 #endif
     printf("%s: accepted %d/%d, forged rejected: %s\n", label, ok, ntok, res[0].status == JWT_INVALID ? "yes" : "NO");
 
-    static const int BS[] = {1, 2, 3, 4, 8, 16, 32};
+    static const int BS[] = { 1, 2, 3, 4, 8, 16, 32 };
     printf("%-34s", "full verify ns/token, batch:");
     for (int b = 0; b < 7; b++) printf("%7d", BS[b]);
     printf("\n%-34s", label);
     for (int b = 0; b < 7; b++) {
         int B = BS[b];
-        double v = BEST(B, jwt_verify_batch(&k, B, (const char *const *)toks + i, tlen + i, now, res); sink += res[0].uid);
+        double v =
+            BEST(B, jwt_verify_batch(&k, B, (const char *const *)toks + i, tlen + i, now, res); sink += res[0].uid);
         printf("%7.1f", v);
     }
     printf("\n");
@@ -90,20 +91,23 @@ int main(int argc, char **argv) {
     jnow_t jn;
     jnow_init(&jn, now);
     int pl0 = 37;
-    printf("pieces: sig b64 %.1f | payload b64 %.1f | +fast JSON %.1f | +strict JSON %.1f | +shape JSON %.1f | HMAC 8-batch %.1f ns/token\n",
-           BEST(1, sink += jwt_b64url_decode(out, toks[i] + tlen[i] - 43, 43)),
-           BEST(1, sink += jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0)),
-           BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0); sink += payload_fast(out, pn, &jn, res)),
-           BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0); sink += payload_check(out, pn, &jn, res)),
-           BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0); sink += payload_shape(out, pn, &jn, res)),
-           ({
-               const uint8_t *m[8];
-               int l[8];
-               uint32_t mac[8][8];
-               BEST(8, for (int j = 0; j < 8; j++) m[j] = (const uint8_t *)toks[i + j], l[j] = tlen[i + j] - 44;
-                    jwt_hmac_fn *h = hmac_default();
-                    h(&k, 8, m, l, mac); sink += mac[0][0]);
-           }));
+    printf(
+        "pieces: sig b64 %.1f | payload b64 %.1f | +fast JSON %.1f | +strict JSON %.1f | +shape JSON %.1f | HMAC 8-batch %.1f ns/token\n",
+        BEST(1, sink += jwt_b64url_decode(out, toks[i] + tlen[i] - 43, 43)),
+        BEST(1, sink += jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0)),
+        BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
+             sink += payload_fast(out, pn, &jn, res)),
+        BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
+             sink += payload_check(out, pn, &jn, res)),
+        BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
+             sink += payload_shape(out, pn, &jn, res)),
+        ({
+            const uint8_t *m[8];
+            int l[8];
+            uint32_t mac[8][8];
+            BEST(8, for (int j = 0; j < 8; j++) m[j] = (const uint8_t *)toks[i + j], l[j] = tlen[i + j] - 44;
+                 jwt_hmac_fn *h = hmac_default(); h(&k, 8, m, l, mac); sink += mac[0][0]);
+        }));
 #ifdef JWT_HAVE_LANES
     /* JSON only, on pre-decoded hot payloads: per-token cost by batch size */
     {
@@ -111,10 +115,11 @@ int main(int argc, char **argv) {
         static uint8_t dp[NP][320];
         static const uint8_t *dpp[NP];
         static int dn[NP];
-        for (int i = 0; i < NP; i++) dn[i] = jwt_b64url_decode(dp[i], toks[i] + pl0, tlen[i] - 44 - pl0), dpp[i] = dp[i];
+        for (int i = 0; i < NP; i++)
+            dn[i] = jwt_b64url_decode(dp[i], toks[i] + pl0, tlen[i] - 44 - pl0), dpp[i] = dp[i];
         printf("JSON only ns/token, batch:         ");
         for (int b = 0; b < 7; b++) printf("%7d", BS[b]);
-        const char *nm[3] = {"strict", "shape", "lanes"};
+        const char *nm[3] = { "strict", "shape", "lanes" };
         for (int kind = 0; kind < 3; kind++) {
             printf("\n  %-32s", nm[kind]);
             for (int b = 0; b < 7; b++) {
@@ -125,8 +130,10 @@ int main(int argc, char **argv) {
                     long done = 0;
                     for (int it = 0; it < 20; it++)
                         for (int i = 0; i + B <= NP; i += B, done += B) {
-                            if (kind == 0) for (int j = 0; j < B; j++) sink += payload_check(dp[i + j], dn[i + j], &jn, res);
-                            else if (kind == 1) for (int j = 0; j < B; j++) sink += payload_shape(dp[i + j], dn[i + j], &jn, res);
+                            if (kind == 0)
+                                for (int j = 0; j < B; j++) sink += payload_check(dp[i + j], dn[i + j], &jn, res);
+                            else if (kind == 1)
+                                for (int j = 0; j < B; j++) sink += payload_shape(dp[i + j], dn[i + j], &jn, res);
                             else {
                                 jlane_t o[JL];
                                 json_lanes(B, dpp + i, dn + i, o);

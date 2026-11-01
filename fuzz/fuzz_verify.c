@@ -18,17 +18,21 @@
 static const char SECRET[] = "cursed-jwt-test-secret";
 
 typedef void verify_fn(const jwt_key_t *, int, const char *const *, const int *, int64_t, jwt_result_t *);
-static const struct { verify_fn *fn; unsigned need; } fz_engines[] = {
-    {jwt_verify_batch, 0}, {jwt_verify_batch_scalar, 0},
+static const struct {
+    verify_fn *fn;
+    unsigned need;
+} fz_engines[] = {
+    { jwt_verify_batch, 0 },
+    { jwt_verify_batch_scalar, 0 },
 #ifdef JWT_HAVE_NEON
-    {jwt_verify_batch_neon, 0},
+    { jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)
-    {jwt_verify_batch_sha2, JWT_CPU_SHA2},
+    { jwt_verify_batch_sha2, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
-    {jwt_verify_batch_avx2, JWT_CPU_AVX2},
-    {jwt_verify_batch_avx512, JWT_CPU_AVX512VL},
+    { jwt_verify_batch_avx2, JWT_CPU_AVX2 },
+    { jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
 #endif
 };
 #define NFE ((int)(sizeof fz_engines / sizeof fz_engines[0]))
@@ -39,7 +43,14 @@ static int same(const jwt_result_t *a, const jwt_result_t *b) {
     return a->uid == b->uid && a->username_len == b->username_len && a->username_escape == b->username_escape &&
            !memcmp(a->ubuf, b->ubuf, a->username_len);
 }
-#define FZ_ASSERT(c, ...) do { if (!(c)) { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); abort(); } } while (0)
+#define FZ_ASSERT(c, ...)                                                                                              \
+    do {                                                                                                               \
+        if (!(c)) {                                                                                                    \
+            fprintf(stderr, __VA_ARGS__);                                                                              \
+            fputc('\n', stderr);                                                                                       \
+            abort();                                                                                                   \
+        }                                                                                                              \
+    } while (0)
 
 static void b64u_enc(char *dst, const uint8_t *s, int n) {
     static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -127,7 +138,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     for (int i = 1; i < n; i++) jwt_verify_batch_scalar(&key, 1, tok + i, len + i, now, ref + i);
     for (int i = 0; i < n; i++) {
         if (ref[i].status == JWT_OK) {
-            FZ_ASSERT(ref[i].uid >= 1 && ref[i].username_len <= JWT_USERNAME_MAX && ref[i].ubuf[ref[i].username_len] == 0,
+            FZ_ASSERT(ref[i].uid >= 1 && ref[i].username_len <= JWT_USERNAME_MAX &&
+                          ref[i].ubuf[ref[i].username_len] == 0,
                       "bad JWT_OK result for %.*s", len[i], tok[i]);
             FZ_ASSERT(ref[i].username == ref[i].ubuf, "username does not point into ubuf");
         }
@@ -136,7 +148,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     for (int e2 = 0; e2 < NFE; e2++) {
         if ((fz_engines[e2].need & jwt_cpu_features()) != fz_engines[e2].need) continue;
         fz_engines[e2].fn(&key, n, tok, len, now, got);
-        for (int i = 0; i < n; i++) FZ_ASSERT(same(&got[i], &ref[i]), "engine %d batch %d token %d: %d vs %d on %.*s", e2, n, i, got[i].status, ref[i].status, len[i], tok[i]);
+        for (int i = 0; i < n; i++)
+            FZ_ASSERT(same(&got[i], &ref[i]), "engine %d batch %d token %d: %d vs %d on %.*s", e2, n, i, got[i].status,
+                      ref[i].status, len[i], tok[i]);
     }
     return 0;
 }

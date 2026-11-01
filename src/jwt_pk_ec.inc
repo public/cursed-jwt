@@ -4,7 +4,10 @@
 
 /* dbl-2001-b (a = -3), 3M + 5S */
 static void EC(p256_dbl)(p256_jac_t *o, const p256_jac_t *p) {
-    if (p->inf || fe_iszero(p->y)) { o->inf = 1; return; }
+    if (p->inf || fe_iszero(p->y)) {
+        o->inf = 1;
+        return;
+    }
     fe_t delta, gamma, beta, alpha, t, u;
     fe_sqr(delta, p->z);
     fe_sqr(gamma, p->y);

@@ -13,13 +13,21 @@ D=third_party/crypto-mb
 C=b5746138d6c509082f6550192443dd9d5f28ba9e
 SUM=d1a26d6dc358bfbdb4fe779fe7ec1848dad1835fdaece325742ed1c7adc9809e
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-if [ -f "$D/lib/libcrypto_mb.a" ] && [ "$(cat "$D/.commit" 2>/dev/null)" = "$C" ]; then echo "crypto_mb: have $C"; exit 0; fi
+if [ -f "$D/lib/libcrypto_mb.a" ] && [ "$(cat "$D/.commit" 2>/dev/null)" = "$C" ]; then
+  echo "crypto_mb: have $C"
+  exit 0
+fi
 mkdir -p "$D"
 T="${D:?}/src.tar.gz"
 if [ ! -f "$T" ] || [ "$(sha "$T")" != "$SUM" ]; then
   echo "crypto_mb: fetching intel/cryptography-primitives @ $C"
   curl -fsSL "https://codeload.github.com/intel/cryptography-primitives/tar.gz/$C" -o "$T.tmp"
-  got=$(sha "$T.tmp"); [ "$got" = "$SUM" ] || { echo "SHA-256 mismatch (got $got, want $SUM)" >&2; rm -f "${T:?}.tmp"; exit 1; }
+  got=$(sha "$T.tmp")
+  [ "$got" = "$SUM" ] || {
+    echo "SHA-256 mismatch (got $got, want $SUM)" >&2
+    rm -f "${T:?}.tmp"
+    exit 1
+  }
   mv "$T.tmp" "$T"
 fi
 rm -rf "${D:?}/src" && mkdir -p "$D/src" && tar -xzf "$T" -C "$D/src" --strip-components=1
@@ -30,5 +38,5 @@ mkdir -p "$D/lib" "$D/include"
 cp "$(find "$D/build" -name 'libcrypto_mb*.a' | head -1)" "$D/lib/libcrypto_mb.a"
 cp -R "$D/src/sources/ippcp/crypto_mb/include/crypto_mb" "$D/include/"
 cp "$D/src/LICENSE" "$D/LICENSE"
-echo "$C" > "$D/.commit"
+echo "$C" >"$D/.commit"
 echo "crypto_mb: built $D/lib/libcrypto_mb.a"

@@ -10,8 +10,12 @@ static int ref_decode(uint8_t *dst, const uint8_t *s, int n) {
     int bits = 0, o = 0;
     for (int i = 0; i < n; i++) {
         uint8_t c = s[i];
-        int v = c >= 'A' && c <= 'Z' ? c - 'A' : c >= 'a' && c <= 'z' ? c - 'a' + 26 : c >= '0' && c <= '9' ? c - '0' + 52
-              : c == '-' ? 62 : c == '_' ? 63 : -1;
+        int v = c >= 'A' && c <= 'Z'   ? c - 'A'
+                : c >= 'a' && c <= 'z' ? c - 'a' + 26
+                : c >= '0' && c <= '9' ? c - '0' + 52
+                : c == '-'             ? 62
+                : c == '_'             ? 63
+                                       : -1;
         if (v < 0) return -1;
         acc = acc << 6 | (uint32_t)v, bits += 6;
         if (bits >= 8) bits -= 8, dst[o++] = (uint8_t)(acc >> bits);

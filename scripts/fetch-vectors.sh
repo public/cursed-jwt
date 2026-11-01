@@ -5,18 +5,28 @@
 #   RFC 7515   Appendix A.1, the HS256 JWS example                 https://www.rfc-editor.org/rfc/rfc7515.txt
 #   NIST CAVP  HMAC.rsp, [L=32] (HMAC-SHA-256, keys 40-70 bytes)  csrc.nist.gov hmactestvectors.zip
 #   Wycheproof hmac_sha256_test.json (valid + invalid tags)        github.com/C2SP/wycheproof @ d17cc89
-# and, for the RS256 / ES256 prototype (make pk-test):
+# and, for RS256 / ES256 / EdDSA (make pk-test):
 #   Wycheproof ecdsa_secp256r1_sha256_p1363, rsa_signature_{2048,3072,4096}_sha256   (same commit)
 #   NIST CAVP  186-4ecdsatestvectors.zip SigVer.rsp [P-256,SHA-256]; 186-3rsatestvectors.zip SigVer15_186-3.rsp
 #   Wycheproof ed25519_test.json; RFC 8032 section 7.1 (Ed25519 test vectors); RFC 8037 A.4 (the EdDSA JWS)
 set -e
 cd "$(dirname "$0")/.."
-V=third_party/vectors; mkdir -p $V
+V=third_party/vectors
+mkdir -p $V
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-get() {   # file url sha256
-  if [ -f "$V/$1" ] && [ "$(sha "$V/$1")" = "$3" ]; then echo "$1: have it"; return; fi
-  echo "$1: fetching $2"; curl -fsSL "$2" -o "$V/$1.tmp"
-  got=$(sha "$V/$1.tmp"); [ "$got" = "$3" ] || { echo "$1: SHA-256 mismatch (got $got, want $3)" >&2; rm -f "$V/$1.tmp"; exit 1; }
+get() { # file url sha256
+  if [ -f "$V/$1" ] && [ "$(sha "$V/$1")" = "$3" ]; then
+    echo "$1: have it"
+    return
+  fi
+  echo "$1: fetching $2"
+  curl -fsSL "$2" -o "$V/$1.tmp"
+  got=$(sha "$V/$1.tmp")
+  [ "$got" = "$3" ] || {
+    echo "$1: SHA-256 mismatch (got $got, want $3)" >&2
+    rm -f "$V/$1.tmp"
+    exit 1
+  }
   mv "$V/$1.tmp" "$V/$1"
 }
 get rfc4231.txt https://www.rfc-editor.org/rfc/rfc4231.txt 72178527ce93500e730bc8eb182b857e583096d652b64ece0879c52ba1df973b

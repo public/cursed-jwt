@@ -6,13 +6,19 @@ Each record is {"id":N,"username":"...","token":"..."}. Payloads are compact JSO
 these claims (and the one jwt.c's shape-matched fast path recognises; everything else goes through the
 strict parser). exp is in 2036, so the tokens stay live for the tests.
 """
-import base64, hashlib, hmac, json, sys
+
+import base64
+import hashlib
+import hmac
+import json
+import sys
 
 ADJ = ["golden", "silver", "swift", "quiet", "amber", "crimson", "lunar", "rapid", "misty", "brave"]
 NOUN = ["ember", "comet", "nebula", "harbor", "falcon", "meadow", "quartz", "willow", "tundra", "orbit"]
 
 
-def b64(b): return base64.urlsafe_b64encode(b).rstrip(b"=")
+def b64(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=")
 
 
 def main():

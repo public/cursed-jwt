@@ -11,13 +11,15 @@
 #   make fuzz-smoke   fuzz harnesses replaying their seed/saved corpora under ASan + UBSan (seconds, local)
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
-#   make pk-test      RS256 / ES256 prototype (-DJWT_PK) vs Wycheproof, NIST CAVP, RFC 7515, pyca (network)
-#   make pk-bench     RS256 / ES256 ns/token vs OpenSSL (network for the fiat-crypto fetch)
+#   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
+#   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
 #   make pk-test-fast / pk-bench-fast s2n-bignum for P-256 + OpenSSL's BN asm for RSA (-DJWT_S2N -DJWT_OPENSSL)
 #   make pk-test-ifma / pk-bench-ifma + Intel crypto_mb 8-way AVX-512 IFMA (Linux x86-64; IFMA CPU to exercise it)
 #   make mca          static estimates of every SHA-256 engine per CPU model (llvm-mca; + uiCA, scripts/mca/fetch-uica.sh)
 #   make mca-validate perf-measured cycles of the same engines on this machine (x86-64 Linux; scripts/mca/validate.sh)
+#   make lint         formatting + lint checks (clang-format, shfmt, ruff, shellcheck, cppcheck; Docker)
+#   make format       apply the formatters; make hooks installs the pre-commit check (.githooks/)
 # Engines are picked at run time from the CPU; ARCHFLAGS only changes the baseline (see README.md, Building).
 CC ?= cc
 PYTHON ?= python3
@@ -44,7 +46,7 @@ endif
 CFLAGS ?= -O3
 WARN := -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function
 INC := -Iinclude -Isrc -Itests
-SRC := src/jwt.c src/jwt_mb.inc include/jwt.h $(SHAOBJ)
+SRC := src/jwt.c src/jwt_mb.inc include/jwt.h src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc $(wildcard src/fiat/*.c) $(SHAOBJ)
 SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TEST_SECRET := cursed-jwt-test-secret
 NTOKENS ?= 20000
@@ -121,10 +123,11 @@ avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
 licence: bench/licence_probe.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< $(X86SHA) -o $(B)/licence_probe && ./$(B)/licence_probe
 
-# RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit.
+# RS256 / ES256 / EdDSA (src/jwt_pk.inc, PK.md) are part of the default build; their field arithmetic is fiat-crypto's,
+# vendored in src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
 # Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
-PK := -DJWT_PK -Ithird_party/fiat
-PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc third_party/fiat/p256_64.c
+PK :=
+PKSRC := $(SRC)
 # property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
 HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run
 $(B)/pyenv-hyp: | $(B)
@@ -152,9 +155,7 @@ FUZZ_SECS ?= 10
 fuzz:
 	./scripts/fuzz.sh "" $(FUZZ_SECS)
 
-# RS256 / ES256 prototype: PK and PKSRC are defined above (before the first rule that uses them)
-third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
-	./scripts/fetch-fiat.sh
+# RS256 / ES256 / EdDSA: PK and PKSRC are defined above (before the first rule that uses them)
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)
 S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
 S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
@@ -249,6 +250,13 @@ mca-validate: | $(B)
 	./scripts/mca/validate.sh > $(B)/mca-measured.txt
 	MEASURED=$(B)/mca-measured.txt ./scripts/mca/mca.sh
 
+# formatting and linting (scripts/lint.sh; pinned tools in ci/lint.Dockerfile, run through Docker)
+format:
+	./scripts/lint.sh --fix
+lint:
+	./scripts/lint.sh
+hooks:
+	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean

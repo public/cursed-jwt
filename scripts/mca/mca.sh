@@ -6,22 +6,37 @@
 # rank engines and to look at CPUs we can't run on; real verify times also pay for parsing, padding and dispatch.
 #   scripts/mca/mca.sh [LLVM_BIN_DIR]     (default: $LLVM, then /opt/homebrew/opt/llvm/bin, then PATH)
 #   MEASURED=file scripts/mca/mca.sh      + measured columns from scripts/mca/validate.sh's output
-cd "$(dirname "$0")/../.."
-M=${1:-${LLVM:-/opt/homebrew/opt/llvm/bin}}; [ -x "$M/llvm-mca" ] || M=$(dirname "$(command -v llvm-mca)")
-[ -x "$M/llvm-mca" ] || { echo "llvm-mca not found (brew install llvm, or apt install llvm)"; exit 1; }
-S=$(mktemp -d "${TMPDIR:-/tmp}/mca.XXXXXX"); trap 'rm -rf "$S"' EXIT
+cd "$(dirname "$0")/../.." || exit 1
+M=${1:-${LLVM:-/opt/homebrew/opt/llvm/bin}}
+[ -x "$M/llvm-mca" ] || M=$(dirname "$(command -v llvm-mca)")
+[ -x "$M/llvm-mca" ] || {
+  echo "llvm-mca not found (brew install llvm, or apt install llvm)"
+  exit 1
+}
+S=$(mktemp -d "${TMPDIR:-/tmp}/mca.XXXXXX")
+trap 'rm -rf "$S"' EXIT
 X86_CPUS="cascadelake icelake-server sapphirerapids graniterapids znver3 znver4 znver5 alderlake sierraforest"
 ARM_CPUS="neoverse-n1 neoverse-n2 neoverse-v1 neoverse-v2 neoverse-v3 ampere1b apple-m4"
 # cross-compiling needs system headers: on macOS the SDK's (Apple triples), elsewhere the host's (Linux triples)
-if [ "$(uname)" = Darwin ]; then X86=x86_64-apple-macos13; ARM=arm64-apple-macos13; SYS="-isysroot $(xcrun --show-sdk-path)"
-else X86=x86_64-linux-gnu; ARM=aarch64-linux-gnu; SYS=; fi
-U=${UICA:-third_party/uiCA}; UPY=${PYTHON:-build/venv/bin/python}   # UICA=: an existing uiCA checkout (fetch-uica.sh)
+if [ "$(uname)" = Darwin ]; then
+  X86=x86_64-apple-macos13
+  ARM=arm64-apple-macos13
+  SYS="-isysroot $(xcrun --show-sdk-path)"
+else
+  X86=x86_64-linux-gnu
+  ARM=aarch64-linux-gnu
+  SYS=
+fi
+U=${UICA:-third_party/uiCA}
+UPY=${PYTHON:-build/venv/bin/python} # UICA=: an existing uiCA checkout (fetch-uica.sh)
 [ -x "$UPY" ] && UPY=$(cd "$(dirname "$UPY")" && pwd)/$(basename "$UPY")
 for spec in "x86|$X86" "arm|$ARM"; do
-  arch=${spec%%|*}; tgt=${spec#*|}
+  arch=${spec%%|*}
+  tgt=${spec#*|}
   # baseline flags: jwt.c's own target regions give each engine its ISA, as in the library. Arm: plain armv8-a
   # like a Linux build (macOS's default CPU has SHA-3, so the compiler would fuse XORs into EOR3, which N1-N2/V2-V3 lack)
-  base=-march=x86-64; [ "$arch" = arm ] && base="-march=armv8-a -mcpu=generic"   # Apple triples default to apple-m1 otherwise
+  base=-march=x86-64
+  [ "$arch" = arm ] && base="-march=armv8-a -mcpu=generic" # Apple triples default to apple-m1 otherwise
   "$M/clang" -target "$tgt" $SYS -O3 -S -w $base -Iinclude scripts/mca/kernels.c -o "$S/$arch.s" || exit 1
   # each region into its own file (instructions and local labels only), so a CPU model without AVX-512 only
   # loses those regions; a region with a branch inside (a loop) is flagged: mca would count its body once
@@ -39,25 +54,27 @@ for n, ls in out.items(): open(f"{sys.argv[2]}.{n}.s", "w").write("".join(ls))
 with open(sys.argv[3], "a") as f:
     for n in br: f.write(n + "\n")
 PY
-  case "$tgt" in x86_64-apple*) mt=x86_64-linux-gnu;; *) mt=$tgt;; esac
-  case "$arch" in x86) cpus=$X86_CPUS;; *) cpus=$ARM_CPUS;; esac
+  case "$tgt" in x86_64-apple*) mt=x86_64-linux-gnu ;; *) mt=$tgt ;; esac
+  case "$arch" in x86) cpus=$X86_CPUS ;; *) cpus=$ARM_CPUS ;; esac
   for f in "$S/$arch".*.s; do
-    reg=${f#"$S/$arch."}; reg=${reg%.s}
+    reg=${f#"$S/$arch."}
+    reg=${reg%.s}
     for c in $cpus; do
-      ma=; [ "$arch" = arm ] && ma=-mattr=+sha2   # some Arm CPU models leave the crypto extension off by default
+      ma=
+      [ "$arch" = arm ] && ma=-mattr=+sha2 # some Arm CPU models leave the crypto extension off by default
       t=$("$M/llvm-mca" -mtriple="$mt" -mcpu="$c" $ma -iterations=100 "$f" 2>/dev/null | awk '/Block RThroughput:/{print $3}')
       [ -n "$t" ] && echo "$c $reg $t"
     done
-    if [ "$arch" = x86 ] && [ -f $U/uiCA.py ] && [ -f $U/instrData/CLX_data.py ]; then   # uiCA: the host's object format
+    if [ "$arch" = x86 ] && [ -f $U/uiCA.py ] && [ -f $U/instrData/CLX_data.py ]; then # uiCA: the host's object format
       if [ "$(uname)" = Darwin ]; then ot=x86_64-apple-macos13; else ot=x86_64-linux-gnu; fi
-      perl -pe 's/\bL(CPI|_)/_x$1/g; s/##.*$//' "$f" > "$S/u.s"
+      perl -pe 's/\bL(CPI|_)/_x$1/g; s/##.*$//' "$f" >"$S/u.s"
       "$M/llvm-mc" -triple $ot -filetype=obj "$S/u.s" -o "$S/u.o" 2>/dev/null &&
         for a in CLX ICL TGL; do t=$(cd $U && "$UPY" uiCA.py "$S/u.o" -arch $a -TPonly 2>/dev/null) && echo "uica-$a $reg $t"; done
     fi
   done
-done > "$S/out"
+done >"$S/out"
 touch "$S/loops"
-[ -n "$MEASURED" ] && grep -v '^#' "$MEASURED" | awk '{print "measured-" $2, $1, $3}' >> "$S/out"
+[ -n "$MEASURED" ] && grep -v '^#' "$MEASURED" | awk '{print "measured-" $2, $1, $3}' >>"$S/out"
 python3 - "$S/out" "$S/loops" <<'PY'
 import re, sys, collections
 loops = {l.strip() for l in open(sys.argv[2])}

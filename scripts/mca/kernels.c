@@ -5,14 +5,24 @@
 #include "../../src/jwt.c"
 
 #if defined(__aarch64__)
-#define MCA(name, ...) do { __asm volatile("// LLVM-MCA-BEGIN " name ::: "memory"); __VA_ARGS__; __asm volatile("// LLVM-MCA-END " name ::: "memory"); } while (0)
+#define MCA(name, ...)                                                                                                 \
+    do {                                                                                                               \
+        __asm volatile("// LLVM-MCA-BEGIN " name ::: "memory");                                                        \
+        __VA_ARGS__;                                                                                                   \
+        __asm volatile("// LLVM-MCA-END " name ::: "memory");                                                          \
+    } while (0)
 #else
-#define MCA(name, ...) do { __asm volatile("# LLVM-MCA-BEGIN " name ::: "memory"); __VA_ARGS__; __asm volatile("# LLVM-MCA-END " name ::: "memory"); } while (0)
+#define MCA(name, ...)                                                                                                 \
+    do {                                                                                                               \
+        __asm volatile("# LLVM-MCA-BEGIN " name ::: "memory");                                                         \
+        __VA_ARGS__;                                                                                                   \
+        __asm volatile("# LLVM-MCA-END " name ::: "memory");                                                           \
+    } while (0)
 #endif
-#define K __attribute__((noinline, flatten)) void   // flatten: the whole compress inside the region, not a call
+#define K __attribute__((noinline, flatten)) void // flatten: the whole compress inside the region, not a call
 // state s: 8 vectors (st0/st1 on the SHA2-instruction engine), message w: 16 vectors; both 64-byte aligned
 
-K k_empty(void *s, void *w) { MCA("empty", ((uint32_t *)s)[0] ^= ((uint32_t *)w)[0]); }   // call overhead (kbench.c)
+K k_empty(void *s, void *w) { MCA("empty", ((uint32_t *)s)[0] ^= ((uint32_t *)w)[0]); } // call overhead (kbench.c)
 K k_x1_scalar(void *s, void *w) { MCA("x1_scalar", compress_scalar((uint32_t *)s, (uint32_t *)w)); }
 #if defined(JWT_X86)
 JWT_BEGIN_AVX2
@@ -31,8 +41,11 @@ K k_x4_neon(void *s, void *w) { MCA("x4_neon", compress_neon((uint32x4_t *)s, (u
 #if defined(JWT_ARM_SHA2)
 JWT_BEGIN_SHA2
 // S interleaved streams: st0[S], st1[S] in s; m[S][4] in w
-#define KCE(S) K k_x##S##_sha2(void *s, void *w) { uint32x4_t *st = (uint32x4_t *)s; \
-  MCA("x" #S "_sha2", ce_compress(S, st, st + S, (uint32x4_t (*)[4])w)); }
+#define KCE(S)                                                                                                         \
+    K k_x##S##_sha2(void *s, void *w) {                                                                                \
+        uint32x4_t *st = (uint32x4_t *)s;                                                                              \
+        MCA("x" #S "_sha2", ce_compress(S, st, st + S, (uint32x4_t(*)[4])w));                                          \
+    }
 KCE(1)
 KCE(2)
 KCE(4)

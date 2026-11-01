@@ -21,29 +21,27 @@
 
 static inline void MB(compress)(V s[8], V w[16]) {
     V a = s[0], b = s[1], c = s[2], d = s[3], e = s[4], f = s[5], g = s[6], h = s[7];
-#define MB_RND(a, b, c, d, e, f, g, h, t, wt)                                                \
-    do {                                                                                     \
-        V t1 = VADD(VADD(VADD(h, VXOR3(VROR(e, 6), VROR(e, 11), VROR(e, 25))),               \
-                         VADD(VCH(e, f, g), VSET1(K256[t]))), (wt));                         \
-        V t2 = VADD(VXOR3(VROR(a, 2), VROR(a, 13), VROR(a, 22)), VMAJ(a, b, c));             \
-        d = VADD(d, t1);                                                                     \
-        h = VADD(t1, t2);                                                                    \
+#define MB_RND(a, b, c, d, e, f, g, h, t, wt)                                                                          \
+    do {                                                                                                               \
+        V t1 = VADD(VADD(VADD(h, VXOR3(VROR(e, 6), VROR(e, 11), VROR(e, 25))), VADD(VCH(e, f, g), VSET1(K256[t]))),    \
+                    (wt));                                                                                             \
+        V t2 = VADD(VXOR3(VROR(a, 2), VROR(a, 13), VROR(a, 22)), VMAJ(a, b, c));                                       \
+        d = VADD(d, t1);                                                                                               \
+        h = VADD(t1, t2);                                                                                              \
     } while (0)
-#define MB_SCHED(t) /* w[t&15] becomes W[t] for t >= 16 */                                   \
-    (w[(t) & 15] = VADD(VADD(w[(t) & 15],                                                    \
-                             VXOR3(VROR(w[((t) - 15) & 15], 7), VROR(w[((t) - 15) & 15], 18), \
-                                   VSHR(w[((t) - 15) & 15], 3))),                            \
-                        VADD(w[((t) - 7) & 15],                                              \
-                             VXOR3(VROR(w[((t) - 2) & 15], 17), VROR(w[((t) - 2) & 15], 19),  \
-                                   VSHR(w[((t) - 2) & 15], 10)))))
-#define MB_8R(t, W)                                                                          \
-    MB_RND(a, b, c, d, e, f, g, h, (t) + 0, W((t) + 0));                                     \
-    MB_RND(h, a, b, c, d, e, f, g, (t) + 1, W((t) + 1));                                     \
-    MB_RND(g, h, a, b, c, d, e, f, (t) + 2, W((t) + 2));                                     \
-    MB_RND(f, g, h, a, b, c, d, e, (t) + 3, W((t) + 3));                                     \
-    MB_RND(e, f, g, h, a, b, c, d, (t) + 4, W((t) + 4));                                     \
-    MB_RND(d, e, f, g, h, a, b, c, (t) + 5, W((t) + 5));                                     \
-    MB_RND(c, d, e, f, g, h, a, b, (t) + 6, W((t) + 6));                                     \
+#define MB_SCHED(t) /* w[t&15] becomes W[t] for t >= 16 */                                                             \
+    (w[(t) & 15] = VADD(VADD(w[(t) & 15], VXOR3(VROR(w[((t) - 15) & 15], 7), VROR(w[((t) - 15) & 15], 18),             \
+                                                VSHR(w[((t) - 15) & 15], 3))),                                         \
+                        VADD(w[((t) - 7) & 15], VXOR3(VROR(w[((t) - 2) & 15], 17), VROR(w[((t) - 2) & 15], 19),        \
+                                                      VSHR(w[((t) - 2) & 15], 10)))))
+#define MB_8R(t, W)                                                                                                    \
+    MB_RND(a, b, c, d, e, f, g, h, (t) + 0, W((t) + 0));                                                               \
+    MB_RND(h, a, b, c, d, e, f, g, (t) + 1, W((t) + 1));                                                               \
+    MB_RND(g, h, a, b, c, d, e, f, (t) + 2, W((t) + 2));                                                               \
+    MB_RND(f, g, h, a, b, c, d, e, (t) + 3, W((t) + 3));                                                               \
+    MB_RND(e, f, g, h, a, b, c, d, (t) + 4, W((t) + 4));                                                               \
+    MB_RND(d, e, f, g, h, a, b, c, (t) + 5, W((t) + 5));                                                               \
+    MB_RND(c, d, e, f, g, h, a, b, (t) + 6, W((t) + 6));                                                               \
     MB_RND(b, c, d, e, f, g, h, a, (t) + 7, W((t) + 7))
 #define MB_WD(t) w[t]
     MB_8R(0, MB_WD);

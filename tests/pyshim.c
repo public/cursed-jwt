@@ -1,5 +1,5 @@
 /* pyshim.c — the library as a shared object for tests/test_hypothesis.py (ctypes).  Unity build: includes jwt.c,
- * with -DJWT_PK, so the property tests reach every HS256 engine the target has and the RS256 / ES256 prototype.
+ * so the property tests reach every HS256 engine the target has and RS256 / ES256 / EdDSA.
  *   jt_engines()                      number of full-verify engines
  *   jt_engine_name(i)                 its name
  *   jt_verify(i, key, n, tok, len, now, out)   jwt_verify_batch on engine i
@@ -12,17 +12,17 @@ static const struct {
     verify_fn *fn;
     unsigned need;
 } all_shim[] = {
-    {"default", jwt_verify_batch, 0},
-    {"scalar", jwt_verify_batch_scalar, 0},
+    { "default", jwt_verify_batch, 0 },
+    { "scalar", jwt_verify_batch_scalar, 0 },
 #ifdef JWT_HAVE_NEON
-    {"neon", jwt_verify_batch_neon, 0},
+    { "neon", jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)
-    {"sha2", jwt_verify_batch_sha2, JWT_CPU_SHA2},
+    { "sha2", jwt_verify_batch_sha2, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
-    {"avx2", jwt_verify_batch_avx2, JWT_CPU_AVX2},
-    {"avx512", jwt_verify_batch_avx512, JWT_CPU_AVX512VL},
+    { "avx2", jwt_verify_batch_avx2, JWT_CPU_AVX2 },
+    { "avx512", jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
 #endif
 };
 static int shim_idx[16], shim_n = -1;
@@ -34,9 +34,13 @@ static void shim_pick(void) {
 }
 #define shim_engines(i) all_shim[shim_idx[i]]
 
-int jt_engines(void) { shim_pick(); return shim_n; }
+int jt_engines(void) {
+    shim_pick();
+    return shim_n;
+}
 const char *jt_engine_name(int i) { return shim_engines(i).name; }
-void jt_verify(int i, const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now, jwt_result_t *out) {
+void jt_verify(int i, const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
+               jwt_result_t *out) {
     shim_engines(i).fn(k, n, tok, len, now, out);
 }
 size_t jt_sizeof_key(void) { return sizeof(jwt_key_t); }

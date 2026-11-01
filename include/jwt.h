@@ -62,43 +62,49 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len);
 
 /* Verify n tokens (the bytes after "Bearer ").  tok[i]/len[i] need not be NUL-terminated.
  * now_s = current Unix time in whole seconds; a token is live iff nbf <= now_s < exp. */
-void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                      int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                      jwt_result_t *out);
 
 /* ---- CPU dispatch ----
  * The engine is chosen at run time from the CPU's features (CPUID / HWCAP), whatever -march the library was built
  * with: AVX-512VL, then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.  The engine-specific
  * entry points below exist for tests and benchmarks; call one only if jwt_cpu_features() has its bit. */
-enum { JWT_CPU_AVX2 = 1, JWT_CPU_AVX512VL = 2, JWT_CPU_BMI2_ADX = 4, JWT_CPU_SHANI = 8, JWT_CPU_IFMA = 16,
-       JWT_CPU_SHA2 = 32, JWT_CPU_SHA512 = 64,
-       JWT_CPU_FAST_ZMM = 128 /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */ };
+enum {
+    JWT_CPU_AVX2 = 1,
+    JWT_CPU_AVX512VL = 2,
+    JWT_CPU_BMI2_ADX = 4,
+    JWT_CPU_SHANI = 8,
+    JWT_CPU_IFMA = 16,
+    JWT_CPU_SHA2 = 32,
+    JWT_CPU_SHA512 = 64,
+    JWT_CPU_FAST_ZMM = 128 /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */
+};
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
 const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "avx512vl", "avx2", "sha2", ... */
 
 /* ---- engine-specific entry points (same contract), for tests and benchmarks ---- */
-void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                             int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                             jwt_result_t *out);
 #if defined(__aarch64__) || defined(_M_ARM64)
-void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                           int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                           jwt_result_t *out);
 #endif
 #if defined(__aarch64__)
-void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                           int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                           jwt_result_t *out);
 #endif
 #if defined(__x86_64__)
-void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                           int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                           jwt_result_t *out);
 #endif
 #if defined(__x86_64__)
-void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len,
-                             int64_t now_s, jwt_result_t *out);
+void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
+                             jwt_result_t *out);
 #endif
 
 /* Raw HMAC-SHA256 tags of n messages, engine-specific (exposed for tests/benchmarks).
  * mac[i] receives the 8 big-endian-interpreted state words (i.e. word j = bytes 4j..4j+3). */
-typedef void jwt_hmac_fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                         uint32_t (*mac)[8]);
+typedef void jwt_hmac_fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]);
 jwt_hmac_fn jwt_hmac_scalar;
 #if defined(__aarch64__) || defined(_M_ARM64)
 jwt_hmac_fn jwt_hmac_neon;
@@ -116,7 +122,7 @@ jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
 #endif
 
-/* ---- RS256 / ES256 (prototype; build with -DJWT_PK, needs scripts/fetch-fiat.sh, see PK.md) ----
+/* ---- RS256 / ES256 / EdDSA (built by default; -DJWT_NO_PK leaves them out; see PK.md) ----
  * Optional asm backends: -DJWT_S2N (s2n-bignum, scripts/fetch-s2n-bignum.sh, link build/libs2n.a) and
  * -DJWT_OPENSSL (libcrypto BN for RSA, link -lcrypto); with both, the fastest kernel per platform and key size.
  * The same front end and claim rules as jwt_verify_batch, with a public key instead of a secret.  The key
@@ -134,8 +140,8 @@ void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, con
                          jwt_result_t *out);
 /* Raw signature check of n messages (the JWS signing input); sig[i] is JOSE-format (ES256: r || s, 64 bytes;
  * RS256: k bytes for a k-byte modulus).  ok[i] = 1 iff valid.  For tests and benchmarks. */
-void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len,
-                       const uint8_t *const *sig, const int *slen, uint8_t *ok);
+void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
+                       const int *slen, uint8_t *ok);
 
 /* Plain SHA-256 of n messages through the same multi-buffer engines (the RS256 / ES256 signing inputs).
  * dig[i] receives the 8 big-endian-interpreted state words.  jwt_sha256_batch picks the default engine. */
