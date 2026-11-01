@@ -1,9 +1,13 @@
 name: rust
 on:
   push:
+    branches: [main]
     paths: ["rust/**", "src/**", "include/**", "tests/**", "scripts/fetch-vectors.sh", "Makefile", ".github/workflows/rust.yml"]
   pull_request:
     paths: ["rust/**", "src/**", "include/**", "tests/**", "scripts/fetch-vectors.sh", "Makefile", ".github/workflows/rust.yml"]
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
