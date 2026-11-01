@@ -17,3 +17,11 @@ core
 tokens.json
 .DS_Store
 /third_party/
+# Python and fuzzing leftovers (Hypothesis database, bytecode, libFuzzer crash artifacts)
+.hypothesis/
+__pycache__/
+*.pyc
+crash-*
+leak-*
+timeout-*
+oom-*

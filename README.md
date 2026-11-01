@@ -1,15 +1,27 @@
 # cursed-jwt
 
-Batch JWT verification in C. HS256 tokens are checked many at a time, with **one multi-buffer SIMD HMAC-SHA256
-pass**:
+Batch JWT verification in C. Instead of checking HS256 tokens one at a time, cursed-jwt checks many at once with **one
+multi-buffer SIMD HMAC-SHA256 pass**, one token per vector lane:
 - AVX-512VL or AVX2 hash 8 tokens per vector on x86;
 - interleaved ARMv8 SHA2 instructions hash 4 streams on ARM;
 - a lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
 
 The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JSON parser with a shape-matched fast
-path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates.
+path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates. One
+binary picks the best engine for the CPU it runs on.
 
 RS256, ES256 and EdDSA (Ed25519) are an opt-in prototype with the same front end ([PK.md](PK.md)).
+
+**Why it exists.** It was written for [cursed-http](https://github.com/public/cursed-http), an entry in the
+[$12 server challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge). That server authenticates every
+request with an HS256 Bearer token on one vCPU, and it already handles requests in batches, so verifying a batch of
+tokens in one SIMD pass was the natural next step. It's the server's JWT code, extracted into a library with its own
+tests and benchmarks.
+
+**Status.** Its one user so far is cursed-http, which the challenge's organisers scored at
+275,000 simulated users. The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are a
+prototype: tested against the same vectors, but off by default and not yet used by anything. There are no tagged
+releases yet; `main` is the current version. It has not had an external security review (see [Security](#security)).
 
 ## At a glance
 
@@ -23,7 +35,8 @@ Lake, no SHA-NI). Every implementation accepted the same 20,000 tokens and rejec
 | [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,236 | 6,236 | 6,236 |
 | [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,673 | 8,673 | 8,673 |
 
-That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521.
+That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521. How these
+were measured, and the caveats, are under [Benchmarks](#benchmarks).
 
 **RS256 / ES256 / EdDSA** (prototype, fastest build), µs per token against OpenSSL `EVP_DigestVerify`:
 
@@ -34,6 +47,31 @@ That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at bat
 | RS256-2048, batch screening | 16.2 | **3.16** | 22.9 | **2.35** | 9.0 |
 | EdDSA (Ed25519), portable C | 21.5 | **16.5** | 150.2 | **4.6** (b32) | 40.4 |
 
+## Proven, tested, or neither
+
+- **Nothing in cursed-jwt's own code is formally verified.** It is tested: every engine against OpenSSL and against
+  published vectors (RFC 4231, NIST CAVP, Wycheproof, RFC 7515/8032/8037), plus independently generated ones
+  (pyca/cryptography, Python's `hmac`), an independent Python model of the claim rules (Hypothesis) and libFuzzer.
+  The vectors are fetched at pinned versions and cross-checked against pyca/cryptography before use. Planted bugs
+  are used to check that the tests can fail. Details: [Testing](#testing).
+- **Formally verified code it can use:** the opt-in RS256/ES256/EdDSA prototype takes its P-256 and curve25519 field
+  and scalar arithmetic from [fiat-crypto](https://github.com/mit-plv/fiat-crypto), whose generated C is proven
+  correct in Coq upstream, and can use [s2n-bignum](https://github.com/awslabs/s2n-bignum)'s assembly, which is
+  proven correct in HOL Light upstream. Those proofs are about the arithmetic, not about how cursed-jwt uses it, and
+  neither is used by the default HS256 build.
+
+## Quick start
+
+```bash
+git clone https://github.com/public/cursed-jwt.git && cd cursed-jwt
+make                   # build/libcursedjwt.a and build/verify; needs only a C compiler
+make test              # every engine on this CPU vs OpenSSL and the claim rules (needs libcrypto and python3)
+make example-check     # the example program accepts a generated token and rejects a tampered one
+```
+
+The tests need OpenSSL's libcrypto as the reference: on macOS `brew install openssl@3`, on Debian/Ubuntu
+`apt install libssl-dev`. `make test-vectors` adds the external vectors (it downloads them).
+
 ## Contents
 
 - [Using it](#using-it)
@@ -43,6 +81,7 @@ That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at bat
 - [Testing](#testing)
 - [Benchmarks](#benchmarks)
 - [Limits](#limits)
+- [Security](#security)
 - [Licence](#licence)
 
 ## Using it
@@ -338,7 +377,9 @@ JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in bu
 
 ## Benchmarks
 
-**Method.**
+**Method.** Labels like `exp121` name the run in cursed-http's
+[`synteq-experiments/`](https://github.com/public/cursed-http/tree/main/synteq-experiments) folder that produced a
+number, on rented 1 vCPU Xeon Platinum 8260 boxes (Ubuntu 24.04, kernel 6.8) matching the challenge's scored machine.
 - `bench/bench_jwt.c`, ns per token, best of several runs, hot cache.
 - Tokens are ~140-byte signing inputs: 3 inner SHA-256 blocks + 1 outer.
 - "Full verify" includes split, header, signature decode, HMAC, payload base64url, JSON and claims.
@@ -459,6 +500,17 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 - **x86-64 macOS and Windows** use the compiled scalar template for single tokens: the extracted file is ELF-only.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.
+
+## Security
+
+- **What's checked:** every signature is recomputed; the MAC is compared in constant time over all 32 bytes; `alg`
+  must equal the key's algorithm (so `alg=none` and algorithm confusion are rejected); `exp` is required. The exact
+  rules are under [Claim semantics](#claim-semantics).
+- **What isn't:** `aud`, `iss` and `kid`. If you need them, check them yourself on the decoded payload.
+- **The RS256/ES256/EdDSA code is not constant-time**, by design: it only handles public data (keys, signatures,
+  messages). RSA batch screening (`-DJWT_RSA_SCREEN`) accepts some mangled signature pairs that one-at-a-time
+  verification rejects; read [PK.md](PK.md#screening-what-it-does-and-doesnt-prove) before turning it on.
+- **No external review yet.** Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 

@@ -18,7 +18,7 @@
 #   make pk-test-ifma / pk-bench-ifma + Intel crypto_mb 8-way AVX-512 IFMA (Linux x86-64; IFMA CPU to exercise it)
 #   make mca          static estimates of every SHA-256 engine per CPU model (llvm-mca; + uiCA, scripts/mca/fetch-uica.sh)
 #   make mca-validate perf-measured cycles of the same engines on this machine (x86-64 Linux; scripts/mca/validate.sh)
-# Engine selection is compile-time, from ARCHFLAGS (see README.md).
+# Engines are picked at run time from the CPU; ARCHFLAGS only changes the baseline (see README.md, Building).
 CC ?= cc
 PYTHON ?= python3
 B := build
