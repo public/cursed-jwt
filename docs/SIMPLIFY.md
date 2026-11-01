@@ -66,8 +66,10 @@ Perf is per token on the Xeon, against `main` in the same run.
 | # | option | LOC | crypto risk (constant time, verification) | API | perf | status |
 |---|---|---|---|---|---|---|
 | 1 | **Drop the opt-in JSON paths** (`-DJWT_FAST_JSON` simdjson-style, `-DJWT_LANE_JSON` lane-parallel) | **−626** (−486 in `jwt.c`) | None. Both ran only after the MAC had already been checked in constant time, and both deferred to the strict parser on anything unusual. The strict parser and the shape matcher are unchanged. | Two compile flags gone; no symbols (all were `static`) | None in the default build: neither path was compiled into it | **PR, `simplify/json`** |
-| 2 | **Drop the 2×ymm engines; one plan-and-sort helper for every driver** | **−167** | None for the default engines: the removed functions were never dispatched. The MAC compare and the per-lane code are untouched. zmm keeps its driver, now specialised to zmm + 8-lane AVX-512VL. | Removes `jwt_hmac_avx2x2`, `jwt_hmac_avx512x2` (bench-only, unused by consumers) | Default path: the shared helper is `always_inline`, so codegen should match | **PR, `simplify/engines`** |
-| 3 | **Fold dead knobs; template the Makefile's PK rules** | **−46** | ES256: the point additions run one token at a time, the default already. The verification equations and the x-coordinate check are byte-for-byte the same. | Removes `jwt_hmac_sha2_4` (alias of `jwt_hmac_sha2`) and the `JWT_ES_ILV`, `JWT_SHA2_STREAMS` and `JWT_*_MIN_LANES` overrides. `make` target `test_pk_ifma` is now the unscreened build, and `test_pk_ifma_screen` the screened one | None expected | **PR, `simplify/knobs`** |
+| 2 | **Drop the 2×ymm engines** | **−163** | None for the default engines: the removed functions were never dispatched. The MAC compare and the per-lane code are untouched. zmm keeps its driver, now specialised to zmm + 8-lane AVX-512VL. | Removes `jwt_hmac_avx2x2`, `jwt_hmac_avx512x2` (bench-only, unused by consumers) | Parity (exp1363) | **PR, `simplify/engines`** |
+| 2b | One plan-and-sort helper for the three group drivers | ~−20 | None | None | **RS256 +2.0–2.9%** on the Xeon, from code layout alone: parity again with `-falign-functions=64` (exp1359, exp1363) | Dropped |
+| 3 | **Fold dead knobs; template the Makefile's PK rules** | **−39** | None: the x86-64 object code is byte-identical to main's (gcc 13.3 `-O3`) | Removes `jwt_hmac_sha2_4` (alias of `jwt_hmac_sha2`) and the `JWT_SHA2_STREAMS` and `JWT_*_MIN_LANES` overrides. `make` target `test_pk_ifma` is now the unscreened build, and `test_pk_ifma_screen` the screened one | None (identical code) | **PR, `simplify/knobs`** |
+| 3b | Remove `JWT_ES_ILV` (ES256 one token at a time, the default already) | −7 | None: same equations and x-coordinate check | One compile flag | ES256 batch 1 −1.2–1.3%, but **HS256 batch 1 +0.4–0.8%** (exp1359, exp1364), also layout | Dropped: a loss beyond noise |
 | 4 | Drop `-DJWT_CRYPTO_MB` (Intel crypto_mb IFMA path) | ~−130 est. (76 in `jwt_pk.inc`, the build script, Makefile, docs) | Removes code that has never run on IFMA hardware. The Xeon has no IFMA, so there is nothing to measure it against. | One compile flag | None on the Xeon (never taken) | Not prototyped: whether to keep it until a Zen 4/5 or Ice Lake+ box can measure it is the owner's call |
 | 5 | Move `scripts/mca` and `bench/licence_probe.c` to the lab repo | −375 est. | None | None | None | Not prototyped: they are the evidence behind the engine choices, and moving them is about repo scope, not simplicity |
 | 6 | Drop the zmm engine | ~−90 est. | None on Intel (never dispatched) | Removes `jwt_hmac_zmm` | Would lose the modelled ~2× on Zen 4/5 | Rejected for now: needs a Zen measurement first |
@@ -77,8 +79,13 @@ Perf is per token on the Xeon, against `main` in the same run.
 | 10 | Drop the NEON multi-buffer engine | ~−60 est. | None | Removes `jwt_hmac_neon`, `jwt_verify_batch_neon` (the submission names the latter) | None on SHA2-capable ARM | Rejected: it is the engine for ARMv8 cores without the crypto extension (e.g. Cortex-A72 in a Raspberry Pi 4), and the template makes it cheap |
 | 11 | "Merge the batch and single paths" | 0 | — | — | — | Already merged: batch 1 and leftover lanes go through the same drivers to `hmac1_scalar` (OpenSSL's asm on x86-64 Linux) |
 
-Options 1–3 together remove 839 lines (−9% of the non-vendored, non-doc code) and change no default code path except
-the ES256 loop (3) and the driver helper (2), which the Xeon run checks.
+Options 1–3 together remove 813 lines of non-vendored code (9,086 → 8,273, −9%). None of them changes a default code
+path: 1 removes code the default build never compiled, 2 removes engines dispatch never picks, and 3 leaves the
+x86-64 object code byte-identical.
+
+**What the Xeon taught:** at this size, gcc's code layout moves RS256 and HS256 batch 1 by 1–3% whenever the text in
+front of them shifts. Two harmless-looking changes (2b, 3b) failed parity for that reason alone. A change to the
+library is not "free" until it has run on the Xeon against `main` in the same run, with `main` twice as a control.
 
 ## Prototypes
 
@@ -89,4 +96,10 @@ Each is a draft PR from `main`, independent of the others. Tests run on each:
 - the HS256 suite with RFC 4231 / NIST CAVP / Wycheproof vectors on the Xeon, on the AVX-512VL and zmm engines, plus
   RS256/ES256/EdDSA vectors for option 3.
 
-Results and the Xeon timings are in each PR's description, under the experiment ids.
+Xeon experiments:
+- exp1359: the first A/B of all three branches against main;
+- exp1360: the test suites on AVX-512 hardware;
+- exp1363: the layout split of option 2;
+- exp1364: the recheck of option 3.
+
+Each PR's description has its numbers.
