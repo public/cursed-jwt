@@ -185,6 +185,80 @@ fn mask_ymm(live: impl Fn(usize) -> bool) -> __m256i {
     unsafe { _mm256_setr_epi32(m(0), m(1), m(2), m(3), m(4), m(5), m(6), m(7)) }
 }
 
+/// The AVX2 operations, for `Avx2` and for `Ymm512` (which differs only in its rounds).
+macro_rules! avx2_ops {
+    ($t:ident) => {
+        #[inline(always)]
+        fn splat(x: u32) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_set1_epi32(x as i32) })
+        }
+        #[inline(always)]
+        fn add(self, b: Self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_add_epi32(self.0, b.0) })
+        }
+        #[inline(always)]
+        fn shr<const R: i32, const RU: u32>(self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_srli_epi32::<R>(self.0) })
+        }
+        #[inline(always)]
+        fn ror<const R: i32, const L32: i32>(self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe {
+                _mm256_or_si256(
+                    _mm256_srli_epi32::<R>(self.0),
+                    _mm256_slli_epi32::<L32>(self.0),
+                )
+            })
+        }
+        #[inline(always)]
+        fn xor3(a: Self, b: Self, c: Self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_xor_si256(_mm256_xor_si256(a.0, b.0), c.0) })
+        }
+        #[inline(always)]
+        fn ch(e: Self, f: Self, g: Self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_xor_si256(g.0, _mm256_and_si256(e.0, _mm256_xor_si256(f.0, g.0))) })
+        }
+        #[inline(always)]
+        fn maj(a: Self, b: Self, c: Self) -> Self {
+            // b ^ ((a ^ b) & (b ^ c)): b ^ c is the previous round's a ^ b, which the unrolled compress reuses
+            // SAFETY: see the impl.
+            $t(unsafe {
+                _mm256_xor_si256(
+                    b.0,
+                    _mm256_and_si256(_mm256_xor_si256(a.0, b.0), _mm256_xor_si256(b.0, c.0)),
+                )
+            })
+        }
+        #[inline(always)]
+        fn sel(m: Self, x: Self, y: Self) -> Self {
+            // SAFETY: see the impl.
+            $t(unsafe { _mm256_blendv_epi8(y.0, x.0, m.0) })
+        }
+        #[inline(always)]
+        fn mask(live: impl Fn(usize) -> bool) -> Self {
+            $t(mask_ymm(live))
+        }
+        #[inline(always)]
+        fn load16<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [Self; 16] {
+            load16_ymm(block).map($t)
+        }
+        #[inline(always)]
+        fn store8(s: &[Self; 8], out: &mut [[u32; 8]; 8]) {
+            store8_ymm(
+                &[
+                    s[0].0, s[1].0, s[2].0, s[3].0, s[4].0, s[5].0, s[6].0, s[7].0,
+                ],
+                out,
+            )
+        }
+    };
+}
+
 /// AVX2, 8 lanes.  Only constructed inside `#[target_feature(enable = "avx2,...")]` engine functions, which run
 /// after the CPU check.
 #[derive(Clone, Copy)]
@@ -193,74 +267,42 @@ pub(crate) struct Avx2(__m256i);
 // SAFETY (every `unsafe` block in `impl Simd<8> for Avx2`): register-only AVX2 intrinsics; the type only exists
 // inside AVX2-enabled engine functions, which run after `CpuFeatures::AVX2` was checked.
 impl Simd<8> for Avx2 {
+    avx2_ops!(Avx2);
+}
+
+/// The default AVX-512 engine: its loads, transposes, stores and masks are the AVX2 engine's, compiled in an
+/// AVX2-only region, and only the 64 rounds (`compress_avx512`) run with AVX-512VL enabled, out of line with the
+/// state in memory, as the C code has them.  Two reasons:
+/// - inlined into the kernel, the eight entry-state values stay live through the rounds and push the 32
+///   registers into 41 spills (C: none): 18% slower than C on a Xeon Platinum 8260 (exp1387);
+/// - in an AVX-512 region the compiler lowers array copies and zeroing with zmm stores, and one zmm instruction
+///   drops a Cascade Lake core's frequency licence; an AVX2 region cannot contain any.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub(crate) struct Ymm512(__m256i);
+
+// SAFETY (every `unsafe` block in `impl Simd<8> for Ymm512`): as for `Avx2` (the type only exists inside the
+// AVX-512 engine's kernel, which runs after `CpuFeatures::AVX512VL`, implying AVX2, was checked).
+impl Simd<8> for Ymm512 {
     #[inline(always)]
-    fn splat(x: u32) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_set1_epi32(x as i32) })
+    fn compress(s: &mut [Self; 8], w: &mut [Self; 16]) {
+        // SAFETY: Ymm512 and Avx512 are both #[repr(transparent)] over __m256i, so the arrays have the same
+        // layout; and the type only exists inside the AVX-512 engine, which runs after `CpuFeatures::AVX512VL` was
+        // checked, so the CPU has every feature `compress_avx512` enables.
+        unsafe {
+            let s = &mut *(s as *mut [Self; 8]).cast::<[Avx512; 8]>();
+            let w = &mut *(w as *mut [Self; 16]).cast::<[Avx512; 16]>();
+            compress_avx512(s, w)
+        }
     }
-    #[inline(always)]
-    fn add(self, b: Self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_add_epi32(self.0, b.0) })
-    }
-    #[inline(always)]
-    fn shr<const R: i32, const RU: u32>(self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_srli_epi32::<R>(self.0) })
-    }
-    #[inline(always)]
-    fn ror<const R: i32, const L32: i32>(self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe {
-            _mm256_or_si256(
-                _mm256_srli_epi32::<R>(self.0),
-                _mm256_slli_epi32::<L32>(self.0),
-            )
-        })
-    }
-    #[inline(always)]
-    fn xor3(a: Self, b: Self, c: Self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_xor_si256(_mm256_xor_si256(a.0, b.0), c.0) })
-    }
-    #[inline(always)]
-    fn ch(e: Self, f: Self, g: Self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_xor_si256(g.0, _mm256_and_si256(e.0, _mm256_xor_si256(f.0, g.0))) })
-    }
-    #[inline(always)]
-    fn maj(a: Self, b: Self, c: Self) -> Self {
-        // b ^ ((a ^ b) & (b ^ c)): b ^ c is the previous round's a ^ b, which the unrolled compress reuses
-        // SAFETY: see the impl.
-        Avx2(unsafe {
-            _mm256_xor_si256(
-                b.0,
-                _mm256_and_si256(_mm256_xor_si256(a.0, b.0), _mm256_xor_si256(b.0, c.0)),
-            )
-        })
-    }
-    #[inline(always)]
-    fn sel(m: Self, x: Self, y: Self) -> Self {
-        // SAFETY: see the impl.
-        Avx2(unsafe { _mm256_blendv_epi8(y.0, x.0, m.0) })
-    }
-    #[inline(always)]
-    fn mask(live: impl Fn(usize) -> bool) -> Self {
-        Avx2(mask_ymm(live))
-    }
-    #[inline(always)]
-    fn load16<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [Self; 16] {
-        load16_ymm(block).map(Avx2)
-    }
-    #[inline(always)]
-    fn store8(s: &[Self; 8], out: &mut [[u32; 8]; 8]) {
-        store8_ymm(
-            &[
-                s[0].0, s[1].0, s[2].0, s[3].0, s[4].0, s[5].0, s[6].0, s[7].0,
-            ],
-            out,
-        )
-    }
+    avx2_ops!(Ymm512);
+}
+
+/// The 64 rounds of the default AVX-512 engine (see `Ymm512`), on the state and message words in place.
+#[target_feature(enable = "avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi1,bmi2")]
+#[inline(never)]
+fn compress_avx512(s: &mut [Avx512; 8], w: &mut [Avx512; 16]) {
+    sha256::compress::<Avx512, 8>(s, w)
 }
 
 /// vpternlogd truth tables (index = a << 2 | b << 1 | c).
@@ -271,6 +313,7 @@ const TL_MAJ: i32 = 0xE8;
 /// AVX-512VL on ymm, 8 lanes: the AVX2 engine with `vprord` rotates and `vpternlogd` for the three-input
 /// functions.  Only constructed inside AVX-512-enabled engine functions, which run after the CPU check.
 #[derive(Clone, Copy)]
+#[repr(transparent)]
 pub(crate) struct Avx512(__m256i);
 
 // SAFETY (every `unsafe` block in `impl Simd<8> for Avx512`): register-only AVX2 / AVX-512VL intrinsics; the type
@@ -520,13 +563,7 @@ macro_rules! kernel {
 
 kernel!(KAvx2, Avx2, 8, kernel_avx2, "avx2,bmi1,bmi2");
 kernel!(KAvx2x2, X2<Avx2>, 16, kernel_avx2x2, "avx2,bmi1,bmi2");
-kernel!(
-    KAvx512,
-    Avx512,
-    8,
-    kernel_avx512,
-    "avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi1,bmi2"
-);
+kernel!(KAvx512, Ymm512, 8, kernel_avx512, "avx2,bmi1,bmi2");
 kernel!(
     KAvx512x2,
     X2<Avx512>,

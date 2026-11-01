@@ -28,6 +28,11 @@ pub(crate) static ZERO_BLOCK: [u8; 64] = [0; 64];
 /// signed and unsigned: stable Rust has no const arithmetic or casts on generic parameters, and the intrinsics
 /// take their counts as const generics of either type.
 pub(crate) trait Simd<const L: usize>: Copy {
+    /// 64 rounds on `s` (the template's [`compress`], inline, unless an engine keeps it out of line).
+    #[inline(always)]
+    fn compress(s: &mut [Self; 8], w: &mut [Self; 16]) {
+        compress::<Self, L>(s, w)
+    }
     fn splat(x: u32) -> Self;
     fn add(self, b: Self) -> Self;
     fn shr<const R: i32, const RU: u32>(self) -> Self;
@@ -444,7 +449,7 @@ pub(crate) fn kernel<V: Simd<L>, const L: usize, const RAW: bool>(
     for b in 0..g.maxnb {
         let mut w = V::load16(|l| g.blk(l, b));
         let mut s = st;
-        compress::<V, L>(&mut s, &mut w);
+        V::compress(&mut s, &mut w);
         if g.ragged {
             let m = V::mask(|l| g.live(l, b));
             st = [
@@ -493,7 +498,7 @@ pub(crate) fn kernel<V: Simd<L>, const L: usize, const RAW: bool>(
             V::splat(oh[6]),
             V::splat(oh[7]),
         ];
-        compress::<V, L>(&mut st, &mut w);
+        V::compress(&mut st, &mut w);
     }
     V::store8(&st, mac);
 }
