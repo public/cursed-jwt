@@ -33,7 +33,7 @@ fn engines() -> Vec<Option<Engine>> {
 unsafe fn tokens<'a>(n: c_int, tok: *const *const c_char, len: *const c_int) -> Vec<&'a [u8]> {
     (0..n.max(0) as usize)
         .map(|i| unsafe {
-            std::slice::from_raw_parts(*tok.add(i) as *const u8, (*len.add(i)).max(0) as usize)
+            std::slice::from_raw_parts((*tok.add(i)).cast::<u8>(), (*len.add(i)).max(0) as usize)
         })
         .collect()
 }
@@ -42,7 +42,7 @@ unsafe fn write(out: *mut JwtResult, v: &[Verdict]) {
     for (i, r) in v.iter().enumerate() {
         let o = unsafe { &mut *out.add(i) };
         o.ubuf = [0; USERNAME_MAX + 1];
-        o.username = o.ubuf.as_ptr() as *const c_char;
+        o.username = o.ubuf.as_ptr().cast::<c_char>();
         (o.status, o.uid, o.username_len, o.username_escape) = match r {
             Ok(c) => {
                 let u = c.username_bytes();

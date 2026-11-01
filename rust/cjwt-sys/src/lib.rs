@@ -103,7 +103,7 @@ fn collect(out: &[jwt_result_t]) -> Vec<CResult> {
             uid: r.uid,
             username: r.ubuf[..r.username_len as usize]
                 .iter()
-                .map(|&c| c as u8)
+                .map(|&c| c.to_ne_bytes()[0])
                 .collect(),
             escape: r.username_escape != 0,
         })
@@ -126,7 +126,7 @@ fn blank(n: usize) -> Vec<jwt_result_t> {
 fn ptrs<T: AsRef<[u8]>>(toks: &[T]) -> (Vec<*const c_char>, Vec<c_int>) {
     (
         toks.iter()
-            .map(|t| t.as_ref().as_ptr() as *const c_char)
+            .map(|t| t.as_ref().as_ptr().cast::<c_char>())
             .collect(),
         toks.iter().map(|t| t.as_ref().len() as c_int).collect(),
     )
@@ -346,7 +346,7 @@ pub fn b64url_decode(src: &[u8]) -> Option<Vec<u8>> {
     let n = unsafe {
         jwt_b64url_decode(
             d.as_mut_ptr(),
-            src.as_ptr() as *const c_char,
+            src.as_ptr().cast::<c_char>(),
             src.len() as c_int,
         )
     };
