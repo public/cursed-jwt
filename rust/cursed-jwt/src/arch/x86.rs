@@ -1,0 +1,612 @@
+//! x86-64: AVX2 and AVX-512VL 8-lane multi-buffer SHA-256 (the same template; AVX-512VL adds `vprord` and
+//! `vpternlogd` on ymm registers), their 16-lane interleaved flavours, the 16-lane zmm engine, and the AVX2
+//! base64url decoder.  All of them are checked for at run time.
+//!
+//! The AVX-512 engines run on ymm registers by default: a zmm burst drops a Cascade Lake core's frequency
+//! licence for everything that follows (19% slower for 0.5-1 ms, measured on the C library).  The zmm engine is
+//! the default only where `CpuFeatures::FAST_ZMM` says 512-bit vectors cost no clock speed (AMD Zen 4/5).
+
+use core::arch::x86_64::*;
+
+use super::{CpuFeatures, Engine, Midstates};
+use crate::sha256::{self, drive, drive_x2, Group, Kernel, Plan, Simd, SHA_IV, X2};
+
+pub(crate) fn detect() -> u32 {
+    let mut f = 0;
+    macro_rules! has {
+        ($($t:tt),+) => {{
+            #[cfg(feature = "std")]
+            {
+                true $(&& std::is_x86_feature_detected!($t))+
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                true $(&& cfg!(target_feature = $t))+
+            }
+        }};
+    }
+    if has!("avx2", "bmi1", "bmi2") {
+        f |= CpuFeatures::AVX2;
+    }
+    if f & CpuFeatures::AVX2 != 0 && has!("avx512f", "avx512vl", "avx512bw", "avx512dq", "avx512cd")
+    {
+        f |= CpuFeatures::AVX512VL;
+        if has!("avx512ifma") {
+            f |= CpuFeatures::IFMA;
+        }
+        if amd_family_19h_or_later() {
+            f |= CpuFeatures::FAST_ZMM;
+        }
+    }
+    if has!("bmi2", "adx") {
+        f |= CpuFeatures::BMI2_ADX;
+    }
+    if has!("sha") {
+        f |= CpuFeatures::SHANI;
+    }
+    f
+}
+
+/// AMD Zen 4 (family 19h) and later run 512-bit integer work without a frequency-licence drop.
+fn amd_family_19h_or_later() -> bool {
+    let v = __cpuid(0);
+    let amd = v.ebx == 0x6874_7541 && v.edx == 0x6974_6e65 && v.ecx == 0x444d_4163; // "AuthenticAMD"
+    let a = __cpuid(1).eax;
+    let base = (a >> 8) & 0xF;
+    let fam = if base == 0xF {
+        base + ((a >> 20) & 0xFF)
+    } else {
+        base
+    };
+    amd && fam >= 0x19
+}
+
+pub(crate) fn available(e: Engine, f: CpuFeatures) -> bool {
+    match e {
+        Engine::Scalar => true,
+        Engine::Avx2 | Engine::Avx2x2 => f.has(CpuFeatures::AVX2),
+        Engine::Avx512 | Engine::Avx512x2 | Engine::Zmm => {
+            f.has(CpuFeatures::AVX2 | CpuFeatures::AVX512VL)
+        }
+        _ => false,
+    }
+}
+
+// ---- 8 x u32 in a ymm register ----
+
+#[inline(always)]
+fn bswap32() -> __m256i {
+    // SAFETY: register-only AVX constructor (AVX is implied by the AVX2 every caller of the engines has).
+    unsafe {
+        _mm256_setr_epi8(
+            3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10,
+            9, 8, 15, 14, 13, 12,
+        )
+    }
+}
+
+/// Transposes 8 rows of 8 words.
+#[inline(always)]
+fn tr8(r: &[__m256i; 8]) -> [__m256i; 8] {
+    // SAFETY: register-only AVX2 shuffles; only reached from AVX2-enabled engine functions.
+    unsafe {
+        let t0 = _mm256_unpacklo_epi32(r[0], r[1]);
+        let t1 = _mm256_unpackhi_epi32(r[0], r[1]);
+        let t2 = _mm256_unpacklo_epi32(r[2], r[3]);
+        let t3 = _mm256_unpackhi_epi32(r[2], r[3]);
+        let t4 = _mm256_unpacklo_epi32(r[4], r[5]);
+        let t5 = _mm256_unpackhi_epi32(r[4], r[5]);
+        let t6 = _mm256_unpacklo_epi32(r[6], r[7]);
+        let t7 = _mm256_unpackhi_epi32(r[6], r[7]);
+        let u0 = _mm256_unpacklo_epi64(t0, t2);
+        let u1 = _mm256_unpackhi_epi64(t0, t2);
+        let u2 = _mm256_unpacklo_epi64(t1, t3);
+        let u3 = _mm256_unpackhi_epi64(t1, t3);
+        let u4 = _mm256_unpacklo_epi64(t4, t6);
+        let u5 = _mm256_unpackhi_epi64(t4, t6);
+        let u6 = _mm256_unpacklo_epi64(t5, t7);
+        let u7 = _mm256_unpackhi_epi64(t5, t7);
+        [
+            _mm256_permute2x128_si256::<0x20>(u0, u4),
+            _mm256_permute2x128_si256::<0x20>(u1, u5),
+            _mm256_permute2x128_si256::<0x20>(u2, u6),
+            _mm256_permute2x128_si256::<0x20>(u3, u7),
+            _mm256_permute2x128_si256::<0x31>(u0, u4),
+            _mm256_permute2x128_si256::<0x31>(u1, u5),
+            _mm256_permute2x128_si256::<0x31>(u2, u6),
+            _mm256_permute2x128_si256::<0x31>(u3, u7),
+        ]
+    }
+}
+
+#[inline(always)]
+fn ld32(b: &[u8; 64], h: usize) -> __m256i {
+    let (c, _) = b.as_chunks::<32>();
+    // SAFETY: _mm256_loadu_si256 reads 32 bytes, exactly the referenced [u8; 32]; unaligned loads are allowed.
+    unsafe { _mm256_loadu_si256(c[h & 1].as_ptr().cast()) }
+}
+
+#[inline(always)]
+fn load16_ymm<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [__m256i; 16] {
+    let bs = bswap32();
+    let blocks = [
+        block(0),
+        block(1),
+        block(2),
+        block(3),
+        block(4),
+        block(5),
+        block(6),
+        block(7),
+    ];
+    // SAFETY: register-only AVX2 byte shuffle; only reached from AVX2-enabled engine functions.
+    let row = |l: usize, h: usize| unsafe { _mm256_shuffle_epi8(ld32(blocks[l], h), bs) };
+    let a = tr8(&[
+        row(0, 0),
+        row(1, 0),
+        row(2, 0),
+        row(3, 0),
+        row(4, 0),
+        row(5, 0),
+        row(6, 0),
+        row(7, 0),
+    ]);
+    let b = tr8(&[
+        row(0, 1),
+        row(1, 1),
+        row(2, 1),
+        row(3, 1),
+        row(4, 1),
+        row(5, 1),
+        row(6, 1),
+        row(7, 1),
+    ]);
+    [
+        a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5], b[6],
+        b[7],
+    ]
+}
+
+#[inline(always)]
+fn store8_ymm(s: &[__m256i; 8], out: &mut [[u32; 8]; 8]) {
+    let o = tr8(s);
+    for (d, v) in out.iter_mut().zip(o) {
+        // SAFETY: _mm256_storeu_si256 writes 32 bytes, exactly the referenced [u32; 8].
+        unsafe { _mm256_storeu_si256(d.as_mut_ptr().cast(), v) };
+    }
+}
+
+#[inline(always)]
+fn mask_ymm(live: impl Fn(usize) -> bool) -> __m256i {
+    let m = |l: usize| if live(l) { -1 } else { 0 };
+    // SAFETY: register-only AVX constructor.
+    unsafe { _mm256_setr_epi32(m(0), m(1), m(2), m(3), m(4), m(5), m(6), m(7)) }
+}
+
+/// AVX2, 8 lanes.  Only constructed inside `#[target_feature(enable = "avx2,...")]` engine functions, which run
+/// after the CPU check.
+#[derive(Clone, Copy)]
+pub(crate) struct Avx2(__m256i);
+
+// SAFETY (every `unsafe` block in `impl Simd<8> for Avx2`): register-only AVX2 intrinsics; the type only exists
+// inside AVX2-enabled engine functions, which run after `CpuFeatures::AVX2` was checked.
+impl Simd<8> for Avx2 {
+    #[inline(always)]
+    fn splat(x: u32) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_set1_epi32(x as i32) })
+    }
+    #[inline(always)]
+    fn add(self, b: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_add_epi32(self.0, b.0) })
+    }
+    #[inline(always)]
+    fn shr<const R: i32, const RU: u32>(self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_srli_epi32::<R>(self.0) })
+    }
+    #[inline(always)]
+    fn ror<const R: i32, const L32: i32>(self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe {
+            _mm256_or_si256(
+                _mm256_srli_epi32::<R>(self.0),
+                _mm256_slli_epi32::<L32>(self.0),
+            )
+        })
+    }
+    #[inline(always)]
+    fn xor3(a: Self, b: Self, c: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_xor_si256(_mm256_xor_si256(a.0, b.0), c.0) })
+    }
+    #[inline(always)]
+    fn ch(e: Self, f: Self, g: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_xor_si256(g.0, _mm256_and_si256(e.0, _mm256_xor_si256(f.0, g.0))) })
+    }
+    #[inline(always)]
+    fn maj(a: Self, b: Self, c: Self) -> Self {
+        // b ^ ((a ^ b) & (b ^ c)): b ^ c is the previous round's a ^ b, which the unrolled compress reuses
+        // SAFETY: see the impl.
+        Avx2(unsafe {
+            _mm256_xor_si256(
+                b.0,
+                _mm256_and_si256(_mm256_xor_si256(a.0, b.0), _mm256_xor_si256(b.0, c.0)),
+            )
+        })
+    }
+    #[inline(always)]
+    fn sel(m: Self, x: Self, y: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx2(unsafe { _mm256_blendv_epi8(y.0, x.0, m.0) })
+    }
+    #[inline(always)]
+    fn mask(live: impl Fn(usize) -> bool) -> Self {
+        Avx2(mask_ymm(live))
+    }
+    #[inline(always)]
+    fn load16<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [Self; 16] {
+        load16_ymm(block).map(Avx2)
+    }
+    #[inline(always)]
+    fn store8(s: &[Self; 8], out: &mut [[u32; 8]; 8]) {
+        store8_ymm(
+            &[
+                s[0].0, s[1].0, s[2].0, s[3].0, s[4].0, s[5].0, s[6].0, s[7].0,
+            ],
+            out,
+        )
+    }
+}
+
+/// vpternlogd truth tables (index = a << 2 | b << 1 | c).
+const TL_XOR3: i32 = 0x96;
+const TL_CH: i32 = 0xCA;
+const TL_MAJ: i32 = 0xE8;
+
+/// AVX-512VL on ymm, 8 lanes: the AVX2 engine with `vprord` rotates and `vpternlogd` for the three-input
+/// functions.  Only constructed inside AVX-512-enabled engine functions, which run after the CPU check.
+#[derive(Clone, Copy)]
+pub(crate) struct Avx512(__m256i);
+
+// SAFETY (every `unsafe` block in `impl Simd<8> for Avx512`): register-only AVX2 / AVX-512VL intrinsics; the type
+// only exists inside AVX-512-enabled engine functions, which run after `CpuFeatures::AVX512VL` was checked.
+impl Simd<8> for Avx512 {
+    #[inline(always)]
+    fn splat(x: u32) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_set1_epi32(x as i32) })
+    }
+    #[inline(always)]
+    fn add(self, b: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_add_epi32(self.0, b.0) })
+    }
+    #[inline(always)]
+    fn shr<const R: i32, const RU: u32>(self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_srli_epi32::<R>(self.0) })
+    }
+    #[inline(always)]
+    fn ror<const R: i32, const L32: i32>(self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_ror_epi32::<R>(self.0) })
+    }
+    #[inline(always)]
+    fn xor3(a: Self, b: Self, c: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_ternarylogic_epi32::<TL_XOR3>(a.0, b.0, c.0) })
+    }
+    #[inline(always)]
+    fn ch(e: Self, f: Self, g: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_ternarylogic_epi32::<TL_CH>(e.0, f.0, g.0) })
+    }
+    #[inline(always)]
+    fn maj(a: Self, b: Self, c: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_ternarylogic_epi32::<TL_MAJ>(a.0, b.0, c.0) })
+    }
+    #[inline(always)]
+    fn sel(m: Self, x: Self, y: Self) -> Self {
+        // SAFETY: see the impl.
+        Avx512(unsafe { _mm256_ternarylogic_epi32::<TL_CH>(m.0, x.0, y.0) })
+    }
+    #[inline(always)]
+    fn mask(live: impl Fn(usize) -> bool) -> Self {
+        Avx512(mask_ymm(live))
+    }
+    #[inline(always)]
+    fn load16<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [Self; 16] {
+        load16_ymm(block).map(Avx512)
+    }
+    #[inline(always)]
+    fn store8(s: &[Self; 8], out: &mut [[u32; 8]; 8]) {
+        store8_ymm(
+            &[
+                s[0].0, s[1].0, s[2].0, s[3].0, s[4].0, s[5].0, s[6].0, s[7].0,
+            ],
+            out,
+        )
+    }
+}
+
+/// 16 lanes in zmm registers (loads and stores reuse the ymm 8 x 8 transposes and glue the halves).
+#[derive(Clone, Copy)]
+pub(crate) struct Zmm(__m512i);
+
+// SAFETY (every `unsafe` block in `impl Simd<16> for Zmm`): register-only AVX-512F intrinsics, and
+// `_mm512_loadu_si512` of a `&[u32; 16]` (64 bytes, the whole array); the type only exists inside the
+// AVX-512-enabled zmm engine function, which runs after `CpuFeatures::AVX512VL` was checked.
+impl Simd<16> for Zmm {
+    #[inline(always)]
+    fn splat(x: u32) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_set1_epi32(x as i32) })
+    }
+    #[inline(always)]
+    fn add(self, b: Self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_add_epi32(self.0, b.0) })
+    }
+    #[inline(always)]
+    fn shr<const R: i32, const RU: u32>(self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_srli_epi32::<RU>(self.0) })
+    }
+    #[inline(always)]
+    fn ror<const R: i32, const L32: i32>(self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_ror_epi32::<R>(self.0) })
+    }
+    #[inline(always)]
+    fn xor3(a: Self, b: Self, c: Self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_ternarylogic_epi32::<TL_XOR3>(a.0, b.0, c.0) })
+    }
+    #[inline(always)]
+    fn ch(e: Self, f: Self, g: Self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_ternarylogic_epi32::<TL_CH>(e.0, f.0, g.0) })
+    }
+    #[inline(always)]
+    fn maj(a: Self, b: Self, c: Self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_ternarylogic_epi32::<TL_MAJ>(a.0, b.0, c.0) })
+    }
+    #[inline(always)]
+    fn sel(m: Self, x: Self, y: Self) -> Self {
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_ternarylogic_epi32::<TL_CH>(m.0, x.0, y.0) })
+    }
+    #[inline(always)]
+    fn mask(live: impl Fn(usize) -> bool) -> Self {
+        let m: [u32; 16] = core::array::from_fn(|l| if live(l) { !0 } else { 0 });
+        // SAFETY: see the impl.
+        Zmm(unsafe { _mm512_loadu_si512(m.as_ptr().cast()) })
+    }
+    #[inline(always)]
+    fn load16<'b>(block: impl Fn(usize) -> &'b [u8; 64]) -> [Self; 16] {
+        let (lo, hi) = (load16_ymm(&block), load16_ymm(|l| block(l + 8)));
+        core::array::from_fn(|i| {
+            // SAFETY: see the impl.
+            Zmm(unsafe { _mm512_inserti64x4::<1>(_mm512_castsi256_si512(lo[i]), hi[i]) })
+        })
+    }
+    #[inline(always)]
+    fn store8(s: &[Self; 8], out: &mut [[u32; 8]; 16]) {
+        let (c, _) = out.as_chunks_mut::<8>();
+        let (a, b) = c.split_at_mut(1);
+        // SAFETY: see the impl.
+        let lo = s.map(|v| unsafe { _mm512_castsi512_si256(v.0) });
+        // SAFETY: see the impl.
+        let hi = s.map(|v| unsafe { _mm512_extracti64x4_epi64::<1>(v.0) });
+        store8_ymm(&lo, &mut a[0]);
+        store8_ymm(&hi, &mut b[0]);
+    }
+}
+
+/// Fewest live messages for an 8-lane group; one message alone runs through the scalar template, compiled with
+/// BMI2 here so that its rotates are `rorx`.
+const MIN_LANES: usize = 2;
+
+/// Engine tokens: zero-sized, constructed only in `hmac` / `sha256` below, after `available` checked the CPU
+/// features the engine's functions enable.
+#[derive(Clone, Copy)]
+struct KAvx2(());
+#[derive(Clone, Copy)]
+struct KAvx2x2(());
+#[derive(Clone, Copy)]
+struct KAvx512(());
+#[derive(Clone, Copy)]
+struct KAvx512x2(());
+#[derive(Clone, Copy)]
+struct KZmm(());
+
+#[target_feature(enable = "bmi1,bmi2")]
+fn one_bmi2<const RAW: bool>(k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
+    sha256::one::<RAW>(k, p)
+}
+
+macro_rules! kernel {
+    ($tok:ident, $v:ty, $l:literal, $fname:ident, $feat:literal) => {
+        #[target_feature(enable = $feat)]
+        fn $fname<const RAW: bool>(k: &Midstates, g: &Group<'_, '_, $l>, mac: &mut [[u32; 8]; $l]) {
+            sha256::kernel::<$v, $l, RAW>(k, g, mac)
+        }
+        impl Kernel<$l> for $tok {
+            #[inline(always)]
+            fn lanes<const RAW: bool>(
+                self,
+                k: &Midstates,
+                g: &Group<'_, '_, $l>,
+                mac: &mut [[u32; 8]; $l],
+            ) {
+                // SAFETY: a token exists only after the CPU check for these features (see the token types).
+                unsafe { $fname::<RAW>(k, g, mac) }
+            }
+            #[inline(always)]
+            fn one<const RAW: bool>(self, k: &Midstates, p: &Plan<'_>) -> [u32; 8] {
+                // SAFETY: every x86 engine requires BMI1 and BMI2 (see `available`), checked before the token
+                // was made.
+                unsafe { one_bmi2::<RAW>(k, p) }
+            }
+        }
+    };
+}
+
+kernel!(KAvx2, Avx2, 8, kernel_avx2, "avx2,bmi1,bmi2");
+kernel!(KAvx2x2, X2<Avx2>, 16, kernel_avx2x2, "avx2,bmi1,bmi2");
+kernel!(
+    KAvx512,
+    Avx512,
+    8,
+    kernel_avx512,
+    "avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi1,bmi2"
+);
+kernel!(
+    KAvx512x2,
+    X2<Avx512>,
+    16,
+    kernel_avx512x2,
+    "avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi1,bmi2"
+);
+kernel!(
+    KZmm,
+    Zmm,
+    16,
+    kernel_zmm,
+    "avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi1,bmi2"
+);
+
+pub(crate) fn hmac(e: Engine, k: &Midstates, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
+    let f = CpuFeatures::get();
+    if !available(e, f) {
+        return false;
+    }
+    // `available` checked the CPU features each engine's functions enable (AVX2 + BMI1/2, plus AVX-512
+    // F/VL/BW/DQ/CD for the AVX-512 ones), so the tokens may be made
+    match e {
+        Engine::Avx2 => drive::<KAvx2, 8, false, MIN_LANES>(KAvx2(()), k, msgs, out),
+        Engine::Avx2x2 => {
+            drive_x2::<KAvx2x2, KAvx2, MIN_LANES>(KAvx2x2(()), KAvx2(()), k, msgs, out)
+        }
+        Engine::Avx512 => drive::<KAvx512, 8, false, MIN_LANES>(KAvx512(()), k, msgs, out),
+        Engine::Avx512x2 => {
+            drive_x2::<KAvx512x2, KAvx512, MIN_LANES>(KAvx512x2(()), KAvx512(()), k, msgs, out)
+        }
+        Engine::Zmm => drive_x2::<KZmm, KAvx512, MIN_LANES>(KZmm(()), KAvx512(()), k, msgs, out),
+        _ => return false,
+    }
+    true
+}
+
+pub(crate) fn sha256(e: Engine, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
+    let f = CpuFeatures::get();
+    if !available(e, f) {
+        return false;
+    }
+    // as in `hmac`
+    match e {
+        Engine::Avx2 | Engine::Avx2x2 => {
+            drive::<KAvx2, 8, true, MIN_LANES>(KAvx2(()), &SHA_IV, msgs, out)
+        }
+        Engine::Avx512 | Engine::Avx512x2 | Engine::Zmm => {
+            drive::<KAvx512, 8, true, MIN_LANES>(KAvx512(()), &SHA_IV, msgs, out)
+        }
+        _ => return false,
+    }
+    true
+}
+
+// ---- base64url: 32 chars -> 24 bytes per step (Mula/Lemire packing; base64url via range compares) ----
+
+#[inline(always)]
+fn b64_32(src: &[u8; 32], dst: &mut [u8; 24]) -> __m256i {
+    // SAFETY: _mm256_loadu_si256 reads 32 bytes (`src`), _mm256_storeu_si256 writes 32 bytes into the local
+    // `t`; the rest are register-only AVX2 intrinsics, and this is only reached from the AVX2-enabled decoder.
+    unsafe {
+        let v = _mm256_loadu_si256(src.as_ptr().cast());
+        let rng = |lo: u8, hi: u8| {
+            _mm256_and_si256(
+                _mm256_cmpgt_epi8(v, _mm256_set1_epi8(lo as i8 - 1)),
+                _mm256_cmpgt_epi8(_mm256_set1_epi8(hi as i8 + 1), v),
+            )
+        };
+        let (up, lw, dg) = (rng(b'A', b'Z'), rng(b'a', b'z'), rng(b'0', b'9'));
+        let da = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'-' as i8));
+        let us = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'_' as i8));
+        let off = _mm256_or_si256(
+            _mm256_or_si256(
+                _mm256_and_si256(up, _mm256_set1_epi8(-65)),
+                _mm256_and_si256(lw, _mm256_set1_epi8(-71)),
+            ),
+            _mm256_or_si256(
+                _mm256_and_si256(dg, _mm256_set1_epi8(4)),
+                _mm256_or_si256(
+                    _mm256_and_si256(da, _mm256_set1_epi8(17)),
+                    _mm256_and_si256(us, _mm256_set1_epi8(-32)),
+                ),
+            ),
+        );
+        let ok = _mm256_or_si256(
+            _mm256_or_si256(up, lw),
+            _mm256_or_si256(dg, _mm256_or_si256(da, us)),
+        );
+        let mut x = _mm256_add_epi8(v, off);
+        x = _mm256_maddubs_epi16(x, _mm256_set1_epi32(0x0140_0140));
+        x = _mm256_madd_epi16(x, _mm256_set1_epi32(0x0001_1000));
+        x = _mm256_shuffle_epi8(
+            x,
+            _mm256_setr_epi8(
+                2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1, 2, 1, 0, 6, 5, 4, 10, 9, 8,
+                14, 13, 12, -1, -1, -1, -1,
+            ),
+        );
+        x = _mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 7, 7));
+        let mut t = [0u8; 32];
+        _mm256_storeu_si256(t.as_mut_ptr().cast(), x);
+        dst.copy_from_slice(&t[..24]);
+        _mm256_xor_si256(ok, _mm256_set1_epi8(-1)) // 0xFF where invalid
+    }
+}
+
+#[target_feature(enable = "avx2")]
+fn b64_avx2(dst: &mut [u8], src: &[u8]) -> Option<usize> {
+    if dst.len() < crate::b64::decoded_cap(src.len()) {
+        return None;
+    }
+    let (blocks, rest) = src.as_chunks::<32>();
+    let (out, _) = dst.as_chunks_mut::<24>();
+    let mut bad = _mm256_setzero_si256();
+    for (b, o) in blocks.iter().zip(out.iter_mut()) {
+        bad = _mm256_or_si256(bad, b64_32(b, o));
+    }
+    let mut o = blocks.len() * 24;
+    let q = rest.len() & !3;
+    if q != 0 {
+        // whole quanta of the tail: one more step over an 'A'-padded copy
+        let mut buf = [b'A'; 32];
+        buf[..q].copy_from_slice(&rest[..q]);
+        let mut t = [0u8; 24];
+        bad = _mm256_or_si256(bad, b64_32(&buf, &mut t));
+        dst.get_mut(o..o + q / 4 * 3)?
+            .copy_from_slice(&t[..q / 4 * 3]);
+        o += q / 4 * 3;
+    }
+    if _mm256_testz_si256(bad, bad) == 0 {
+        return None;
+    }
+    let t = crate::b64::tail(dst.get_mut(o..)?, &rest[q..])?;
+    Some(o + t)
+}
+
+pub(crate) fn b64_decode(dst: &mut [u8], src: &[u8]) -> Option<Option<usize>> {
+    if !CpuFeatures::get().has(CpuFeatures::AVX2) {
+        return None;
+    }
+    // SAFETY: the CPU has AVX2 (checked just above).
+    Some(unsafe { b64_avx2(dst, src) })
+}

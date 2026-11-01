@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["cursed-jwt", "cjwt-sys"]
+# fuzz/ is a cargo-fuzz project (nightly, libFuzzer); it has its own workspace
+exclude = ["fuzz"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/public/cursed-jwt"
+authors = ["Alex Stapleton <alexs@prol.etari.at>"]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.bench]
+codegen-units = 1
+lto = "thin"
+debug = 1
