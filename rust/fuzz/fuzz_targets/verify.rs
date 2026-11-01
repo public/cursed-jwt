@@ -13,7 +13,9 @@ fn b64u(b: &[u8]) -> Vec<u8> {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut s = Vec::new();
     for c in b.chunks(3) {
-        let v = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let v = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..c.len() + 1 {
             s.push(A[(v >> (18 - 6 * i) & 63) as usize]);
         }
@@ -34,14 +36,21 @@ fn resign(t: &[u8]) -> Vec<u8> {
 
 fn flat(v: &Verdict) -> (u8, i64, Vec<u8>, bool) {
     match v {
-        Ok(c) => (0, c.uid(), c.username_bytes().to_vec(), c.username_needs_escape()),
+        Ok(c) => (
+            0,
+            c.uid(),
+            c.username_bytes().to_vec(),
+            c.username_needs_escape(),
+        ),
         Err(Error::Invalid) => (1, 0, vec![], false),
         Err(Error::BadPayload) => (2, 0, vec![], false),
     }
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&cfg, rest)) = data.split_first() else { return };
+    let Some((&cfg, rest)) = data.split_first() else {
+        return;
+    };
     let now = [1_800_000_000i64, 0, -1, i64::MAX][(cfg >> 1 & 3) as usize];
     let toks: Vec<Vec<u8>> = rest
         .split(|&b| b == b'\n')
@@ -52,7 +61,13 @@ fuzz_target!(|data: &[u8]| {
     let want: Vec<_> = ck
         .verify_batch(&toks, now)
         .iter()
-        .map(|r| if r.status == 0 { (0, r.uid, r.username.clone(), r.escape) } else { (r.status, 0, vec![], false) })
+        .map(|r| {
+            if r.status == 0 {
+                (0, r.uid, r.username.clone(), r.escape)
+            } else {
+                (r.status, 0, vec![], false)
+            }
+        })
         .collect();
     let k = Hs256Key::new(SECRET);
     for e in Engine::ALL.into_iter().filter(|e| e.is_available()) {

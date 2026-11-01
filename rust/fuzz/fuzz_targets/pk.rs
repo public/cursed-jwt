@@ -12,7 +12,9 @@ fn b64u(b: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut s = String::new();
     for c in b.chunks(3) {
-        let v = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let v = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..c.len() + 1 {
             s.push(A[(v >> (18 - 6 * i) & 63) as usize] as char);
         }
@@ -33,7 +35,10 @@ fn algs() -> &'static [Alg; 3] {
         use p256::ecdsa::signature::Signer as _;
         let es = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
         let pt = es.verifying_key().to_encoded_point(false);
-        let (x, y): ([u8; 32], [u8; 32]) = (pt.x().unwrap()[..].try_into().unwrap(), pt.y().unwrap()[..].try_into().unwrap());
+        let (x, y): ([u8; 32], [u8; 32]) = (
+            pt.x().unwrap()[..].try_into().unwrap(),
+            pt.y().unwrap()[..].try_into().unwrap(),
+        );
         let esk = Es256Key::new(&x, &y).unwrap();
         let ed = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
         let edk = Ed25519Key::new(&ed.verifying_key().to_bytes()).unwrap();
@@ -86,7 +91,9 @@ fn flat(v: &Verdict) -> (u8, i64, Vec<u8>) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&cfg, rest)) = data.split_first() else { return };
+    let Some((&cfg, rest)) = data.split_first() else {
+        return;
+    };
     let a = &algs()[(cfg % 3) as usize];
     let pl = br#"{"sub":"42","username":"fuzz","iat":1792832174,"exp":2108192174}"#;
     let msg = format!("{}.{}", a.head, b64u(pl));
@@ -95,13 +102,18 @@ fuzz_target!(|data: &[u8]| {
     let tok = match cfg / 3 % 3 {
         0 => {
             // damage the signature bytes; ES256 / EdDSA: optionally set r, s or S to a boundary value first
-            let n: &[u8] = &[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xbc,
-                0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51];
+            let n: &[u8] = &[
+                0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+                0x25, 0x51,
+            ];
             if cfg % 3 == 0 && cfg & 0x80 != 0 {
                 let half = if cfg & 0x40 != 0 { 32 } else { 0 };
                 sig[half..half + 32].copy_from_slice(n);
                 let last = half + 31;
-                sig[last] = sig[last].wrapping_add(rest.first().copied().unwrap_or(0) % 3).wrapping_sub(1);
+                sig[last] = sig[last]
+                    .wrapping_add(rest.first().copied().unwrap_or(0) % 3)
+                    .wrapping_sub(1);
             }
             for (i, &b) in rest.iter().enumerate().skip(1).take(16) {
                 let at = (b as usize * 31 + i) % sig.len();
@@ -130,7 +142,11 @@ fuzz_target!(|data: &[u8]| {
     (a.rust)(&batch, now, &mut out);
     let c = a.c.verify_batch(&batch, now);
     for (o, c) in out.iter().zip(&c) {
-        let cw = if c.status == 0 { (0, c.uid, c.username.clone()) } else { (c.status, 0, vec![]) };
+        let cw = if c.status == 0 {
+            (0, c.uid, c.username.clone())
+        } else {
+            (c.status, 0, vec![])
+        };
         assert_eq!(flat(o), cw);
     }
     assert!(out[0].is_ok() && out[2].is_ok());

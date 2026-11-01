@@ -306,7 +306,6 @@ dependencies = [
  "proptest",
  "serde_json",
  "sha2",
- "subtle",
 ]
 
 [[package]]

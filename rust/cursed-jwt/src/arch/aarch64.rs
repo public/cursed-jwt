@@ -198,8 +198,11 @@ fn k4(r: usize) -> uint32x4_t {
 
 /// 64 rounds on S streams; m[s] holds stream s's 16 message words.  The 16 quad-rounds are unrolled by a
 /// macro (as the C code's `#pragma unroll(full)`), so the message words stay in registers.
-#[inline]
-#[target_feature(enable = "sha2")]
+///
+/// `#[inline(always)]` without a target feature (the two cannot be combined), so it inlines into the
+/// sha2-enabled `ce_lanes`, its only caller: as a separate function the 4-stream state went through memory on
+/// every block (7-10% slower than the C code).
+#[inline(always)]
 fn ce_compress<const S: usize>(
     st0: &mut [uint32x4_t; S],
     st1: &mut [uint32x4_t; S],
@@ -210,16 +213,20 @@ fn ce_compress<const S: usize>(
         ($r:expr, $sched:expr) => {{
             let kr = k4($r);
             for s in 0..S {
-                let wk = vaddq_u32(m[s][$r & 3], kr);
-                let t = st0[s];
-                st0[s] = vsha256hq_u32(st0[s], st1[s], wk);
-                st1[s] = vsha256h2q_u32(st1[s], t, wk);
-                if $sched {
-                    m[s][$r & 3] = vsha256su1q_u32(
-                        vsha256su0q_u32(m[s][$r & 3], m[s][($r + 1) & 3]),
-                        m[s][($r + 2) & 3],
-                        m[s][($r + 3) & 3],
-                    );
+                // SAFETY: register-only SHA2 / NEON intrinsics; only called from `ce_lanes`, which enables sha2
+                // and runs after the CPU check.
+                unsafe {
+                    let wk = vaddq_u32(m[s][$r & 3], kr);
+                    let t = st0[s];
+                    st0[s] = vsha256hq_u32(st0[s], st1[s], wk);
+                    st1[s] = vsha256h2q_u32(st1[s], t, wk);
+                    if $sched {
+                        m[s][$r & 3] = vsha256su1q_u32(
+                            vsha256su0q_u32(m[s][$r & 3], m[s][($r + 1) & 3]),
+                            m[s][($r + 2) & 3],
+                            m[s][($r + 3) & 3],
+                        );
+                    }
                 }
             }
         }};
@@ -241,8 +248,11 @@ fn ce_compress<const S: usize>(
     quad!(14, false);
     quad!(15, false);
     for s in 0..S {
-        st0[s] = vaddq_u32(st0[s], a0[s]);
-        st1[s] = vaddq_u32(st1[s], a1[s]);
+        // SAFETY: register-only NEON adds.
+        unsafe {
+            st0[s] = vaddq_u32(st0[s], a0[s]);
+            st1[s] = vaddq_u32(st1[s], a1[s]);
+        }
     }
 }
 
@@ -447,10 +457,9 @@ pub(crate) fn b64_decode(dst: &mut [u8], src: &[u8]) -> Option<Option<usize>> {
     let mut err = unsafe { vdupq_n_u8(0) };
     let (blocks, rest) = src.as_chunks::<64>();
     let mut o = 0;
-    for b in blocks {
-        let mut tmp = [0u8; 48];
-        let e = b64_64(b, &mut tmp, lo, hi);
-        dst[o..o + 48].copy_from_slice(&tmp);
+    let (out, _) = dst.as_chunks_mut::<48>();
+    for (b, d) in blocks.iter().zip(out.iter_mut()) {
+        let e = b64_64(b, d, lo, hi);
         // SAFETY: register-only NEON.
         err = unsafe { vorrq_u8(err, e) };
         o += 48;

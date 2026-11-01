@@ -2,8 +2,6 @@
 //! constant-time tag compare, then payload base64url, JSON and claims for the tokens whose tag matched.
 #![forbid(unsafe_code)]
 
-use subtle::ConstantTimeEq;
-
 use crate::engine::{b64_decode, Engine};
 use crate::json::{self, Now};
 use crate::sha256::{Midstates, CH};
@@ -155,6 +153,14 @@ pub(crate) fn claims_one(p64: &[u8], now: &Now, sc: &mut Scratch, r: &mut Verdic
     }
 }
 
+/// Constant-time tag comparison over all 32 bytes, as the C code does it: one OR of the word differences, kept
+/// opaque to the optimiser so it cannot become an early-exit compare.
+#[inline(always)]
+fn tag_eq(a: &[u32; 8], b: &[u32; 8]) -> bool {
+    let d = a.iter().zip(b).fold(0u32, |d, (x, y)| d | (x ^ y));
+    core::hint::black_box(d) == 0
+}
+
 /// Big-endian words of a 32-byte tag.
 #[inline(always)]
 pub(crate) fn be_words(b: &[u8; 32]) -> [u32; 8] {
@@ -227,7 +233,7 @@ fn verify_ch<T: AsRef<[u8]>, const C: usize>(
                 continue;
             };
             // constant time over all 32 bytes
-            if !bool::from(mac[j][..].ct_eq(&want[j][..])) {
+            if !tag_eq(&mac[j], &want[j]) {
                 *r = Err(Error::Invalid);
                 continue;
             }
