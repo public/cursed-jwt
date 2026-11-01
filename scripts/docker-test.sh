@@ -5,8 +5,10 @@
 # On amd64 the avx512 target only compiles (and counts AVX-512 instructions); run it on AVX-512 hardware.
 set -e
 cd "$(dirname "$0")/.."
-ARCH=${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}; [ $# -gt 0 ] && shift
-DEF="test-quick test-vectors asan compare"; [ "$ARCH" = amd64 ] && DEF="$DEF avx512"
+ARCH=${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}
+[ $# -gt 0 ] && shift
+DEF="test-quick test-vectors asan compare"
+[ "$ARCH" = amd64 ] && DEF="$DEF avx512"
 TARGETS=${*:-$DEF}
 IMG=cursed-jwt-test:$ARCH
 docker build -q --platform linux/$ARCH -t $IMG ci >/dev/null

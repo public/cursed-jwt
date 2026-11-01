@@ -9,11 +9,18 @@ cd "$(dirname "$0")/.."
 D=third_party/s2n-bignum
 C=330672965f9ee29eaa27df14c484806d7b8ef0bc
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-get() {   # path-in-repo sha256  (kept at the same relative path under $D)
-  f="${D:?}/${1:?}"; mkdir -p "$(dirname "$f")"
+get() { # path-in-repo sha256  (kept at the same relative path under $D)
+  f="${D:?}/${1:?}"
+  mkdir -p "$(dirname "$f")"
   if [ -f "$f" ] && [ "$(sha "$f")" = "$2" ]; then return; fi
-  echo "$1: fetching s2n-bignum $C"; curl -fsSL "https://raw.githubusercontent.com/awslabs/s2n-bignum/$C/$1" -o "$f.tmp"
-  got=$(sha "$f.tmp"); [ "$got" = "$2" ] || { echo "$1: SHA-256 mismatch (got $got, want $2)" >&2; rm -f "${f:?}.tmp"; exit 1; }
+  echo "$1: fetching s2n-bignum $C"
+  curl -fsSL "https://raw.githubusercontent.com/awslabs/s2n-bignum/$C/$1" -o "$f.tmp"
+  got=$(sha "$f.tmp")
+  [ "$got" = "$2" ] || {
+    echo "$1: SHA-256 mismatch (got $got, want $2)" >&2
+    rm -f "${f:?}.tmp"
+    exit 1
+  }
   mv "$f.tmp" "$f"
 }
 get LICENSE 41c6380384dc6065456d01405ef0b43e5fe39ba1bccc4ec67801cc66142728e5

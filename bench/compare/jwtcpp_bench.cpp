@@ -21,7 +21,7 @@ int main(int argc, char **argv) {
         p = e;
     }
     const char *secret = getenv("JWT_SECRET") ? getenv("JWT_SECRET") : "cursed-jwt-test-secret";
-    auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::hs256{secret});
+    auto verifier = jwt::verify().allow_algorithm(jwt::algorithm::hs256{ secret });
     long sink = 0, ok = 0;
     double best = 1e30;
     for (int pass = 0; pass < 5; pass++) {
@@ -30,23 +30,25 @@ int main(int argc, char **argv) {
         for (auto &t : toks) {
             try {
                 auto d = jwt::decode(t);
-                verifier.verify(d); // signature + exp (if present) + alg
+                verifier.verify(d);                // signature + exp (if present) + alg
                 if (!d.has_expires_at()) continue; // exp is required (as cursed-jwt does)
                 long uid = std::stol(d.get_subject());
                 std::string name = d.get_payload_claim("username").as_string();
                 sink += uid + (long)name.size();
                 ok++;
-            } catch (const std::exception &) {
-            }
+            } catch (const std::exception &) {}
         }
-        double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / toks.size();
+        double ns =
+            std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / toks.size();
         if (ns < best) best = ns;
     }
     // a forged token must be rejected
     std::string forged = toks[0];
     forged[forged.size() - 2] = forged[forged.size() - 2] == 'A' ? 'B' : 'A';
     bool rejected = false;
-    try { verifier.verify(jwt::decode(forged)); } catch (const std::exception &) { rejected = true; }
+    try {
+        verifier.verify(jwt::decode(forged));
+    } catch (const std::exception &) { rejected = true; }
     printf("jwt-cpp (picojson, OpenSSL)        %8.1f ns/token   accepted %ld/%zu, forged rejected: %s (sink %ld)\n",
            best, ok, toks.size(), rejected ? "yes" : "NO", sink % 7);
     return 0;

@@ -18,6 +18,8 @@
 #   make pk-test-ifma / pk-bench-ifma + Intel crypto_mb 8-way AVX-512 IFMA (Linux x86-64; IFMA CPU to exercise it)
 #   make mca          static estimates of every SHA-256 engine per CPU model (llvm-mca; + uiCA, scripts/mca/fetch-uica.sh)
 #   make mca-validate perf-measured cycles of the same engines on this machine (x86-64 Linux; scripts/mca/validate.sh)
+#   make lint         formatting + lint checks (clang-format, shfmt, ruff, shellcheck, cppcheck; Docker)
+#   make format       apply the formatters; make hooks installs the pre-commit check (.githooks/)
 # Engines are picked at run time from the CPU; ARCHFLAGS only changes the baseline (see README.md, Building).
 CC ?= cc
 PYTHON ?= python3
@@ -249,6 +251,13 @@ mca-validate: | $(B)
 	./scripts/mca/validate.sh > $(B)/mca-measured.txt
 	MEASURED=$(B)/mca-measured.txt ./scripts/mca/mca.sh
 
+# formatting and linting (scripts/lint.sh; pinned tools in ci/lint.Dockerfile, run through Docker)
+format:
+	./scripts/lint.sh --fix
+lint:
+	./scripts/lint.sh
+hooks:
+	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check clean
+.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean

@@ -35,13 +35,15 @@
 /* tune=skylake-avx512 carries "prefer 256-bit vectors": without it the compiler auto-vectorises copies and memsets in
  * this region with zmm, and one zmm instruction drops the core's frequency licence (19% slower for 0.5-1 ms on a
  * Cascade Lake; measured 29% slower full verify) -- exactly what the ymm-only design avoids. */
-#define JWT_BEGIN_AVX512 \
-    _Pragma("clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512\"))), apply_to = function)")
+#define JWT_BEGIN_AVX512                                                                                               \
+    _Pragma(                                                                                                           \
+        "clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512\"))), apply_to = function)")
 #define JWT_END_TARGET _Pragma("clang attribute pop")
 #else
 #define JWT_BEGIN_AVX2 _Pragma("GCC push_options") _Pragma("GCC target(\"avx2,bmi,bmi2\")")
-#define JWT_BEGIN_AVX512 \
-    _Pragma("GCC push_options") _Pragma("GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512,prefer-vector-width=256\")")
+#define JWT_BEGIN_AVX512                                                                                               \
+    _Pragma("GCC push_options") _Pragma(                                                                               \
+        "GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512,prefer-vector-width=256\")")
 #define JWT_END_TARGET _Pragma("GCC pop_options")
 #endif
 #endif
@@ -52,10 +54,10 @@
 #define JWT_END_SHA2
 #elif defined(__clang__)
 #define JWT_BEGIN_SHA2 _Pragma("clang attribute push (__attribute__((target(\"sha2\"))), apply_to = function)")
-#define JWT_END_SHA2 _Pragma("clang attribute pop")
+#define JWT_END_SHA2   _Pragma("clang attribute pop")
 #else
 #define JWT_BEGIN_SHA2 _Pragma("GCC push_options") _Pragma("GCC target(\"+crypto\")")
-#define JWT_END_SHA2 _Pragma("GCC pop_options")
+#define JWT_END_SHA2   _Pragma("GCC pop_options")
 #endif
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -82,8 +84,8 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     }
     int ymm = (xcr0 & 6) == 6, zmm = ymm && (xcr0 & 0xE0) == 0xE0;
     if (ymm && (ebx7 & (1u << 5)) && (ebx7 & (1u << 3)) && (ebx7 & (1u << 8))) f |= JWT_CPU_AVX2; /* + BMI1, BMI2 */
-    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 17)) &&
-        (ebx7 & (1u << 28)))
+    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) &&
+        (ebx7 & (1u << 17)) && (ebx7 & (1u << 28)))
         f |= JWT_CPU_AVX512VL; /* F, VL, BW, DQ, CD */
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
@@ -100,7 +102,8 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
         if (amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
     }
     /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
-    if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1') f |= JWT_CPU_FAST_ZMM;
+    if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1')
+        f |= JWT_CPU_FAST_ZMM;
 #elif defined(JWT_ARM_SHA2)
 #if defined(__APPLE__)
     int v = 0;
@@ -129,7 +132,7 @@ static unsigned jwt_cpu(void) {
 /* Resolve-once dispatch: each entry point calls through a pointer that starts at a resolver stub.  The constructor
  * at the end of this file (or the first call, if it comes earlier) replaces it with the chosen engine, so a call
  * is one indirect call with no feature tests.  Relaxed atomics: racing resolvers all store the same pointer. */
-#define JWT_LOAD_FN(p) __atomic_load_n(&(p), __ATOMIC_RELAXED)
+#define JWT_LOAD_FN(p)     __atomic_load_n(&(p), __ATOMIC_RELAXED)
 #define JWT_STORE_FN(p, f) __atomic_store_n(&(p), (f), __ATOMIC_RELAXED)
 unsigned jwt_cpu_features(void) { return jwt_cpu() & ~JWT_CPU_DETECTED; }
 
@@ -137,18 +140,19 @@ unsigned jwt_cpu_features(void) { return jwt_cpu() & ~JWT_CPU_DETECTED; }
  * 1. constants, plans, key
  * ====================================================================================== */
 
-static const uint32_t K256[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-static const uint32_t IV256[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                                  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-static const uint8_t zero_block[64] __attribute__((aligned(64))) = {0};
+static const uint32_t K256[64] = { 0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+                                   0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+                                   0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+                                   0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+                                   0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+                                   0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+                                   0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+                                   0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+                                   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+                                   0xc67178f2 };
+static const uint32_t IV256[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+static const uint8_t zero_block[64] __attribute__((aligned(64))) = { 0 };
 
 JWT_INLINE uint32_t be32(const uint8_t *p) {
     uint32_t v;
@@ -173,7 +177,7 @@ JWT_INLINE void hplan_init_off(hplan_t *p, const uint8_t *m, int L, int off) {
 #ifdef JWT_INPUT_PADDED
     /* Caller guarantees >= 64 readable bytes after each token (padded recv buffers): fixed-size
      * copy + mask instead of variable-length memcpy/memset. */
-    static const uint8_t keep[128] = {[0 ... 63] = 0xFF};
+    static const uint8_t keep[128] = { [0 ... 63] = 0xFF };
     const uint8_t *src = m + (nf << 6);
     for (int i = 0; i < 64; i++) p->tail[i] = src[i] & keep[64 - rem + i];
     memset(p->tail + 64, 0, 64);
@@ -197,7 +201,9 @@ JWT_INLINE const uint8_t *hplan_block(const hplan_t *p, int b) {
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]);
 static void sha1_raw(const hplan_t *p, uint32_t dig[8]);
 /* plain SHA-256 runs the HMAC machinery from the IV, with no ipad block and no outer hash (raw mode) */
-static const jwt_key_t sha_iv_key = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, {0}};
+static const jwt_key_t sha_iv_key = {
+    { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 }, { 0 }
+};
 
 /* ======================================================================================
  * 2. SHA-256 engines
@@ -205,32 +211,32 @@ static const jwt_key_t sha_iv_key = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54f
 
 /* vpternlogd truth tables (index = a<<2 | b<<1 | c), used by the AVX-512 engine and test.c */
 #define JWT_TL_XOR3 0x96 /* a ^ b ^ c */
-#define JWT_TL_CH 0xCA   /* a ? b : c */
-#define JWT_TL_MAJ 0xE8  /* majority */
+#define JWT_TL_CH   0xCA /* a ? b : c */
+#define JWT_TL_MAJ  0xE8 /* majority */
 
 #define ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
 /* ---- scalar (the template with one lane) ---- */
-#define MB(name) name##_scalar
-#define MB_LANES 1
-#define V uint32_t
-#define VSET1(x) ((uint32_t)(x))
-#define VADD(a, b) ((a) + (b))
-#define VXOR(a, b) ((a) ^ (b))
-#define VSHR(x, n) ((x) >> (n))
-#define VROR(x, n) ROR32(x, n)
+#define MB(name)       name##_scalar
+#define MB_LANES       1
+#define V              uint32_t
+#define VSET1(x)       ((uint32_t)(x))
+#define VADD(a, b)     ((a) + (b))
+#define VXOR(a, b)     ((a) ^ (b))
+#define VSHR(x, n)     ((x) >> (n))
+#define VROR(x, n)     ROR32(x, n)
 #define VXOR3(a, b, c) ((a) ^ (b) ^ (c))
-#define VCH(e, f, g) ((g) ^ ((e) & ((f) ^ (g))))
-#define VMAJ(a, b, c) ((b) ^ (((a) ^ (b)) & ((b) ^ (c))))
-#define VSEL(m, x, y) (((m) & (x)) | (~(m) & (y)))
-#define VMASK(arr) ((arr)[0])
-#define MB_LOAD16(ptr, w)                                         \
-    do {                                                          \
-        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = be32((ptr)[0] + 4 * i_); \
+#define VCH(e, f, g)   ((g) ^ ((e) & ((f) ^ (g))))
+#define VMAJ(a, b, c)  ((b) ^ (((a) ^ (b)) & ((b) ^ (c))))
+#define VSEL(m, x, y)  (((m) & (x)) | (~(m) & (y)))
+#define VMASK(arr)     ((arr)[0])
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = be32((ptr)[0] + 4 * i_);                                             \
     } while (0)
-#define MB_STORE8(s, out)                                         \
-    do {                                                          \
-        for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];    \
+#define MB_STORE8(s, out)                                                                                              \
+    do {                                                                                                               \
+        for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];                                                         \
     } while (0)
 #define MB_MIN_LANES 1
 #include "jwt_mb.inc"
@@ -277,11 +283,12 @@ __attribute__((constructor)) static void jwt_ossl_cap_init(void) {
 }
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
     uint32_t st[8];
-    uint8_t ob[64] = {0};
+    uint8_t ob[64] = { 0 };
     memcpy(st, k->ih, 32);
     if (p->nf) jwt_ossl_sha256_block(st, p->m, (size_t)p->nf);
     jwt_ossl_sha256_block(st, p->tail, (size_t)(p->nb - p->nf));
-    for (int i = 0; i < 8; i++) ob[4 * i] = st[i] >> 24, ob[4 * i + 1] = st[i] >> 16, ob[4 * i + 2] = st[i] >> 8, ob[4 * i + 3] = st[i];
+    for (int i = 0; i < 8; i++)
+        ob[4 * i] = st[i] >> 24, ob[4 * i + 1] = st[i] >> 16, ob[4 * i + 2] = st[i] >> 8, ob[4 * i + 3] = st[i];
     ob[32] = 0x80, ob[62] = ((64 + 32) * 8) >> 8, ob[63] = (uint8_t)((64 + 32) * 8);
     memcpy(mac, k->oh, 32);
     jwt_ossl_sha256_block(mac, ob, 1);
@@ -311,7 +318,7 @@ static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
 #endif
 
 void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
-    uint8_t key[64] = {0}, blk[64];
+    uint8_t key[64] = { 0 }, blk[64];
     uint32_t w[16], st[8];
     if (len > 64) { /* key = SHA-256(secret) */
         const uint8_t *s = secret;
@@ -321,7 +328,7 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
             for (int i = 0; i < 16; i++) w[i] = be32(s + off + 4 * i);
             compress_scalar(st, w);
         }
-        uint8_t last[128] = {0};
+        uint8_t last[128] = { 0 };
         size_t rem = len - off, nt = rem + 9 > 64 ? 2 : 1;
         memcpy(last, s + off, rem);
         last[rem] = 0x80;
@@ -349,10 +356,10 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
 
 /* ---- NEON, 4 lanes ---- */
 #ifdef JWT_HAVE_NEON
-#define MB(name) name##_neon
-#define MB_LANES 4
-#define V uint32x4_t
-#define VSET1(x) vdupq_n_u32(x)
+#define MB(name)   name##_neon
+#define MB_LANES   4
+#define V          uint32x4_t
+#define VSET1(x)   vdupq_n_u32(x)
 #define VADD(a, b) vaddq_u32(a, b)
 #define VXOR(a, b) veorq_u32(a, b)
 #define VSHR(x, n) vshrq_n_u32(x, n)
@@ -362,10 +369,10 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
 #else
 #define VXOR3(a, b, c) veorq_u32(veorq_u32(a, b), c)
 #endif
-#define VCH(e, f, g) vbslq_u32(e, f, g)                /* BSL is literally Ch */
+#define VCH(e, f, g)  vbslq_u32(e, f, g)               /* BSL is literally Ch */
 #define VMAJ(a, b, c) vbslq_u32(veorq_u32(a, b), c, b) /* a^b ? c : b(=a) */
 #define VSEL(m, x, y) vbslq_u32(m, x, y)
-#define VMASK(arr) vld1q_u32(arr)
+#define VMASK(arr)    vld1q_u32(arr)
 JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t r3, uint32x4_t *o) {
     uint32x4_t t0 = vtrn1q_u32(r0, r1), t1 = vtrn2q_u32(r0, r1);
     uint32x4_t t2 = vtrn1q_u32(r2, r3), t3 = vtrn2q_u32(r2, r3);
@@ -375,18 +382,18 @@ JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t
     o[3] = vreinterpretq_u32_u64(vtrn2q_u64(vreinterpretq_u64_u32(t1), vreinterpretq_u64_u32(t3)));
 }
 #define NEON_LDBE(p) vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p)))
-#define MB_LOAD16(ptr, w)                                                                  \
-    do {                                                                                   \
-        for (int j_ = 0; j_ < 4; j_++)                                                     \
-            neon_tr4(NEON_LDBE((ptr)[0] + 16 * j_), NEON_LDBE((ptr)[1] + 16 * j_),         \
-                     NEON_LDBE((ptr)[2] + 16 * j_), NEON_LDBE((ptr)[3] + 16 * j_), (w) + 4 * j_); \
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        for (int j_ = 0; j_ < 4; j_++)                                                                                 \
+            neon_tr4(NEON_LDBE((ptr)[0] + 16 * j_), NEON_LDBE((ptr)[1] + 16 * j_), NEON_LDBE((ptr)[2] + 16 * j_),      \
+                     NEON_LDBE((ptr)[3] + 16 * j_), (w) + 4 * j_);                                                     \
     } while (0)
-#define MB_STORE8(s, out)                                                                  \
-    do {                                                                                   \
-        uint32x4_t o_[8];                                                                  \
-        neon_tr4((s)[0], (s)[1], (s)[2], (s)[3], o_);                                      \
-        neon_tr4((s)[4], (s)[5], (s)[6], (s)[7], o_ + 4);                                  \
-        for (int l_ = 0; l_ < 4; l_++) vst1q_u32((out)[l_], o_[l_]), vst1q_u32((out)[l_] + 4, o_[4 + l_]); \
+#define MB_STORE8(s, out)                                                                                              \
+    do {                                                                                                               \
+        uint32x4_t o_[8];                                                                                              \
+        neon_tr4((s)[0], (s)[1], (s)[2], (s)[3], o_);                                                                  \
+        neon_tr4((s)[4], (s)[5], (s)[6], (s)[7], o_ + 4);                                                              \
+        for (int l_ = 0; l_ < 4; l_++) vst1q_u32((out)[l_], o_[l_]), vst1q_u32((out)[l_] + 4, o_[4 + l_]);             \
     } while (0)
 #ifndef JWT_NEON_MIN_LANES
 #define JWT_NEON_MIN_LANES 2
@@ -428,27 +435,27 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
     o[2] = _mm256_permute2x128_si256(u2, u6, 0x20), o[6] = _mm256_permute2x128_si256(u2, u6, 0x31);
     o[3] = _mm256_permute2x128_si256(u3, u7, 0x20), o[7] = _mm256_permute2x128_si256(u3, u7, 0x31);
 }
-#define AVX_BSWAP32 _mm256_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, \
-                                     3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12)
-#define MB_LOAD16(ptr, w)                                                                   \
-    do {                                                                                    \
-        __m256i r_[8], bs_ = AVX_BSWAP32;                                                   \
-        for (int h_ = 0; h_ < 2; h_++) {                                                    \
-            for (int l_ = 0; l_ < 8; l_++)                                                  \
-                r_[l_] = _mm256_shuffle_epi8(                                               \
-                    _mm256_loadu_si256((const __m256i *)((ptr)[l_] + 32 * h_)), bs_);       \
-            avx2_tr8(r_, (w) + 8 * h_);                                                     \
-        }                                                                                   \
+#define AVX_BSWAP32                                                                                                    \
+    _mm256_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12, 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15,   \
+                     14, 13, 12)
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        __m256i r_[8], bs_ = AVX_BSWAP32;                                                                              \
+        for (int h_ = 0; h_ < 2; h_++) {                                                                               \
+            for (int l_ = 0; l_ < 8; l_++)                                                                             \
+                r_[l_] = _mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i *)((ptr)[l_] + 32 * h_)), bs_);         \
+            avx2_tr8(r_, (w) + 8 * h_);                                                                                \
+        }                                                                                                              \
     } while (0)
-#define MB_STORE8(s, out)                                                                   \
-    do {                                                                                    \
-        __m256i o_[8];                                                                      \
-        avx2_tr8((s), o_);                                                                  \
-        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);   \
+#define MB_STORE8(s, out)                                                                                              \
+    do {                                                                                                               \
+        __m256i o_[8];                                                                                                 \
+        avx2_tr8((s), o_);                                                                                             \
+        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);                              \
     } while (0)
-#define MB_LANES 8
-#define V __m256i
-#define VSET1(x) _mm256_set1_epi32((int)(x))
+#define MB_LANES   8
+#define V          __m256i
+#define VSET1(x)   _mm256_set1_epi32((int)(x))
 #define VADD(a, b) _mm256_add_epi32(a, b)
 #define VXOR(a, b) _mm256_xor_si256(a, b)
 #define VSHR(x, n) _mm256_srli_epi32(x, n)
@@ -467,14 +474,14 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #endif
 #define MB_MIN_LANES JWT_AVX2_MIN_LANES
 
-#define MB(name) name##_avx2
-#define VROR(x, n) _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
+#define MB(name)       name##_avx2
+#define VROR(x, n)     _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
 #define VXOR3(a, b, c) _mm256_xor_si256(_mm256_xor_si256(a, b), c)
-#define VCH(e, f, g) _mm256_xor_si256(g, _mm256_and_si256(e, _mm256_xor_si256(f, g)))
+#define VCH(e, f, g)   _mm256_xor_si256(g, _mm256_and_si256(e, _mm256_xor_si256(f, g)))
 /* Maj = b ^ ((a ^ b) & (b ^ c)): b ^ c is the previous round's a ^ b, which the fully unrolled
  * compress lets the compiler reuse, so 2 new ops per round instead of 4 (trick from cpuminer-opt) */
-#define VMAJ(a, b, c) _mm256_xor_si256(b, _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_xor_si256(b, c)))
-#define VSEL(m, x, y) _mm256_blendv_epi8(y, x, m)
+#define VMAJ(a, b, c)  _mm256_xor_si256(b, _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_xor_si256(b, c)))
+#define VSEL(m, x, y)  _mm256_blendv_epi8(y, x, m)
 #include "jwt_mb.inc"
 #undef MB
 #undef VROR
@@ -491,13 +498,13 @@ JWT_BEGIN_AVX512
  *   0x96 = a^b^c, 0xCA = a ? b : c (Ch, and the lane select), 0xE8 = majority.
  * tests/test_jwt.c runs the template with a scalar ternlog emulation using these same constants. */
 #undef MB_MIN_LANES
-#define MB_MIN_LANES JWT_AVX_MIN_LANES
-#define MB(name) name##_avx512
-#define VROR(x, n) _mm256_ror_epi32(x, n) /* vprord */
+#define MB_MIN_LANES   JWT_AVX_MIN_LANES
+#define MB(name)       name##_avx512
+#define VROR(x, n)     _mm256_ror_epi32(x, n) /* vprord */
 #define VXOR3(a, b, c) _mm256_ternarylogic_epi32(a, b, c, JWT_TL_XOR3)
-#define VCH(e, f, g) _mm256_ternarylogic_epi32(e, f, g, JWT_TL_CH)
-#define VMAJ(a, b, c) _mm256_ternarylogic_epi32(a, b, c, JWT_TL_MAJ)
-#define VSEL(m, x, y) _mm256_ternarylogic_epi32(m, x, y, JWT_TL_CH)
+#define VCH(e, f, g)   _mm256_ternarylogic_epi32(e, f, g, JWT_TL_CH)
+#define VMAJ(a, b, c)  _mm256_ternarylogic_epi32(a, b, c, JWT_TL_MAJ)
+#define VSEL(m, x, y)  _mm256_ternarylogic_epi32(m, x, y, JWT_TL_CH)
 #include "jwt_mb.inc"
 #undef MB
 #undef VROR
@@ -527,23 +534,23 @@ JWT_BEGIN_AVX2
 typedef struct {
     __m256i a, b;
 } v2_t;
-#define V2OP1(name, expr)                                                    \
-    JWT_INLINE v2_t name(v2_t x) {                                           \
-        v2_t r;                                                              \
-        r.a = expr(x.a), r.b = expr(x.b);                                    \
-        return r;                                                            \
+#define V2OP1(name, expr)                                                                                              \
+    JWT_INLINE v2_t name(v2_t x) {                                                                                     \
+        v2_t r;                                                                                                        \
+        r.a = expr(x.a), r.b = expr(x.b);                                                                              \
+        return r;                                                                                                      \
     }
-#define V2OP2(name, expr)                                                    \
-    JWT_INLINE v2_t name(v2_t x, v2_t y) {                                   \
-        v2_t r;                                                              \
-        r.a = expr(x.a, y.a), r.b = expr(x.b, y.b);                          \
-        return r;                                                            \
+#define V2OP2(name, expr)                                                                                              \
+    JWT_INLINE v2_t name(v2_t x, v2_t y) {                                                                             \
+        v2_t r;                                                                                                        \
+        r.a = expr(x.a, y.a), r.b = expr(x.b, y.b);                                                                    \
+        return r;                                                                                                      \
     }
-#define V2OP3(name, expr)                                                    \
-    JWT_INLINE v2_t name(v2_t x, v2_t y, v2_t z) {                           \
-        v2_t r;                                                              \
-        r.a = expr(x.a, y.a, z.a), r.b = expr(x.b, y.b, z.b);                \
-        return r;                                                            \
+#define V2OP3(name, expr)                                                                                              \
+    JWT_INLINE v2_t name(v2_t x, v2_t y, v2_t z) {                                                                     \
+        v2_t r;                                                                                                        \
+        r.a = expr(x.a, y.a, z.a), r.b = expr(x.b, y.b, z.b);                                                          \
+        return r;                                                                                                      \
     }
 JWT_INLINE v2_t v2_set1(uint32_t x) {
     v2_t r;
@@ -554,37 +561,38 @@ JWT_INLINE v2_t v2_set1(uint32_t x) {
 #define A2_XOR(x, y) _mm256_xor_si256(x, y)
 V2OP2(v2_add, A2_ADD)
 V2OP2(v2_xor, A2_XOR)
-#define MB_LANES 16
-#define V v2_t
-#define VSET1(x) v2_set1(x)
+#define MB_LANES   16
+#define V          v2_t
+#define VSET1(x)   v2_set1(x)
 #define VADD(a, b) v2_add(a, b)
 #define VXOR(a, b) v2_xor(a, b)
-#define VSHR(x, n) ((v2_t){_mm256_srli_epi32((x).a, n), _mm256_srli_epi32((x).b, n)})
-#define VMASK(arr) ((v2_t){_mm256_loadu_si256((const __m256i *)(arr)), _mm256_loadu_si256((const __m256i *)(arr) + 1)})
-#define MB_LOAD16(ptr, w)                                                                   \
-    do {                                                                                    \
-        __m256i r_[8], o_[16], bs_ = AVX_BSWAP32;                                           \
-        for (int g_ = 0; g_ < 2; g_++) {                                                    \
-            for (int h_ = 0; h_ < 2; h_++) {                                                \
-                for (int l_ = 0; l_ < 8; l_++)                                              \
-                    r_[l_] = _mm256_shuffle_epi8(                                           \
-                        _mm256_loadu_si256((const __m256i *)((ptr)[8 * g_ + l_] + 32 * h_)), bs_); \
-                avx2_tr8(r_, o_ + 8 * h_);                                                  \
-            }                                                                               \
-            for (int i_ = 0; i_ < 16; i_++) {                                               \
-                if (g_) (w)[i_].b = o_[i_];                                                 \
-                else (w)[i_].a = o_[i_];                                                    \
-            }                                                                               \
-        }                                                                                   \
+#define VSHR(x, n) ((v2_t){ _mm256_srli_epi32((x).a, n), _mm256_srli_epi32((x).b, n) })
+#define VMASK(arr)                                                                                                     \
+    ((v2_t){ _mm256_loadu_si256((const __m256i *)(arr)), _mm256_loadu_si256((const __m256i *)(arr) + 1) })
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        __m256i r_[8], o_[16], bs_ = AVX_BSWAP32;                                                                      \
+        for (int g_ = 0; g_ < 2; g_++) {                                                                               \
+            for (int h_ = 0; h_ < 2; h_++) {                                                                           \
+                for (int l_ = 0; l_ < 8; l_++)                                                                         \
+                    r_[l_] =                                                                                           \
+                        _mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i *)((ptr)[8 * g_ + l_] + 32 * h_)), bs_); \
+                avx2_tr8(r_, o_ + 8 * h_);                                                                             \
+            }                                                                                                          \
+            for (int i_ = 0; i_ < 16; i_++) {                                                                          \
+                if (g_) (w)[i_].b = o_[i_];                                                                            \
+                else (w)[i_].a = o_[i_];                                                                               \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
-#define MB_STORE8(s, out)                                                                   \
-    do {                                                                                    \
-        __m256i i_[8], o_[8];                                                               \
-        for (int g_ = 0; g_ < 2; g_++) {                                                    \
-            for (int j_ = 0; j_ < 8; j_++) i_[j_] = g_ ? (s)[j_].b : (s)[j_].a;             \
-            avx2_tr8(i_, o_);                                                               \
-            for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[8 * g_ + l_], o_[l_]); \
-        }                                                                                   \
+#define MB_STORE8(s, out)                                                                                              \
+    do {                                                                                                               \
+        __m256i i_[8], o_[8];                                                                                          \
+        for (int g_ = 0; g_ < 2; g_++) {                                                                               \
+            for (int j_ = 0; j_ < 8; j_++) i_[j_] = g_ ? (s)[j_].b : (s)[j_].a;                                        \
+            avx2_tr8(i_, o_);                                                                                          \
+            for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[8 * g_ + l_], o_[l_]);                 \
+        }                                                                                                              \
     } while (0)
 #ifndef JWT_AVX2X_MIN_LANES
 #define JWT_AVX2X_MIN_LANES 9 /* <= 8 live lanes: a single 8-lane group is cheaper */
@@ -592,21 +600,21 @@ V2OP2(v2_xor, A2_XOR)
 #define MB_MIN_LANES 1 /* the driver below routes small groups itself */
 #define MB_NO_DRIVER
 
-#define A2_ROR(x, n) _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
+#define A2_ROR(x, n)     _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
 #define A2_XOR3(x, y, z) _mm256_xor_si256(_mm256_xor_si256(x, y), z)
-#define A2_CH(e, f, g) _mm256_xor_si256(g, _mm256_and_si256(e, _mm256_xor_si256(f, g)))
-#define A2_MAJ(a, b, c) _mm256_xor_si256(b, _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_xor_si256(b, c)))
-#define A2_SEL(m, x, y) _mm256_blendv_epi8(y, x, m)
+#define A2_CH(e, f, g)   _mm256_xor_si256(g, _mm256_and_si256(e, _mm256_xor_si256(f, g)))
+#define A2_MAJ(a, b, c)  _mm256_xor_si256(b, _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_xor_si256(b, c)))
+#define A2_SEL(m, x, y)  _mm256_blendv_epi8(y, x, m)
 V2OP3(v2_xor3_avx2, A2_XOR3)
 V2OP3(v2_ch_avx2, A2_CH)
 V2OP3(v2_maj_avx2, A2_MAJ)
 V2OP3(v2_sel_avx2, A2_SEL)
-#define MB(name) name##_avx2x2
-#define VROR(x, n) ((v2_t){A2_ROR((x).a, n), A2_ROR((x).b, n)})
+#define MB(name)       name##_avx2x2
+#define VROR(x, n)     ((v2_t){ A2_ROR((x).a, n), A2_ROR((x).b, n) })
 #define VXOR3(a, b, c) v2_xor3_avx2(a, b, c)
-#define VCH(e, f, g) v2_ch_avx2(e, f, g)
-#define VMAJ(a, b, c) v2_maj_avx2(a, b, c)
-#define VSEL(m, x, y) v2_sel_avx2(m, x, y)
+#define VCH(e, f, g)   v2_ch_avx2(e, f, g)
+#define VMAJ(a, b, c)  v2_maj_avx2(a, b, c)
+#define VSEL(m, x, y)  v2_sel_avx2(m, x, y)
 #include "jwt_mb.inc"
 #undef MB
 #undef VROR
@@ -619,17 +627,17 @@ V2OP3(v2_sel_avx2, A2_SEL)
 JWT_END_TARGET
 JWT_BEGIN_AVX512
 #define T2_XOR3(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_XOR3)
-#define T2_CH(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_CH)
-#define T2_MAJ(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_MAJ)
+#define T2_CH(x, y, z)   _mm256_ternarylogic_epi32(x, y, z, JWT_TL_CH)
+#define T2_MAJ(x, y, z)  _mm256_ternarylogic_epi32(x, y, z, JWT_TL_MAJ)
 V2OP3(v2_xor3_512, T2_XOR3)
 V2OP3(v2_ch_512, T2_CH)
 V2OP3(v2_maj_512, T2_MAJ)
-#define MB(name) name##_avx512x2
-#define VROR(x, n) ((v2_t){_mm256_ror_epi32((x).a, n), _mm256_ror_epi32((x).b, n)})
+#define MB(name)       name##_avx512x2
+#define VROR(x, n)     ((v2_t){ _mm256_ror_epi32((x).a, n), _mm256_ror_epi32((x).b, n) })
 #define VXOR3(a, b, c) v2_xor3_512(a, b, c)
-#define VCH(e, f, g) v2_ch_512(e, f, g)
-#define VMAJ(a, b, c) v2_maj_512(a, b, c)
-#define VSEL(m, x, y) v2_ch_512(m, x, y)
+#define VCH(e, f, g)   v2_ch_512(e, f, g)
+#define VMAJ(a, b, c)  v2_maj_512(a, b, c)
+#define VSEL(m, x, y)  v2_ch_512(m, x, y)
 #include "jwt_mb.inc"
 #undef MB
 #undef VROR
@@ -654,8 +662,8 @@ JWT_BEGIN_AVX2
 
 /* driver for the 16-lane flavours: full 16-groups go 2x8 interleaved, the rest to the 8-lane engine */
 typedef void lanes_fn(const jwt_key_t *, int, const hplan_t *const *, uint32_t (*)[8]);
-static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, const uint8_t *const *msg,
-                     const int *len, uint32_t (*mac)[8]) {
+static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                     uint32_t (*mac)[8]) {
     enum { CH = 64 };
     hplan_t plan[CH];
     const hplan_t *pp[CH];
@@ -700,41 +708,40 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 /* ---- zmm, 16 lanes: NOT the default.  Fewest cycles per lane, but heavy 512-bit integer work can
  * drop the core's frequency licence for everything that runs after it; bench/licence_probe.c measures
  * that on real hardware.  Loads/stores reuse the ymm 8x8 transposes and glue the halves. */
-#define MB(name) name##_zmm
-#define MB_LANES 16
-#define V __m512i
-#define VSET1(x) _mm512_set1_epi32((int)(x))
-#define VADD(a, b) _mm512_add_epi32(a, b)
-#define VXOR(a, b) _mm512_xor_si512(a, b)
-#define VSHR(x, n) _mm512_srli_epi32(x, n)
-#define VROR(x, n) _mm512_ror_epi32(x, n)
+#define MB(name)       name##_zmm
+#define MB_LANES       16
+#define V              __m512i
+#define VSET1(x)       _mm512_set1_epi32((int)(x))
+#define VADD(a, b)     _mm512_add_epi32(a, b)
+#define VXOR(a, b)     _mm512_xor_si512(a, b)
+#define VSHR(x, n)     _mm512_srli_epi32(x, n)
+#define VROR(x, n)     _mm512_ror_epi32(x, n)
 #define VXOR3(a, b, c) _mm512_ternarylogic_epi32(a, b, c, JWT_TL_XOR3)
-#define VCH(e, f, g) _mm512_ternarylogic_epi32(e, f, g, JWT_TL_CH)
-#define VMAJ(a, b, c) _mm512_ternarylogic_epi32(a, b, c, JWT_TL_MAJ)
-#define VSEL(m, x, y) _mm512_ternarylogic_epi32(m, x, y, JWT_TL_CH)
-#define VMASK(arr) _mm512_loadu_si512((const void *)(arr))
-#define MB_LOAD16(ptr, w)                                                                   \
-    do {                                                                                    \
-        __m256i r_[8], o_[2][16], bs_ = AVX_BSWAP32;                                        \
-        for (int g_ = 0; g_ < 2; g_++)                                                      \
-            for (int h_ = 0; h_ < 2; h_++) {                                                \
-                for (int l_ = 0; l_ < 8; l_++)                                              \
-                    r_[l_] = _mm256_shuffle_epi8(                                           \
-                        _mm256_loadu_si256((const __m256i *)((ptr)[8 * g_ + l_] + 32 * h_)), bs_); \
-                avx2_tr8(r_, o_[g_] + 8 * h_);                                              \
-            }                                                                               \
-        for (int i_ = 0; i_ < 16; i_++)                                                     \
-            (w)[i_] = _mm512_inserti64x4(_mm512_castsi256_si512(o_[0][i_]), o_[1][i_], 1);  \
+#define VCH(e, f, g)   _mm512_ternarylogic_epi32(e, f, g, JWT_TL_CH)
+#define VMAJ(a, b, c)  _mm512_ternarylogic_epi32(a, b, c, JWT_TL_MAJ)
+#define VSEL(m, x, y)  _mm512_ternarylogic_epi32(m, x, y, JWT_TL_CH)
+#define VMASK(arr)     _mm512_loadu_si512((const void *)(arr))
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        __m256i r_[8], o_[2][16], bs_ = AVX_BSWAP32;                                                                   \
+        for (int g_ = 0; g_ < 2; g_++)                                                                                 \
+            for (int h_ = 0; h_ < 2; h_++) {                                                                           \
+                for (int l_ = 0; l_ < 8; l_++)                                                                         \
+                    r_[l_] =                                                                                           \
+                        _mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i *)((ptr)[8 * g_ + l_] + 32 * h_)), bs_); \
+                avx2_tr8(r_, o_[g_] + 8 * h_);                                                                         \
+            }                                                                                                          \
+        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = _mm512_inserti64x4(_mm512_castsi256_si512(o_[0][i_]), o_[1][i_], 1); \
     } while (0)
-#define MB_STORE8(s, out)                                                                   \
-    do { /* extract immediates must be literal constants at every -O level */               \
-        __m256i i_[8], o_[8];                                                               \
-        for (int j_ = 0; j_ < 8; j_++) i_[j_] = _mm512_castsi512_si256((s)[j_]);            \
-        avx2_tr8(i_, o_);                                                                   \
-        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);   \
-        for (int j_ = 0; j_ < 8; j_++) i_[j_] = _mm512_extracti64x4_epi64((s)[j_], 1);      \
-        avx2_tr8(i_, o_);                                                                   \
-        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[8 + l_], o_[l_]); \
+#define MB_STORE8(s, out)                                                                                              \
+    do { /* extract immediates must be literal constants at every -O level */                                          \
+        __m256i i_[8], o_[8];                                                                                          \
+        for (int j_ = 0; j_ < 8; j_++) i_[j_] = _mm512_castsi512_si256((s)[j_]);                                       \
+        avx2_tr8(i_, o_);                                                                                              \
+        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);                              \
+        for (int j_ = 0; j_ < 8; j_++) i_[j_] = _mm512_extracti64x4_epi64((s)[j_], 1);                                 \
+        avx2_tr8(i_, o_);                                                                                              \
+        for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[8 + l_], o_[l_]);                          \
     } while (0)
 #define MB_MIN_LANES 1
 #define MB_NO_DRIVER
@@ -765,9 +772,10 @@ JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 
 /* ---- ARMv8 SHA2 instructions: S independent streams interleaved for latency hiding ---- */
 #if defined(JWT_ARM_SHA2)
-JWT_BEGIN_SHA2
-/* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
-JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t (*m)[4]) {
+    JWT_BEGIN_SHA2
+        /* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
+        JWT_INLINE void
+        ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t (*m)[4]) {
     uint32x4_t a0[4], a1[4];
     for (int s = 0; s < S; s++) a0[s] = st0[s], a1[s] = st1[s];
 #if defined(__clang__)
@@ -782,8 +790,8 @@ JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t 
             st0[s] = vsha256hq_u32(st0[s], st1[s], wk);
             st1[s] = vsha256h2q_u32(st1[s], t, wk);
             if (r < 12)
-                m[s][r & 3] = vsha256su1q_u32(vsha256su0q_u32(m[s][r & 3], m[s][(r + 1) & 3]),
-                                              m[s][(r + 2) & 3], m[s][(r + 3) & 3]);
+                m[s][r & 3] = vsha256su1q_u32(vsha256su0q_u32(m[s][r & 3], m[s][(r + 1) & 3]), m[s][(r + 2) & 3],
+                                              m[s][(r + 3) & 3]);
         }
     }
     for (int s = 0; s < S; s++) st0[s] = vaddq_u32(st0[s], a0[s]), st1[s] = vaddq_u32(st1[s], a1[s]);
@@ -805,7 +813,7 @@ JWT_INLINE void ce_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const
         for (int s = 0; s < S; s++) vst1q_u32(mac[s], st0[s]), vst1q_u32(mac[s] + 4, st1[s]);
         return;
     }
-    const uint32_t pad2[4] = {0x80000000u, 0, 0, 0}, pad3[4] = {0, 0, 0, (64 + 32) * 8};
+    const uint32_t pad2[4] = { 0x80000000u, 0, 0, 0 }, pad3[4] = { 0, 0, 0, (64 + 32) * 8 };
     for (int s = 0; s < S; s++) {
         m[s][0] = st0[s], m[s][1] = st1[s], m[s][2] = vld1q_u32(pad2), m[s][3] = vld1q_u32(pad3);
         st0[s] = vld1q_u32(k->oh), st1[s] = vld1q_u32(k->oh + 4);
@@ -815,7 +823,7 @@ JWT_INLINE void ce_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const
 }
 
 JWT_INLINE void ce_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                          uint32_t (*mac)[8]) {
+                           uint32_t (*mac)[8]) {
     enum { CH = 64 };
     hplan_t plan[CH];
     const hplan_t *pp[CH];
@@ -833,14 +841,20 @@ JWT_INLINE void ce_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint
             int s = S;
             if (m - g < s) s = m - g;
             for (int i = 1; i < s; i++)
-                if (pp[g + i]->nb != pp[g]->nb) { s = i; break; }
+                if (pp[g + i]->nb != pp[g]->nb) {
+                    s = i;
+                    break;
+                }
             uint32_t *out[4];
             for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
             switch (s) { /* constant S per call so ce_hmac fully specialises */
-            case 4: ce_hmac(4, raw, k, pp + g, out); break;
-            case 3: ce_hmac(2, raw, k, pp + g, out); ce_hmac(1, raw, k, pp + g + 2, out + 2); break;
-            case 2: ce_hmac(2, raw, k, pp + g, out); break;
-            default: ce_hmac(1, raw, k, pp + g, out); break;
+                case 4: ce_hmac(4, raw, k, pp + g, out); break;
+                case 3:
+                    ce_hmac(2, raw, k, pp + g, out);
+                    ce_hmac(1, raw, k, pp + g + 2, out + 2);
+                    break;
+                case 2: ce_hmac(2, raw, k, pp + g, out); break;
+                default: ce_hmac(1, raw, k, pp + g, out); break;
             }
             g += s;
         }
@@ -876,35 +890,36 @@ JWT_END_SHA2
  * ====================================================================================== */
 
 /* sextet value for the 64 base64url characters, 0xFF for everything else */
-#define B64U_ROW(c) (((c) >= 'A' && (c) <= 'Z')   ? (c) - 'A' \
-                     : ((c) >= 'a' && (c) <= 'z') ? (c) - 'a' + 26 \
-                     : ((c) >= '0' && (c) <= '9') ? (c) - '0' + 52 \
-                     : (c) == '-'                 ? 62 \
-                     : (c) == '_'                 ? 63 \
-                                                  : 0xFF)
-#define B4(c) (uint8_t)B64U_ROW(c), (uint8_t)B64U_ROW(c + 1), (uint8_t)B64U_ROW(c + 2), (uint8_t)B64U_ROW(c + 3)
+#define B64U_ROW(c)                                                                                                    \
+    (((c) >= 'A' && (c) <= 'Z')   ? (c) - 'A'                                                                          \
+     : ((c) >= 'a' && (c) <= 'z') ? (c) - 'a' + 26                                                                     \
+     : ((c) >= '0' && (c) <= '9') ? (c) - '0' + 52                                                                     \
+     : (c) == '-'                 ? 62                                                                                 \
+     : (c) == '_'                 ? 63                                                                                 \
+                                  : 0xFF)
+#define B4(c)  (uint8_t) B64U_ROW(c), (uint8_t)B64U_ROW(c + 1), (uint8_t)B64U_ROW(c + 2), (uint8_t)B64U_ROW(c + 3)
 #define B16(c) B4(c), B4(c + 4), B4(c + 8), B4(c + 12)
-static const uint8_t b64u_tab[256] __attribute__((aligned(64))) = {
-    B16(0),   B16(16),  B16(32),  B16(48),  B16(64),  B16(80),  B16(96),  B16(112),
-    B16(128), B16(144), B16(160), B16(176), B16(192), B16(208), B16(224), B16(240)};
+static const uint8_t b64u_tab[256]
+    __attribute__((aligned(64))) = { B16(0),   B16(16),  B16(32),  B16(48),  B16(64),  B16(80),  B16(96),  B16(112),
+                                     B16(128), B16(144), B16(160), B16(176), B16(192), B16(208), B16(224), B16(240) };
 
 /* checks the length class and the canonical-zero trailing bits; decodes the final < 4 chars */
 JWT_INLINE int b64u_tail(uint8_t *dst, const char *src, int r) {
     const uint8_t *s = (const uint8_t *)src;
     uint32_t a, b, c;
     switch (r) {
-    case 0: return 0;
-    case 2:
-        a = b64u_tab[s[0]], b = b64u_tab[s[1]];
-        if ((a | b) & 0xC0 || b & 15) return -1;
-        dst[0] = (uint8_t)(a << 2 | b >> 4);
-        return 1;
-    case 3:
-        a = b64u_tab[s[0]], b = b64u_tab[s[1]], c = b64u_tab[s[2]];
-        if ((a | b | c) & 0xC0 || c & 3) return -1;
-        dst[0] = (uint8_t)(a << 2 | b >> 4), dst[1] = (uint8_t)(b << 4 | c >> 2);
-        return 2;
-    default: return -1;
+        case 0: return 0;
+        case 2:
+            a = b64u_tab[s[0]], b = b64u_tab[s[1]];
+            if ((a | b) & 0xC0 || b & 15) return -1;
+            dst[0] = (uint8_t)(a << 2 | b >> 4);
+            return 1;
+        case 3:
+            a = b64u_tab[s[0]], b = b64u_tab[s[1]], c = b64u_tab[s[2]];
+            if ((a | b | c) & 0xC0 || c & 3) return -1;
+            dst[0] = (uint8_t)(a << 2 | b >> 4), dst[1] = (uint8_t)(b << 4 | c >> 2);
+            return 2;
+        default: return -1;
     }
 }
 
@@ -967,23 +982,23 @@ JWT_BEGIN_AVX2
 /* 32 chars -> 24 bytes (Muła/Lemire packing; base64url translation via range compares).
  * Stores 32 bytes per block: dst needs the 32 bytes of slack jwt.h asks for. */
 JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
-#define RNG(v, lo, hi) _mm256_and_si256(_mm256_cmpgt_epi8(v, _mm256_set1_epi8((lo) - 1)), \
-                                        _mm256_cmpgt_epi8(_mm256_set1_epi8((hi) + 1), v))
+#define RNG(v, lo, hi)                                                                                                 \
+    _mm256_and_si256(_mm256_cmpgt_epi8(v, _mm256_set1_epi8((lo) - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8((hi) + 1), v))
     __m256i v = _mm256_loadu_si256((const __m256i *)src);
     __m256i up = RNG(v, 'A', 'Z'), lw = RNG(v, 'a', 'z'), dg = RNG(v, '0', '9');
 #undef RNG
     __m256i da = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('-')), us = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('_'));
     __m256i off = _mm256_or_si256(
         _mm256_or_si256(_mm256_and_si256(up, _mm256_set1_epi8(-65)), _mm256_and_si256(lw, _mm256_set1_epi8(-71))),
-        _mm256_or_si256(_mm256_and_si256(dg, _mm256_set1_epi8(4)),
-                        _mm256_or_si256(_mm256_and_si256(da, _mm256_set1_epi8(17)),
-                                        _mm256_and_si256(us, _mm256_set1_epi8(-32)))));
+        _mm256_or_si256(
+            _mm256_and_si256(dg, _mm256_set1_epi8(4)),
+            _mm256_or_si256(_mm256_and_si256(da, _mm256_set1_epi8(17)), _mm256_and_si256(us, _mm256_set1_epi8(-32)))));
     __m256i ok = _mm256_or_si256(_mm256_or_si256(up, lw), _mm256_or_si256(dg, _mm256_or_si256(da, us)));
     __m256i x = _mm256_add_epi8(v, off);
     x = _mm256_maddubs_epi16(x, _mm256_set1_epi32(0x01400140));
     x = _mm256_madd_epi16(x, _mm256_set1_epi32(0x00011000));
-    x = _mm256_shuffle_epi8(x, _mm256_setr_epi8(2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1,
-                                                2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1));
+    x = _mm256_shuffle_epi8(x, _mm256_setr_epi8(2, 1, 0, 6, 5, 4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1, 2, 1, 0, 6, 5,
+                                                4, 10, 9, 8, 14, 13, 12, -1, -1, -1, -1));
     x = _mm256_permutevar8x32_epi32(x, _mm256_setr_epi32(0, 1, 2, 4, 5, 6, 7, 7));
     _mm256_storeu_si256((__m256i *)dst, x);
     return _mm256_xor_si256(ok, _mm256_set1_epi8(-1)); /* 0xFF where invalid */
@@ -1053,12 +1068,15 @@ static int hex4(const uint8_t *p, uint32_t *v) {
 /* Validates a string at c->p (which must be at '"'); returns its raw contents and whether it has
  * escapes.  0 on any grammar or UTF-8 error. */
 /* 1 for bytes that end the fast path inside a string: '"', '\\', < 0x20, >= 0x80 */
-#define JC4(c) (c) < 0x20 || (c) >= 0x80 || (c) == '"' || (c) == '\\', (c) + 1 < 0x20 || (c) + 1 >= 0x80 || (c) + 1 == '"' || (c) + 1 == '\\', \
-               (c) + 2 < 0x20 || (c) + 2 >= 0x80 || (c) + 2 == '"' || (c) + 2 == '\\', (c) + 3 < 0x20 || (c) + 3 >= 0x80 || (c) + 3 == '"' || (c) + 3 == '\\'
+#define JC4(c)                                                                                                         \
+    (c) < 0x20 || (c) >= 0x80 || (c) == '"' || (c) == '\\',                                                            \
+        (c) + 1 < 0x20 || (c) + 1 >= 0x80 || (c) + 1 == '"' || (c) + 1 == '\\',                                        \
+        (c) + 2 < 0x20 || (c) + 2 >= 0x80 || (c) + 2 == '"' || (c) + 2 == '\\',                                        \
+        (c) + 3 < 0x20 || (c) + 3 >= 0x80 || (c) + 3 == '"' || (c) + 3 == '\\'
 #define JC16(c) JC4(c), JC4(c + 4), JC4(c + 8), JC4(c + 12)
-static const uint8_t jstop[256] = {JC16(0),   JC16(16),  JC16(32),  JC16(48),  JC16(64),  JC16(80),
-                                   JC16(96),  JC16(112), JC16(128), JC16(144), JC16(160), JC16(176),
-                                   JC16(192), JC16(208), JC16(224), JC16(240)};
+static const uint8_t jstop[256] = { JC16(0),   JC16(16),  JC16(32),  JC16(48),  JC16(64),  JC16(80),
+                                    JC16(96),  JC16(112), JC16(128), JC16(144), JC16(160), JC16(176),
+                                    JC16(192), JC16(208), JC16(224), JC16(240) };
 
 JWT_INLINE int jstr(jcur_t *c, const uint8_t **s, int *n, int *esc) {
     const uint8_t *p = c->p, *e = c->e;
@@ -1086,7 +1104,10 @@ JWT_INLINE int jstr(jcur_t *c, const uint8_t **s, int *n, int *esc) {
             }
             continue;
         }
-        if (ch < 0x80) { p++; continue; }
+        if (ch < 0x80) {
+            p++;
+            continue;
+        }
         /* UTF-8: reject overlongs, surrogates, > U+10FFFF */
         int len;
         uint32_t cp;
@@ -1099,7 +1120,8 @@ JWT_INLINE int jstr(jcur_t *c, const uint8_t **s, int *n, int *esc) {
             if ((p[i] & 0xC0) != 0x80) return 0;
             cp = cp << 6 | (p[i] & 0x3F);
         }
-        if ((len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) || (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)))
+        if ((len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) ||
+            (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)))
             return 0;
         p += len;
     }
@@ -1121,27 +1143,28 @@ static int junescape(uint8_t *dst, int cap, const uint8_t *s, int n) {
         uint8_t x = s[i + 1];
         i += 2;
         switch (x) {
-        case 'b': cp = 8; break;
-        case 'f': cp = 12; break;
-        case 'n': cp = 10; break;
-        case 'r': cp = 13; break;
-        case 't': cp = 9; break;
-        case 'u':
-            hex4(s + i, &cp);
-            i += 4;
-            if (cp >= 0xD800 && cp <= 0xDBFF) {
-                uint32_t lo;
-                if (i + 6 <= n && s[i] == '\\' && s[i + 1] == 'u' && hex4(s + i + 2, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
-                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                    i += 6;
-                } else {
+            case 'b': cp = 8; break;
+            case 'f': cp = 12; break;
+            case 'n': cp = 10; break;
+            case 'r': cp = 13; break;
+            case 't': cp = 9; break;
+            case 'u':
+                hex4(s + i, &cp);
+                i += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    uint32_t lo;
+                    if (i + 6 <= n && s[i] == '\\' && s[i + 1] == 'u' && hex4(s + i + 2, &lo) && lo >= 0xDC00 &&
+                        lo <= 0xDFFF) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        i += 6;
+                    } else {
+                        cp = 0xFFFD;
+                    }
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
                     cp = 0xFFFD;
                 }
-            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
-                cp = 0xFFFD;
-            }
-            break;
-        default: cp = x; break; /* " \ / */
+                break;
+            default: cp = x; break; /* " \ / */
         }
         int need = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
         if (o + need > cap) return -1;
@@ -1193,7 +1216,8 @@ JWT_INLINE uint64_t swar8(uint64_t x) { /* x = 8 digits, first digit in the low 
     x -= 0x3030303030303030ull;
     x = x * 10 + (x >> 8);
     x = ((x & 0x000000FF000000FFull) * (100 + (1000000ull << 32)) +
-         ((x >> 16) & 0x000000FF000000FFull) * (1 + (10000ull << 32))) >> 32;
+         ((x >> 16) & 0x000000FF000000FFull) * (1 + (10000ull << 32))) >>
+        32;
     return x;
 }
 /* value of a validated integer span of <= 18 digits (optional '-') */
@@ -1229,7 +1253,8 @@ static void jnow_init(jnow_t *jn, int64_t now) {
     uint8_t tmp[24];
     int l = 0;
     uint64_t u = now > 0 ? (uint64_t)now : 0;
-    do tmp[l++] = (uint8_t)('0' + u % 10), u /= 10; while (u);
+    do tmp[l++] = (uint8_t)('0' + u % 10), u /= 10;
+    while (u);
     for (int i = 0; i < l; i++) jn->s[i] = tmp[l - 1 - i];
     jn->len = now > 0 ? l : 0, jn->t = now;
 }
@@ -1266,34 +1291,43 @@ static int jskip(jcur_t *c, int depth) {
     const uint8_t *s;
     int n, esc, isint;
     switch (*c->p) {
-    case '"': return jstr(c, &s, &n, &esc);
-    case '{':
-    case '[': {
-        uint8_t close = *c->p == '{' ? '}' : ']';
-        int obj = close == '}';
-        if (depth >= 32) return 0;
-        c->p++;
-        jws(c);
-        if (c->p < c->e && *c->p == close) return c->p++, 1;
-        for (;;) {
-            if (obj) {
-                jws(c);
-                if (!jstr(c, &s, &n, &esc)) return 0;
-                jws(c);
-                if (c->p >= c->e || *c->p++ != ':') return 0;
-            }
-            if (!jskip(c, depth + 1)) return 0;
+        case '"': return jstr(c, &s, &n, &esc);
+        case '{':
+        case '[': {
+            uint8_t close = *c->p == '{' ? '}' : ']';
+            int obj = close == '}';
+            if (depth >= 32) return 0;
+            c->p++;
             jws(c);
-            if (c->p >= c->e) return 0;
-            if (*c->p == ',') { c->p++; continue; }
-            if (*c->p == close) return c->p++, 1;
-            return 0;
+            if (c->p < c->e && *c->p == close) return c->p++, 1;
+            for (;;) {
+                if (obj) {
+                    jws(c);
+                    if (!jstr(c, &s, &n, &esc)) return 0;
+                    jws(c);
+                    if (c->p >= c->e || *c->p++ != ':') return 0;
+                }
+                if (!jskip(c, depth + 1)) return 0;
+                jws(c);
+                if (c->p >= c->e) return 0;
+                if (*c->p == ',') {
+                    c->p++;
+                    continue;
+                }
+                if (*c->p == close) return c->p++, 1;
+                return 0;
+            }
         }
-    }
-    case 't': if (c->e - c->p >= 4 && !memcmp(c->p, "true", 4)) return c->p += 4, 1; return 0;
-    case 'f': if (c->e - c->p >= 5 && !memcmp(c->p, "false", 5)) return c->p += 5, 1; return 0;
-    case 'n': if (c->e - c->p >= 4 && !memcmp(c->p, "null", 4)) return c->p += 4, 1; return 0;
-    default: return jnum(c, &s, &n, &isint);
+        case 't':
+            if (c->e - c->p >= 4 && !memcmp(c->p, "true", 4)) return c->p += 4, 1;
+            return 0;
+        case 'f':
+            if (c->e - c->p >= 5 && !memcmp(c->p, "false", 5)) return c->p += 5, 1;
+            return 0;
+        case 'n':
+            if (c->e - c->p >= 4 && !memcmp(c->p, "null", 4)) return c->p += 4, 1;
+            return 0;
+        default: return jnum(c, &s, &n, &isint);
     }
 }
 
@@ -1307,20 +1341,20 @@ JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
         s = buf;
     }
     switch (n) {
-    case 3:
-        if (!memcmp(s, "sub", 3)) return K_SUB;
-        if (!memcmp(s, "exp", 3)) return K_EXP;
-        if (!memcmp(s, "nbf", 3)) return K_NBF;
-        if (!memcmp(s, "alg", 3)) return K_ALG;
-        return K_OTHER;
-    case 8: return memcmp(s, "username", 8) ? K_OTHER : K_USERNAME;
-    default: return K_OTHER;
+        case 3:
+            if (!memcmp(s, "sub", 3)) return K_SUB;
+            if (!memcmp(s, "exp", 3)) return K_EXP;
+            if (!memcmp(s, "nbf", 3)) return K_NBF;
+            if (!memcmp(s, "alg", 3)) return K_ALG;
+            return K_OTHER;
+        case 8: return memcmp(s, "username", 8) ? K_OTHER : K_USERNAME;
+        default: return K_OTHER;
     }
 }
 
 /* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256"). */
 static int header_ok(const uint8_t *h, int n, const char *want) {
-    jcur_t c = {h, h + n};
+    jcur_t c = { h, h + n };
     const uint8_t *s;
     int len, esc, alg = 0;
     jws(&c);
@@ -1347,7 +1381,10 @@ static int header_ok(const uint8_t *h, int n, const char *want) {
         }
         jws(&c);
         if (c.p >= c.e) return 0;
-        if (*c.p == ',') { c.p++; continue; }
+        if (*c.p == ',') {
+            c.p++;
+            continue;
+        }
         if (*c.p++ != '}') return 0;
         break;
     }
@@ -1371,7 +1408,7 @@ JWT_INLINE int sub_value(const uint8_t *s, int len, int64_t *uid) {
 /* Payload claims -> result.  Precedence: malformed/expired/not-yet-valid -> INVALID, then
  * sub/username problems -> BAD_PAYLOAD. */
 static int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
-    jcur_t c = {pl, pl + n};
+    jcur_t c = { pl, pl + n };
     const uint8_t *s;
     int len, esc, seen = 0, bad = 0, isint;
     jws(&c);
@@ -1437,7 +1474,10 @@ static int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result
         }
         jws(&c);
         if (c.p >= c.e) return JWT_INVALID;
-        if (*c.p == ',') { c.p++; continue; }
+        if (*c.p == ',') {
+            c.p++;
+            continue;
+        }
         if (*c.p++ != '}') return JWT_INVALID;
         break;
     }
@@ -1480,8 +1520,8 @@ JWT_INLINE uint64_t avx2_mask64(__m256i lo, __m256i hi) {
 }
 JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
     /* simdjson's operator table: | 0x20 folds [ ] into { }, low nibble picks the candidate */
-    const __m256i op_t = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ':', '{', ',', '}', 0, 0,
-                                          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ':', '{', ',', '}', 0, 0);
+    const __m256i op_t = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ':', '{', ',', '}', 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                          0, 0, 0, ':', '{', ',', '}', 0, 0);
     __m256i v0 = _mm256_loadu_si256((const __m256i *)p), v1 = _mm256_loadu_si256((const __m256i *)(p + 32));
     __m256i x20 = _mm256_set1_epi8(0x20);
     __m256i op0 = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(op_t, v0), _mm256_or_si256(v0, x20));
@@ -1498,7 +1538,8 @@ JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
 }
 JWT_INLINE uint64_t prefix_xor(uint64_t m) { /* simdjson haswell: one carry-less multiply */
 #if defined(__PCLMUL__)
-    return (uint64_t)_mm_cvtsi128_si64(_mm_clmulepi64_si128(_mm_set_epi64x(0, (long long)m), _mm_set1_epi8((char)0xFF), 0));
+    return (uint64_t)_mm_cvtsi128_si64(
+        _mm_clmulepi64_si128(_mm_set_epi64x(0, (long long)m), _mm_set1_epi8((char)0xFF), 0));
 #else
     m ^= m << 1, m ^= m << 2, m ^= m << 4, m ^= m << 8, m ^= m << 16, m ^= m << 32;
     return m;
@@ -1506,7 +1547,7 @@ JWT_INLINE uint64_t prefix_xor(uint64_t m) { /* simdjson haswell: one carry-less
 }
 #elif defined(JWT_HAVE_NEON)
 JWT_INLINE uint64_t neon_mask64(uint8x16_t m0, uint8x16_t m1, uint8x16_t m2, uint8x16_t m3) {
-    const uint8x16_t bit = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    const uint8x16_t bit = { 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128 };
     uint8x16_t s0 = vpaddq_u8(vandq_u8(m0, bit), vandq_u8(m1, bit));
     uint8x16_t s1 = vpaddq_u8(vandq_u8(m2, bit), vandq_u8(m3, bit));
     s0 = vpaddq_u8(s0, s1);
@@ -1514,7 +1555,7 @@ JWT_INLINE uint64_t neon_mask64(uint8x16_t m0, uint8x16_t m1, uint8x16_t m2, uin
     return vgetq_lane_u64(vreinterpretq_u64_u8(s0), 0);
 }
 JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
-    const uint8x16_t op_t = {0xff, 0, ',', ':', 0, '[', ']', '{', '}', 0, 0, 0, 0, 0, 0, 0}; /* simdjson arm64 */
+    const uint8x16_t op_t = { 0xff, 0, ',', ':', 0, '[', ']', '{', '}', 0, 0, 0, 0, 0, 0, 0 }; /* simdjson arm64 */
     uint8x16_t v[4], op[4], sp[4], q[4], odd[4];
     for (int i = 0; i < 4; i++) {
         v[i] = vld1q_u8(p + 16 * i);
@@ -1522,8 +1563,8 @@ JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
         sp[i] = vceqq_u8(v[i], vdupq_n_u8(' '));
         q[i] = vceqq_u8(v[i], vdupq_n_u8('"'));
         /* odd: (v - 0x20) >= 0x60 catches < 0x20 and >= 0x80 in one unsigned compare */
-        odd[i] = vorrq_u8(vcgeq_u8(vsubq_u8(v[i], vdupq_n_u8(0x20)), vdupq_n_u8(0x60)),
-                          vceqq_u8(v[i], vdupq_n_u8('\\')));
+        odd[i] =
+            vorrq_u8(vcgeq_u8(vsubq_u8(v[i], vdupq_n_u8(0x20)), vdupq_n_u8(0x60)), vceqq_u8(v[i], vdupq_n_u8('\\')));
     }
     c->odd = neon_mask64(odd[0], odd[1], odd[2], odd[3]);
     c->op = neon_mask64(op[0], op[1], op[2], op[3]);
@@ -1583,7 +1624,7 @@ static int payload_fast(const uint8_t *pl, int n, const jnow_t *now, jwt_result_
     int nb = (n + 63) >> 6;
     uint16_t tk[256 + 4]; /* token starts */
     int nt = 0;
-    uint64_t prev_in = 0, sc[4] = {0}, nsc[4] = {~0ull, ~0ull, ~0ull, ~0ull}, cq[4] = {0};
+    uint64_t prev_in = 0, sc[4] = { 0 }, nsc[4] = { ~0ull, ~0ull, ~0ull, ~0ull }, cq[4] = { 0 };
     jcls_t c[4];
     for (int b = 0; b < nb; b++) {
         jclassify(pl + (b << 6), &c[b]);
@@ -1593,7 +1634,7 @@ static int payload_fast(const uint8_t *pl, int n, const jnow_t *now, jwt_result_
         }
         if (c[b].odd) return -1;
         uint64_t in = prefix_xor(c[b].quote) ^ prev_in; /* opening quote .. byte before the closing one */
-        prev_in = (uint64_t)((int64_t)in >> 63);
+        prev_in = 0 - (in >> 63);                       /* all ones if the last byte is inside a string */
         uint64_t op = c[b].op & ~in;
         sc[b] = ~(in | c[b].sp | op | c[b].quote); /* scalar bytes outside strings */
         nsc[b] = ~sc[b];
@@ -1625,7 +1666,7 @@ static int payload_fast(const uint8_t *pl, int n, const jnow_t *now, jwt_result_
         const uint8_t *vs = pl + v + str;
         int vl = vend - v - str;
         if (!str) { /* the scalar must be exactly one number or literal */
-            jcur_t cc = {pl + v, pl + vend};
+            jcur_t cc = { pl + v, pl + vend };
             const uint8_t *nsp;
             int nl, isint = 0;
             int isnum = (*vs == '-' || (*vs >= '0' && *vs <= '9')) && jnum(&cc, &nsp, &nl, &isint) && cc.p == cc.e;
@@ -1690,8 +1731,9 @@ JWT_INLINE int jstrspan(const uint8_t *p, int max) {
 #if defined(__SSE2__)
     for (; i < max; i += 16) {
         __m128i v = _mm_loadu_si128((const __m128i *)(p + i));
-        __m128i st = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, _mm_set1_epi8('"')), _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'))),
-                                  _mm_cmplt_epi8(v, _mm_set1_epi8(0x20))); /* signed: also >= 0x80 */
+        __m128i st =
+            _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, _mm_set1_epi8('"')), _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'))),
+                         _mm_cmplt_epi8(v, _mm_set1_epi8(0x20))); /* signed: also >= 0x80 */
         int m = _mm_movemask_epi8(st);
         if (m) return i + __builtin_ctz(m);
     }
@@ -1766,47 +1808,47 @@ static int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result
 #if defined(__AVX2__)
 #define JL 32
 typedef __m256i jv8;
-#define JV_SET1(x) _mm256_set1_epi8((char)(x))
-#define JV_LOAD(p) _mm256_load_si256((const __m256i *)(p))
-#define JV_STORE(p, v) _mm256_store_si256((__m256i *)(p), v)
-#define JV_EQ(a, b) _mm256_cmpeq_epi8(a, b)
-#define JV_OR(a, b) _mm256_or_si256(a, b)
-#define JV_AND(a, b) _mm256_and_si256(a, b)
-#define JV_ANDN(a, b) _mm256_andnot_si256(a, b) /* ~a & b */
-#define JV_ADD(a, b) _mm256_add_epi8(a, b)
-#define JV_SUB(a, b) _mm256_sub_epi8(a, b)
-#define JV_MINU(a, b) _mm256_min_epu8(a, b)
-#define JV_MAXU(a, b) _mm256_max_epu8(a, b)
+#define JV_SET1(x)      _mm256_set1_epi8((char)(x))
+#define JV_LOAD(p)      _mm256_load_si256((const __m256i *)(p))
+#define JV_STORE(p, v)  _mm256_store_si256((__m256i *)(p), v)
+#define JV_EQ(a, b)     _mm256_cmpeq_epi8(a, b)
+#define JV_OR(a, b)     _mm256_or_si256(a, b)
+#define JV_AND(a, b)    _mm256_and_si256(a, b)
+#define JV_ANDN(a, b)   _mm256_andnot_si256(a, b) /* ~a & b */
+#define JV_ADD(a, b)    _mm256_add_epi8(a, b)
+#define JV_SUB(a, b)    _mm256_sub_epi8(a, b)
+#define JV_MINU(a, b)   _mm256_min_epu8(a, b)
+#define JV_MAXU(a, b)   _mm256_max_epu8(a, b)
 #define JV_SEL(m, a, b) _mm256_blendv_epi8(b, a, m) /* m ? a : b */
-#define JV_TBL(t) _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(t)))
-#define JV_LOOK(t, i) _mm256_shuffle_epi8(t, i)
+#define JV_TBL(t)       _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(t)))
+#define JV_LOOK(t, i)   _mm256_shuffle_epi8(t, i)
 typedef __m128i jv16;
-#define JZ_LO(a, b) _mm_unpacklo_epi8(a, b)
-#define JZ_HI(a, b) _mm_unpackhi_epi8(a, b)
-#define JZ_LOAD(p) _mm_loadu_si128((const __m128i *)(p))
+#define JZ_LO(a, b)    _mm_unpacklo_epi8(a, b)
+#define JZ_HI(a, b)    _mm_unpackhi_epi8(a, b)
+#define JZ_LOAD(p)     _mm_loadu_si128((const __m128i *)(p))
 #define JZ_STORE(p, v) _mm_store_si128((__m128i *)(p), v)
 #else
-#define JL 16
+#define JL              16
 typedef uint8x16_t jv8;
-#define JV_SET1(x) vdupq_n_u8((uint8_t)(x))
-#define JV_LOAD(p) vld1q_u8(p)
-#define JV_STORE(p, v) vst1q_u8(p, v)
-#define JV_EQ(a, b) vceqq_u8(a, b)
-#define JV_OR(a, b) vorrq_u8(a, b)
-#define JV_AND(a, b) vandq_u8(a, b)
-#define JV_ANDN(a, b) vbicq_u8(b, a)
-#define JV_ADD(a, b) vaddq_u8(a, b)
-#define JV_SUB(a, b) vsubq_u8(a, b)
-#define JV_MINU(a, b) vminq_u8(a, b)
-#define JV_MAXU(a, b) vmaxq_u8(a, b)
+#define JV_SET1(x)      vdupq_n_u8((uint8_t)(x))
+#define JV_LOAD(p)      vld1q_u8(p)
+#define JV_STORE(p, v)  vst1q_u8(p, v)
+#define JV_EQ(a, b)     vceqq_u8(a, b)
+#define JV_OR(a, b)     vorrq_u8(a, b)
+#define JV_AND(a, b)    vandq_u8(a, b)
+#define JV_ANDN(a, b)   vbicq_u8(b, a)
+#define JV_ADD(a, b)    vaddq_u8(a, b)
+#define JV_SUB(a, b)    vsubq_u8(a, b)
+#define JV_MINU(a, b)   vminq_u8(a, b)
+#define JV_MAXU(a, b)   vmaxq_u8(a, b)
 #define JV_SEL(m, a, b) vbslq_u8(m, a, b)
-#define JV_TBL(t) vld1q_u8(t)
-#define JV_LOOK(t, i) vqtbl1q_u8(t, i)
+#define JV_TBL(t)       vld1q_u8(t)
+#define JV_LOOK(t, i)   vqtbl1q_u8(t, i)
 typedef uint8x16_t jv16;
-#define JZ_LO(a, b) vzip1q_u8(a, b)
-#define JZ_HI(a, b) vzip2q_u8(a, b)
-#define JZ_LOAD(p) vld1q_u8(p)
-#define JZ_STORE(p, v) vst1q_u8(p, v)
+#define JZ_LO(a, b)     vzip1q_u8(a, b)
+#define JZ_HI(a, b)     vzip2q_u8(a, b)
+#define JZ_LOAD(p)      vld1q_u8(p)
+#define JZ_STORE(p, v)  vst1q_u8(p, v)
 #endif
 
 typedef struct {
@@ -1825,18 +1867,19 @@ JWT_INLINE void jl_tr16(jv16 *x) {
 
 enum { JS_OBJ, JS_KEY0, JS_KEY, JS_COLON, JS_VAL, JS_STR, JS_INT, JS_SEP, JS_DONE, JS_FAIL };
 #define F JS_FAIL
-static const uint8_t jl_t_other[16] = {F, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_ws[16] = {JS_OBJ, JS_KEY0, JS_KEY, JS_COLON, JS_VAL, JS_STR, JS_SEP, JS_SEP, JS_DONE, F, F, F, F, F, F, F};
-static const uint8_t jl_t_q[16] = {F, JS_KEY, JS_COLON, F, JS_STR, JS_SEP, F, F, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_colon[16] = {F, F, JS_KEY, JS_VAL, F, JS_STR, F, F, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_comma[16] = {F, F, JS_KEY, F, F, JS_STR, JS_KEY0, JS_KEY0, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_lb[16] = {JS_KEY0, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_rb[16] = {F, F, JS_KEY, F, F, JS_STR, JS_DONE, JS_DONE, F, F, F, F, F, F, F, F};
-static const uint8_t jl_t_dg[16] = {F, F, JS_KEY, F, JS_INT, JS_STR, JS_INT, F, F, F, F, F, F, F, F, F};
+static const uint8_t jl_t_other[16] = { F, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_ws[16] = { JS_OBJ,  JS_KEY0, JS_KEY, JS_COLON, JS_VAL, JS_STR, JS_SEP, JS_SEP,
+                                     JS_DONE, F,       F,      F,        F,      F,      F,      F };
+static const uint8_t jl_t_q[16] = { F, JS_KEY, JS_COLON, F, JS_STR, JS_SEP, F, F, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_colon[16] = { F, F, JS_KEY, JS_VAL, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_comma[16] = { F, F, JS_KEY, F, F, JS_STR, JS_KEY0, JS_KEY0, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_lb[16] = { JS_KEY0, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_rb[16] = { F, F, JS_KEY, F, F, JS_STR, JS_DONE, JS_DONE, F, F, F, F, F, F, F, F };
+static const uint8_t jl_t_dg[16] = { F, F, JS_KEY, F, JS_INT, JS_STR, JS_INT, F, F, F, F, F, F, F, F, F };
 #undef F
 static const uint8_t jl_k_sub[16] = "sub", jl_k_user[16] = "username", jl_k_exp[16] = "exp", jl_k_nbf[16] = "nbf";
-static const uint8_t jl_seenbit[16] = {0, 1, 2, 4, 8};
-static const uint8_t jl_zero_payload[256 + 64] __attribute__((aligned(64))) = {0};
+static const uint8_t jl_seenbit[16] = { 0, 1, 2, 4, 8 };
+static const uint8_t jl_zero_payload[256 + 64] __attribute__((aligned(64))) = { 0 };
 
 /* m <= JL payloads, each readable for its length rounded up to 16 (+16).  Lanes with n > JL_MAXN
  * come back !ok. */
@@ -1866,7 +1909,8 @@ static void json_lanes(int m, const uint8_t *const *pl, const int *n, jlane_t *o
     const jv8 k_sub = JV_TBL(jl_k_sub), k_user = JV_TBL(jl_k_user), k_exp = JV_TBL(jl_k_exp), k_nbf = JV_TBL(jl_k_nbf);
     const jv8 seenbit = JV_TBL(jl_seenbit), ones = JV_SET1(0xFF), one = JV_SET1(1), zero = JV_SET1(0);
     const jv8 nvec = JV_LOAD(nl);
-    jv8 st = JV_SET1(JS_OBJ), fail = zero, seen = zero, koff = zero, c_sub = zero, c_user = zero, c_exp = zero, c_nbf = zero;
+    jv8 st = JV_SET1(JS_OBJ), fail = zero, seen = zero, koff = zero, c_sub = zero, c_user = zero, c_exp = zero,
+        c_nbf = zero;
     jv8 curkey = zero, vstart = zero, vtype = zero, z = zero;
     jv8 s1 = zero, s2 = zero, s3 = zero, s4 = zero, e1 = zero, e2 = zero, e3 = zero, e4 = zero;
     jv8 y1 = zero, y2 = zero, y3 = zero, y4 = zero;
@@ -1877,7 +1921,8 @@ static void json_lanes(int m, const uint8_t *const *pl, const int *n, jlane_t *o
         jv8 cm = JV_EQ(v, JV_SET1(',')), lb = JV_EQ(v, JV_SET1('{')), rb = JV_EQ(v, JV_SET1('}'));
         jv8 d = JV_SUB(v, JV_SET1('0')), dg = JV_EQ(JV_MINU(d, JV_SET1(9)), d);
         jv8 x = JV_SUB(v, JV_SET1(0x20));
-        fail = JV_OR(fail, JV_OR(JV_EQ(JV_MAXU(x, JV_SET1(0x60)), x), JV_EQ(v, JV_SET1('\\')))); /* <0x20, >=0x80, '\\' */
+        fail =
+            JV_OR(fail, JV_OR(JV_EQ(JV_MAXU(x, JV_SET1(0x60)), x), JV_EQ(v, JV_SET1('\\')))); /* <0x20, >=0x80, '\\' */
         /* events from the old state */
         jv8 inkey = JV_EQ(st, JV_SET1(JS_KEY)), inval = JV_EQ(st, JV_SET1(JS_VAL)), inint = JV_EQ(st, JV_SET1(JS_INT));
         jv8 kbeg = JV_AND(JV_EQ(st, JV_SET1(JS_KEY0)), q), kbyte = JV_ANDN(q, inkey), kend = JV_AND(inkey, q);
@@ -1903,7 +1948,8 @@ static void json_lanes(int m, const uint8_t *const *pl, const int *n, jlane_t *o
         c_exp = JV_SEL(kbyte, JV_AND(c_exp, JV_EQ(v, JV_LOOK(k_exp, ko))), c_exp);
         c_nbf = JV_SEL(kbyte, JV_AND(c_nbf, JV_EQ(v, JV_LOOK(k_nbf, ko))), c_nbf);
         koff = JV_SEL(kbeg, zero, JV_ADD(koff, JV_AND(kbyte, one)));
-        c_sub = JV_OR(c_sub, kbeg), c_user = JV_OR(c_user, kbeg), c_exp = JV_OR(c_exp, kbeg), c_nbf = JV_OR(c_nbf, kbeg);
+        c_sub = JV_OR(c_sub, kbeg), c_user = JV_OR(c_user, kbeg), c_exp = JV_OR(c_exp, kbeg),
+        c_nbf = JV_OR(c_nbf, kbeg);
         jv8 l3 = JV_EQ(koff, JV_SET1(3));
         jv8 id = JV_SEL(JV_AND(c_nbf, l3), JV_SET1(4), zero);
         id = JV_SEL(JV_AND(c_exp, l3), JV_SET1(3), id);
@@ -1916,12 +1962,12 @@ static void json_lanes(int m, const uint8_t *const *pl, const int *n, jlane_t *o
         /* values */
         vstart = JV_SEL(sbeg, P1, JV_SEL(ibeg, P, vstart));
         vtype = JV_SEL(sbeg, one, JV_SEL(ibeg, JV_SET1(2), vtype));
-#define JL_CAPTURE(i, s_, e_, y_)                                   \
-        do {                                                        \
-            jv8 mk = JV_AND(vend, JV_EQ(curkey, JV_SET1(i)));       \
-            s_ = JV_SEL(mk, vstart, s_), e_ = JV_SEL(mk, P, e_);    \
-            y_ = JV_SEL(mk, vtype, y_);                             \
-        } while (0)
+#define JL_CAPTURE(i, s_, e_, y_)                                                                                      \
+    do {                                                                                                               \
+        jv8 mk = JV_AND(vend, JV_EQ(curkey, JV_SET1(i)));                                                              \
+        s_ = JV_SEL(mk, vstart, s_), e_ = JV_SEL(mk, P, e_);                                                           \
+        y_ = JV_SEL(mk, vtype, y_);                                                                                    \
+    } while (0)
         JL_CAPTURE(1, s1, e1, y1);
         JL_CAPTURE(2, s2, e2, y2);
         JL_CAPTURE(3, s3, e3, y3);

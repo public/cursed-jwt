@@ -11,12 +11,22 @@
 #   Wycheproof ed25519_test.json; RFC 8032 section 7.1 (Ed25519 test vectors); RFC 8037 A.4 (the EdDSA JWS)
 set -e
 cd "$(dirname "$0")/.."
-V=third_party/vectors; mkdir -p $V
+V=third_party/vectors
+mkdir -p $V
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
-get() {   # file url sha256
-  if [ -f "$V/$1" ] && [ "$(sha "$V/$1")" = "$3" ]; then echo "$1: have it"; return; fi
-  echo "$1: fetching $2"; curl -fsSL "$2" -o "$V/$1.tmp"
-  got=$(sha "$V/$1.tmp"); [ "$got" = "$3" ] || { echo "$1: SHA-256 mismatch (got $got, want $3)" >&2; rm -f "$V/$1.tmp"; exit 1; }
+get() { # file url sha256
+  if [ -f "$V/$1" ] && [ "$(sha "$V/$1")" = "$3" ]; then
+    echo "$1: have it"
+    return
+  fi
+  echo "$1: fetching $2"
+  curl -fsSL "$2" -o "$V/$1.tmp"
+  got=$(sha "$V/$1.tmp")
+  [ "$got" = "$3" ] || {
+    echo "$1: SHA-256 mismatch (got $got, want $3)" >&2
+    rm -f "$V/$1.tmp"
+    exit 1
+  }
   mv "$V/$1.tmp" "$V/$1"
 }
 get rfc4231.txt https://www.rfc-editor.org/rfc/rfc4231.txt 72178527ce93500e730bc8eb182b857e583096d652b64ece0879c52ba1df973b

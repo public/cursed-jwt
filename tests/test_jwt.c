@@ -10,14 +10,15 @@
 static const char *SECRET = "cursed-jwt-test-secret"; /* must match the Makefile's token generation */
 static int fails, checks;
 static int quick; /* JWT_TEST_QUICK=1: fewer random iterations, same token/crafted coverage */
-#define CHECK(cond, ...)                                                            \
-    do {                                                                            \
-        checks++;                                                                   \
-        if (!(cond)) {                                                              \
-            fails++;                                                                \
-            if (fails < 40) fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__),    \
-                            fprintf(stderr, __VA_ARGS__), fputc('\n', stderr);      \
-        }                                                                           \
+#define CHECK(cond, ...)                                                                                               \
+    do {                                                                                                               \
+        checks++;                                                                                                      \
+        if (!(cond)) {                                                                                                 \
+            fails++;                                                                                                   \
+            if (fails < 40)                                                                                            \
+                fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__), fprintf(stderr, __VA_ARGS__),                     \
+                    fputc('\n', stderr);                                                                               \
+        }                                                                                                              \
     } while (0)
 
 /* ---- the AVX-512 template, executed with a scalar emulation of vpternlogd/vprord ---- */
@@ -29,26 +30,26 @@ static inline uint32_t tl_emu(uint32_t a, uint32_t b, uint32_t c, int imm) {
     }
     return r;
 }
-#define MB(name) name##_tlemu
-#define MB_LANES 1
-#define V uint32_t
-#define VSET1(x) ((uint32_t)(x))
-#define VADD(a, b) ((a) + (b))
-#define VXOR(a, b) ((a) ^ (b))
-#define VSHR(x, n) ((x) >> (n))
-#define VROR(x, n) ROR32(x, n)
+#define MB(name)       name##_tlemu
+#define MB_LANES       1
+#define V              uint32_t
+#define VSET1(x)       ((uint32_t)(x))
+#define VADD(a, b)     ((a) + (b))
+#define VXOR(a, b)     ((a) ^ (b))
+#define VSHR(x, n)     ((x) >> (n))
+#define VROR(x, n)     ROR32(x, n)
 #define VXOR3(a, b, c) tl_emu(a, b, c, JWT_TL_XOR3)
-#define VCH(e, f, g) tl_emu(e, f, g, JWT_TL_CH)
-#define VMAJ(a, b, c) tl_emu(a, b, c, JWT_TL_MAJ)
-#define VSEL(m, x, y) tl_emu(m, x, y, JWT_TL_CH)
-#define VMASK(arr) ((arr)[0])
-#define MB_LOAD16(ptr, w)                                                   \
-    do {                                                                    \
-        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = be32((ptr)[0] + 4 * i_);  \
+#define VCH(e, f, g)   tl_emu(e, f, g, JWT_TL_CH)
+#define VMAJ(a, b, c)  tl_emu(a, b, c, JWT_TL_MAJ)
+#define VSEL(m, x, y)  tl_emu(m, x, y, JWT_TL_CH)
+#define VMASK(arr)     ((arr)[0])
+#define MB_LOAD16(ptr, w)                                                                                              \
+    do {                                                                                                               \
+        for (int i_ = 0; i_ < 16; i_++) (w)[i_] = be32((ptr)[0] + 4 * i_);                                             \
     } while (0)
-#define MB_STORE8(s, out)                                                   \
-    do {                                                                    \
-        for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];              \
+#define MB_STORE8(s, out)                                                                                              \
+    do {                                                                                                               \
+        for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];                                                         \
     } while (0)
 #define MB_MIN_LANES 1
 #include "jwt_mb.inc"
@@ -109,13 +110,13 @@ static char *fmt(const char *f, ...) {
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 /* OpenSSL's extracted block function dispatches on jwt_ossl_ia32cap_P: run each path the CPU has, by masking the
  * capability word to that path's bits (shaext only where SHA-NI exists; otherwise it falls through to the next). */
-#define OSSL_PATH(fn, m0, m1, m2)                                                                    \
-    static void fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) { \
-        unsigned sv[4];                                                                              \
-        memcpy(sv, jwt_ossl_ia32cap_P, sizeof sv);                                                   \
-        jwt_ossl_ia32cap_P[0] &= (m0), jwt_ossl_ia32cap_P[1] &= (m1), jwt_ossl_ia32cap_P[2] &= (m2); \
-        jwt_hmac_ossl(k, n, msg, len, mac);                                                          \
-        memcpy(jwt_ossl_ia32cap_P, sv, sizeof sv);                                                   \
+#define OSSL_PATH(fn, m0, m1, m2)                                                                                      \
+    static void fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t(*mac)[8]) {          \
+        unsigned sv[4];                                                                                                \
+        memcpy(sv, jwt_ossl_ia32cap_P, sizeof sv);                                                                     \
+        jwt_ossl_ia32cap_P[0] &= (m0), jwt_ossl_ia32cap_P[1] &= (m1), jwt_ossl_ia32cap_P[2] &= (m2);                   \
+        jwt_hmac_ossl(k, n, msg, len, mac);                                                                            \
+        memcpy(jwt_ossl_ia32cap_P, sv, sizeof sv);                                                                     \
     }
 OSSL_PATH(hmac_ossl_shaext, ~0u, ~0u, 1u << 29)
 OSSL_PATH(hmac_ossl_avx2, ~0u, ~0u, 1u << 8 | 1u << 5 | 1u << 3)
@@ -132,33 +133,33 @@ typedef struct {
 } engine_t;
 
 static const engine_t all_engines[] = {
-    {"scalar", jwt_hmac_scalar, jwt_verify_batch_scalar, 0},
+    { "scalar", jwt_hmac_scalar, jwt_verify_batch_scalar, 0 },
 #ifdef JWT_HAVE_NEON
-    {"neon4", jwt_hmac_neon, jwt_verify_batch_neon, 0},
+    { "neon4", jwt_hmac_neon, jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)
-    {"sha2x1", jwt_hmac_sha2_1, NULL, JWT_CPU_SHA2},
-    {"sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2, JWT_CPU_SHA2},
-    {"sha2x2", jwt_hmac_sha2_2, NULL, JWT_CPU_SHA2},
-    {"sha2x4", jwt_hmac_sha2_4, NULL, JWT_CPU_SHA2},
+    { "sha2x1", jwt_hmac_sha2_1, NULL, JWT_CPU_SHA2 },
+    { "sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2, JWT_CPU_SHA2 },
+    { "sha2x2", jwt_hmac_sha2_2, NULL, JWT_CPU_SHA2 },
+    { "sha2x4", jwt_hmac_sha2_4, NULL, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
-    {"avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2},
-    {"avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2},
-    {"avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL},
-    {"avx512x2", jwt_hmac_avx512x2, NULL, JWT_CPU_AVX512VL},
-    {"zmm", jwt_hmac_zmm, NULL, JWT_CPU_AVX512VL},
+    { "avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2 },
+    { "avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2 },
+    { "avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
+    { "avx512x2", jwt_hmac_avx512x2, NULL, JWT_CPU_AVX512VL },
+    { "zmm", jwt_hmac_zmm, NULL, JWT_CPU_AVX512VL },
 #endif
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
-    {"ossl", jwt_hmac_ossl, NULL, 0},
-    {"ossl-shaext", hmac_ossl_shaext, NULL, 0},
-    {"ossl-avx2", hmac_ossl_avx2, NULL, 0},
-    {"ossl-avx", hmac_ossl_avx, NULL, 0},
-    {"ossl-ssse3", hmac_ossl_ssse3, NULL, 0},
-    {"ossl-x86", hmac_ossl_x86, NULL, 0},
+    { "ossl", jwt_hmac_ossl, NULL, 0 },
+    { "ossl-shaext", hmac_ossl_shaext, NULL, 0 },
+    { "ossl-avx2", hmac_ossl_avx2, NULL, 0 },
+    { "ossl-avx", hmac_ossl_avx, NULL, 0 },
+    { "ossl-ssse3", hmac_ossl_ssse3, NULL, 0 },
+    { "ossl-x86", hmac_ossl_x86, NULL, 0 },
 #endif
-    {"tlemu", jwt_hmac_tlemu, NULL, 0},
-    {"default", NULL, jwt_verify_batch, 0},
+    { "tlemu", jwt_hmac_tlemu, NULL, 0 },
+    { "default", NULL, jwt_verify_batch, 0 },
 };
 static engine_t engines[sizeof all_engines / sizeof all_engines[0]];
 static int NENG;
@@ -179,7 +180,10 @@ typedef struct {
 } seedtok_t;
 static seedtok_t *load_tokens(const char *path, int *count) {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); exit(2); }
+    if (!f) {
+        perror(path);
+        exit(2);
+    }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -189,7 +193,7 @@ static seedtok_t *load_tokens(const char *path, int *count) {
     fclose(f);
     int cap = 1024, n = 0;
     seedtok_t *v = malloc(cap * sizeof *v);
-    for (char *p = buf; (p = strstr(p, "{\"id\":")); ) {
+    for (char *p = buf; (p = strstr(p, "{\"id\":"));) {
         if (n == cap) v = realloc(v, (cap *= 2) * sizeof *v);
         v[n].id = atoi(p + 6);
         char *u = strstr(p, "\"username\":\"") + 12, *ue = strchr(u, '"');
@@ -270,7 +274,9 @@ static void test_hmac_random(void) {
         int n = 1 + (int)(rnd() % MAXN);
         int mode = (int)(rnd() % 3); /* 0: uniform-ish token lengths, 1: wild, 2: block boundaries */
         for (int i = 0; i < n; i++) {
-            len[i] = mode == 0 ? 130 + (int)(rnd() % 60) : mode == 1 ? (int)(rnd() % 700) : 64 * (int)(rnd() % 5) + (int)(rnd() % 3) - 1 + 55 - 55 * (int)(rnd() & 1);
+            len[i] = mode == 0   ? 130 + (int)(rnd() % 60)
+                     : mode == 1 ? (int)(rnd() % 700)
+                                 : 64 * (int)(rnd() % 5) + (int)(rnd() % 3) - 1 + 55 - 55 * (int)(rnd() & 1);
             if (len[i] < 0) len[i] = 0;
             if (len[i] > 699) len[i] = 699;
             for (int j = 0; j < len[i]; j++) data[i][j] = (uint8_t)rnd();
@@ -304,17 +310,22 @@ static void test_hmac_random(void) {
 /* plain SHA-256 (the RS256 / ES256 signing-input hash) on every engine vs OpenSSL, random batches of 1-40 messages
  * of 0-1,100 bytes with block boundaries over-represented, so ragged groups and leftover single streams both run */
 static void test_sha256_raw(void) {
-    static const struct { const char *name; jwt_sha256_fn *fn; unsigned need; } se[] = {
-        {"scalar", jwt_sha256_scalar, 0}, {"default", jwt_sha256_batch, 0},
+    static const struct {
+        const char *name;
+        jwt_sha256_fn *fn;
+        unsigned need;
+    } se[] = {
+        { "scalar", jwt_sha256_scalar, 0 },
+        { "default", jwt_sha256_batch, 0 },
 #ifdef JWT_HAVE_NEON
-        {"neon4", jwt_sha256_neon, 0},
+        { "neon4", jwt_sha256_neon, 0 },
 #endif
 #if defined(__aarch64__)
-        {"sha2x4", jwt_sha256_sha2, JWT_CPU_SHA2},
+        { "sha2x4", jwt_sha256_sha2, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
-        {"avx2", jwt_sha256_avx2, JWT_CPU_AVX2},
-        {"avx512", jwt_sha256_avx512, JWT_CPU_AVX512VL},
+        { "avx2", jwt_sha256_avx2, JWT_CPU_AVX2 },
+        { "avx512", jwt_sha256_avx512, JWT_CPU_AVX512VL },
 #endif
     };
     static uint8_t data[40][1100 + 64];
@@ -324,7 +335,8 @@ static void test_sha256_raw(void) {
     for (int it = 0; it < (quick ? 300 : 3000); it++) {
         int n = 1 + (int)(rnd() % 40);
         for (int i = 0; i < n; i++) {
-            len[i] = rnd() & 1 ? (int)(rnd() % 1101) : 64 * (int)(rnd() % 6) + (int)(rnd() % 3) - 1 + 55 * (int)(rnd() & 1);
+            len[i] =
+                rnd() & 1 ? (int)(rnd() % 1101) : 64 * (int)(rnd() % 6) + (int)(rnd() % 3) - 1 + 55 * (int)(rnd() & 1);
             if (len[i] < 0) len[i] = 0;
             if (len[i] > 1100) len[i] = 1100;
             for (int j = 0; j < len[i]; j++) data[i][j] = (uint8_t)rnd();
@@ -344,7 +356,8 @@ static void test_sha256_raw(void) {
         }
         nmsg += n;
     }
-    printf("  plain SHA-256 (RS256/ES256 signing inputs): %d messages x %d engines vs OpenSSL\n", nmsg, (int)(sizeof se / sizeof se[0]));
+    printf("  plain SHA-256 (RS256/ES256 signing inputs): %d messages x %d engines vs OpenSSL\n", nmsg,
+           (int)(sizeof se / sizeof se[0]));
 }
 
 /* simdjson-style fast path vs the strict parser on fuzzed payloads: whenever the fast path
@@ -398,11 +411,12 @@ static void test_json_diff(int64_t now) {
         fast++;
         int ok = sf == ss;
         if (ok && sf == JWT_OK)
-            ok = rf.uid == rs.uid && rf.username_len == rs.username_len &&
-                 !memcmp(rf.ubuf, rs.ubuf, rf.username_len) && rf.username_escape == rs.username_escape;
+            ok = rf.uid == rs.uid && rf.username_len == rs.username_len && !memcmp(rf.ubuf, rs.ubuf, rf.username_len) &&
+                 rf.username_escape == rs.username_escape;
         CHECK(ok, "json diff: fast %d strict %d on '%.*s'", sf, ss, n, (const char *)b);
     }
-    printf("  json fast path: decided %d of %d fuzzed payloads; shape matcher: %d; all agreed with the strict parser\n", fast, total, shaped);
+    printf("  json fast path: decided %d of %d fuzzed payloads; shape matcher: %d; all agreed with the strict parser\n",
+           fast, total, shaped);
     CHECK(shaped > total / 20, "shape matcher decided too few (%d/%d)", shaped, total);
     CHECK(fast > total / 10, "fast path decided too few (%d/%d)", fast, total);
 }
@@ -438,7 +452,8 @@ static void test_json_lanes(int64_t now) {
             for (int k = 0, muts = (int)(rnd() % 4); k < muts; k++) {
                 int op = (int)(rnd() % 3), pos = n ? (int)(rnd() % (n + 1)) : 0;
                 char ch = alpha[rnd() % (sizeof alpha - 1)];
-                if (op == 0 && n < 238) memmove(buf[j] + pos + 1, buf[j] + pos, n - pos), buf[j][pos] = (uint8_t)ch, n++;
+                if (op == 0 && n < 238)
+                    memmove(buf[j] + pos + 1, buf[j] + pos, n - pos), buf[j][pos] = (uint8_t)ch, n++;
                 else if (op == 1 && pos < n) memmove(buf[j] + pos, buf[j] + pos + 1, n - pos - 1), n--;
                 else if (pos < n) buf[j][pos] = (uint8_t)ch;
             }
@@ -458,11 +473,13 @@ static void test_json_lanes(int64_t now) {
             decided++;
             int ok = sl == ss;
             if (ok && sl == JWT_OK)
-                ok = rl.uid == rs.uid && rl.username_len == rs.username_len && !memcmp(rl.ubuf, rs.ubuf, rl.username_len);
+                ok = rl.uid == rs.uid && rl.username_len == rs.username_len &&
+                     !memcmp(rl.ubuf, rs.ubuf, rl.username_len);
             CHECK(ok, "lanes: lane %d strict %d on '%.*s'", sl, ss, len[j], (const char *)ref[j]);
         }
     }
-    printf("  json lanes (%d wide): decided %d of %d fuzzed payloads, all agreed with the strict parser\n", JL, decided, total);
+    printf("  json lanes (%d wide): decided %d of %d fuzzed payloads, all agreed with the strict parser\n", JL, decided,
+           total);
     CHECK(decided > total / 10, "lanes decided too few (%d/%d)", decided, total);
 }
 #endif
@@ -488,7 +505,7 @@ static void test_seed(seedtok_t *t, int n, int64_t now) {
             CHECK(bad == 0, "seed hmac %s: %d/%d mismatches", engines[e].name, bad, n);
         }
         if (!engines[e].verify) continue;
-        static const int bs[] = {1, 8, 32, 3, 4, 16, 64, 100};
+        static const int bs[] = { 1, 8, 32, 3, 4, 16, 64, 100 };
         for (int b = 0; b < (quick ? 3 : (int)(sizeof bs / sizeof bs[0])); b++) {
             int bad = 0;
             memset(res, 0xA5, n * sizeof *res);
@@ -521,10 +538,10 @@ typedef struct {
 static void test_cases(int64_t now) {
     case_t c[256];
     int n = 0;
-#define ADD(t, st, u, nm, e, w) (c[n++] = (case_t){(t), (st), (u), (nm), (e), (w)})
-#define OKC(pl, u, nm, e) ADD(sign(pl), JWT_OK, u, nm, e, pl)
-#define BAD(pl) ADD(sign(pl), JWT_INVALID, 0, NULL, 0, pl)
-#define BADP(pl) ADD(sign(pl), JWT_BAD_PAYLOAD, 0, NULL, 0, pl)
+#define ADD(t, st, u, nm, e, w) (c[n++] = (case_t){ (t), (st), (u), (nm), (e), (w) })
+#define OKC(pl, u, nm, e)       ADD(sign(pl), JWT_OK, u, nm, e, pl)
+#define BAD(pl)                 ADD(sign(pl), JWT_INVALID, 0, NULL, 0, pl)
+#define BADP(pl)                ADD(sign(pl), JWT_BAD_PAYLOAD, 0, NULL, 0, pl)
     long long fut = now + 3600, past = now - 3600;
     char *good = sign(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
     ADD(good, JWT_OK, 7, "bob", 0, "good");
@@ -534,7 +551,8 @@ static void test_cases(int64_t now) {
         char *t = strdup(good);
         char *d = strrchr(t, '.');
         d[1] = 0;
-        ADD(fmt("%s%s", t, "c2lnbmF0dXJlLWlzLW5vdC12YWxpZC1hdC1hbGwtYXQtYWxsLTEyMzQ"), JWT_INVALID, 0, NULL, 0, "bad signature");
+        ADD(fmt("%s%s", t, "c2lnbmF0dXJlLWlzLW5vdC12YWxpZC1hdC1hbGwtYXQtYWxsLTEyMzQ"), JWT_INVALID, 0, NULL, 0,
+            "bad signature");
         char hb[64];
         b64u_enc(hb, (const uint8_t *)"{\"alg\":\"none\",\"typ\":\"JWT\"}", 26);
         char *p1 = strchr(good, '.') + 1, *p2 = strrchr(good, '.');
@@ -547,14 +565,15 @@ static void test_cases(int64_t now) {
     BADP(fmt("{\"sub\":\"abc\",\"username\":\"bob\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
     BADP(fmt("{\"sub\":\"7\",\"iat\":%lld,\"exp\":%lld}", (long long)now, fut));
     /* sub variants, as other implementations' test suites check them */
-    const char *subs[] = {"0", "1", "true", "\"0\"", "\"-1\"", "\"1.5\"", "\"abc\"", "null", "\"\"", "\" 1\"",
-                          "\"1 \"", "\"+1\"", "\"1e3\"", "\"9223372036854775808\"", "{}", "[\"1\"]"};
+    const char *subs[] = { "0",    "1",      "true",   "\"0\"",  "\"-1\"", "\"1.5\"", "\"abc\"",
+                           "null", "\"\"",   "\" 1\"", "\"1 \"", "\"+1\"", "\"1e3\"", "\"9223372036854775808\"",
+                           "{}",   "[\"1\"]" };
     for (int i = 0; i < (int)(sizeof subs / sizeof *subs); i++)
         BADP(fmt("{\"sub\":%s,\"username\":\"bob\",\"exp\":%lld}", subs[i], fut));
     OKC(fmt("{\"sub\":\"9223372036854775807\",\"username\":\"bob\",\"exp\":%lld}", fut), INT64_MAX, "bob", 0);
     OKC(fmt("{\"sub\":\"007\",\"username\":\"bob\",\"exp\":%lld}", fut), 7, "bob", 0);
     OKC(fmt("{\"sub\":\"\\u0031\\u0032\",\"username\":\"bob\",\"exp\":%lld}", fut), 12, "bob", 0);
-    const char *names[] = {"0", "true", "null", "{}", "[]", "false", "1.5"};
+    const char *names[] = { "0", "true", "null", "{}", "[]", "false", "1.5" };
     for (int i = 0; i < (int)(sizeof names / sizeof *names); i++)
         BADP(fmt("{\"sub\":\"7\",\"username\":%s,\"exp\":%lld}", names[i], fut));
     /* time claims */
@@ -581,7 +600,8 @@ static void test_cases(int64_t now) {
     /* expired beats bad payload */
     BAD(fmt("{\"sub\":\"abc\",\"exp\":%lld}", past));
     /* iat and unknown claims are ignored but must be valid JSON */
-    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":\"whenever\",\"x\":[1,{\"a\":[]},\"\\n\"],\"exp\":%lld}", fut), 7, "bob", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"iat\":\"whenever\",\"x\":[1,{\"a\":[]},\"\\n\"],\"exp\":%lld}", fut),
+        7, "bob", 0);
     /* duplicates and escaped keys */
     BAD(fmt("{\"sub\":\"7\",\"sub\":\"8\",\"username\":\"bob\",\"exp\":%lld}", fut));
     BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"username\":\"eve\",\"exp\":%lld}", fut));
@@ -595,13 +615,14 @@ static void test_cases(int64_t now) {
     OKC(fmt("{\"sub\":\"7\",\"username\":\"tab\\there\",\"exp\":%lld}", fut), 7, "tab\there", 1);
     OKC(fmt("{\"sub\":\"7\",\"username\":\"sl\\/ash\",\"exp\":%lld}", fut), 7, "sl/ash", 0);
     OKC(fmt("{\"sub\":\"7\",\"username\":\"caf\\u00e9\",\"exp\":%lld}", fut), 7, "caf\xc3\xa9", 0);
-    OKC(fmt("{\"sub\":\"7\",\"username\":\"caf\xc3\xa9 \xf0\x9f\x92\xa9\",\"exp\":%lld}", fut), 7, "caf\xc3\xa9 \xf0\x9f\x92\xa9", 0);
+    OKC(fmt("{\"sub\":\"7\",\"username\":\"caf\xc3\xa9 \xf0\x9f\x92\xa9\",\"exp\":%lld}", fut), 7,
+        "caf\xc3\xa9 \xf0\x9f\x92\xa9", 0);
     OKC(fmt("{\"sub\":\"7\",\"username\":\"\\ud83d\\udca9\",\"exp\":%lld}", fut), 7, "\xf0\x9f\x92\xa9", 0);
     OKC(fmt("{\"sub\":\"7\",\"username\":\"x\\ud83dy\",\"exp\":%lld}", fut), 7, "x\xef\xbf\xbdy", 0);
     OKC(fmt("{\"sub\":\"7\",\"username\":\"nul\\u0000\",\"exp\":%lld}", fut), 7, "nul", 1); /* len checked below */
-    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc3\",\"exp\":%lld}", fut));         /* truncated UTF-8 */
-    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc0\xaf\",\"exp\":%lld}", fut));     /* overlong */
-    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xed\xa0\x80\",\"exp\":%lld}", fut)); /* raw surrogate */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc3\",\"exp\":%lld}", fut));                 /* truncated UTF-8 */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xc0\xaf\",\"exp\":%lld}", fut));             /* overlong */
+    BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\xed\xa0\x80\",\"exp\":%lld}", fut));         /* raw surrogate */
     BAD(fmt("{\"sub\":\"7\",\"username\":\"ctl\x01\",\"exp\":%lld}", fut));
     BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\\x\",\"exp\":%lld}", fut));
     BAD(fmt("{\"sub\":\"7\",\"username\":\"bad\\u12\",\"exp\":%lld}", fut));
@@ -630,14 +651,17 @@ static void test_cases(int64_t now) {
     BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"x\":tru,\"exp\":%lld}", fut));
     BAD(fmt("{\"sub\":\"7\",\"username\":\"bob\",\"x\":NaN,\"exp\":%lld}", fut));
     BAD(fmt("{'sub':\"7\",\"username\":\"bob\",\"exp\":%lld}", fut));
-    BAD(fmt("{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", fut));
+    BAD(fmt(
+        "{\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}",
+        fut));
     BAD(strdup(""));
     OKC(fmt(" \n{ \"sub\" : \"7\" ,\t\"username\" :\"bob\" , \"exp\" : %lld } \r\n", fut), 7, "bob", 0);
     /* headers */
     char *pl = fmt("{\"sub\":\"7\",\"username\":\"bob\",\"exp\":%lld}", fut);
     ADD(sign_with("{\"typ\":\"JWT\",\"alg\":\"HS256\"}", pl, SECRET), JWT_OK, 7, "bob", 0, "typ first");
     ADD(sign_with("{\"alg\":\"HS256\"}", pl, SECRET), JWT_OK, 7, "bob", 0, "alg only");
-    ADD(sign_with(" { \"alg\" : \"HS\\u0032\\u00356\", \"kid\":[1,2] } ", pl, SECRET), JWT_OK, 7, "bob", 0, "escaped alg");
+    ADD(sign_with(" { \"alg\" : \"HS\\u0032\\u00356\", \"kid\":[1,2] } ", pl, SECRET), JWT_OK, 7, "bob", 0,
+        "escaped alg");
     ADD(sign_with("{\"alg\":\"none\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "alg none (signed)");
     ADD(sign_with("{\"alg\":\"HS512\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "HS512");
     ADD(sign_with("{\"alg\":\"hs256\"}", pl, SECRET), JWT_INVALID, 0, NULL, 0, "hs256");
@@ -706,7 +730,8 @@ static void test_cases(int64_t now) {
         if (!engines[e].verify) continue;
         for (int bsz = 1; bsz <= n; bsz = bsz < 8 && !quick ? bsz + 1 : bsz * 3) {
             jwt_result_t res[256];
-            for (int i = 0; i < n; i += bsz) engines[e].verify(&k, n - i < bsz ? n - i : bsz, toks + i, lens + i, now, res + i);
+            for (int i = 0; i < n; i += bsz)
+                engines[e].verify(&k, n - i < bsz ? n - i : bsz, toks + i, lens + i, now, res + i);
             for (int i = 0; i < n; i++) {
                 jwt_result_t *r = &res[i];
                 int ok = r->status == c[i].status;
@@ -733,62 +758,101 @@ static void test_cases(int64_t now) {
 static int unhex(const char *h, uint8_t *out) {
     if (!strcmp(h, "-")) return 0;
     int n = (int)strlen(h) / 2;
-    for (int i = 0; i < n; i++) { unsigned v; sscanf(h + 2 * i, "%2x", &v); out[i] = (uint8_t)v; }
+    for (int i = 0; i < n; i++) {
+        unsigned v;
+        sscanf(h + 2 * i, "%2x", &v);
+        out[i] = (uint8_t)v;
+    }
     return n;
 }
 static void test_vectors(const char *path) {
     FILE *f = fopen(path, "r");
-    if (!f) { perror(path); exit(2); }
-    size_t cap = 1 << 16; char *line = malloc(cap);
+    if (!f) {
+        perror(path);
+        exit(2);
+    }
+    size_t cap = 1 << 16;
+    char *line = malloc(cap);
     static uint8_t key[4096], tag[64];
     uint8_t *vmsg = malloc(8192), *fill[24];
     for (int i = 0; i < 24; i++) fill[i] = malloc(800 + 64);
     long nh = 0, nbad = 0, nj = 0;
     while (fgets(line, (int)cap, f)) {
-        char kind[8], src[128], a[9000], b[9000], c[200]; long long x, y;
+        char kind[8], src[128], a[9000], b[9000], c[200];
+        long long x, y;
         if (sscanf(line, "%7s", kind) != 1) continue;
         if (!strcmp(kind, "hmac")) {
-            if (sscanf(line, "%*s %127s %8999s %8999s %199s %lld", src, a, b, c, &x) != 5) { CHECK(0, "bad vector line"); continue; }
+            if (sscanf(line, "%*s %127s %8999s %8999s %199s %lld", src, a, b, c, &x) != 5) {
+                CHECK(0, "bad vector line");
+                continue;
+            }
             int kl = unhex(a, key), ml = unhex(b, vmsg), tl = unhex(c, tag), expect = (int)x;
             memset(vmsg + ml, 0x5a, 64);
-            jwt_key_t k; jwt_key_init(&k, key, (size_t)kl);
-            nh++; nbad += !expect;
+            jwt_key_t k;
+            jwt_key_init(&k, key, (size_t)kl);
+            nh++;
+            nbad += !expect;
             for (int e = 0; e < NENG; e++) {
                 if (!engines[e].hmac) continue;
                 int bs = 1 + (int)(rnd() % 24), at = (int)(rnd() % bs);
-                const uint8_t *msg[24]; int len[24]; uint32_t mac[24][8];
+                const uint8_t *msg[24];
+                int len[24];
+                uint32_t mac[24][8];
                 for (int i = 0; i < bs; i++) {
-                    if (i == at) { msg[i] = vmsg, len[i] = ml; continue; }
-                    len[i] = (int)(rnd() % 800); for (int j = 0; j < len[i]; j++) fill[i][j] = (uint8_t)rnd();
+                    if (i == at) {
+                        msg[i] = vmsg, len[i] = ml;
+                        continue;
+                    }
+                    len[i] = (int)(rnd() % 800);
+                    for (int j = 0; j < len[i]; j++) fill[i][j] = (uint8_t)rnd();
                     msg[i] = fill[i];
                 }
                 engines[e].hmac(&k, bs, msg, len, mac);
                 uint8_t d[32];
-                for (int j = 0; j < 8; j++) d[4 * j] = mac[at][j] >> 24, d[4 * j + 1] = mac[at][j] >> 16, d[4 * j + 2] = mac[at][j] >> 8, d[4 * j + 3] = mac[at][j];
-                CHECK((memcmp(d, tag, (size_t)tl) == 0) == expect, "vector %s, engine %s: tag %s", src, engines[e].name, expect ? "mismatch" : "accepted");
-                for (int i = 0; i < bs; i++) {   /* the other lanes, against OpenSSL with the same key */
+                for (int j = 0; j < 8; j++)
+                    d[4 * j] = mac[at][j] >> 24, d[4 * j + 1] = mac[at][j] >> 16, d[4 * j + 2] = mac[at][j] >> 8,
+                          d[4 * j + 3] = mac[at][j];
+                CHECK((memcmp(d, tag, (size_t)tl) == 0) == expect, "vector %s, engine %s: tag %s", src, engines[e].name,
+                      expect ? "mismatch" : "accepted");
+                for (int i = 0; i < bs; i++) { /* the other lanes, against OpenSSL with the same key */
                     if (i == at) continue;
-                    uint8_t r[32]; unsigned rl = 32;
+                    uint8_t r[32];
+                    unsigned rl = 32;
                     HMAC(EVP_sha256(), key, kl, msg[i], (size_t)len[i], r, &rl);
-                    int ok = 1; for (int j = 0; j < 8; j++) ok &= mac[i][j] == be32(r + 4 * j);
+                    int ok = 1;
+                    for (int j = 0; j < 8; j++) ok &= mac[i][j] == be32(r + 4 * j);
                     CHECK(ok, "vector %s, engine %s: filler lane %d wrong", src, engines[e].name, i);
                 }
             }
         } else if (!strcmp(kind, "jws")) {
-            if (sscanf(line, "%*s %127s %8999s %8999s %lld %lld", src, a, b, &x, &y) != 5) { CHECK(0, "bad jws line"); continue; }
-            int kl = unhex(a, key); jwt_key_t k; jwt_key_init(&k, key, (size_t)kl);
-            char *tok = calloc(strlen(b) + 65, 1); memcpy(tok, b, strlen(b));
-            const char *tp[1] = {tok}; int tlen[1] = {(int)strlen(b)}; nj++;
+            if (sscanf(line, "%*s %127s %8999s %8999s %lld %lld", src, a, b, &x, &y) != 5) {
+                CHECK(0, "bad jws line");
+                continue;
+            }
+            int kl = unhex(a, key);
+            jwt_key_t k;
+            jwt_key_init(&k, key, (size_t)kl);
+            char *tok = calloc(strlen(b) + 65, 1);
+            memcpy(tok, b, strlen(b));
+            const char *tp[1] = { tok };
+            int tlen[1] = { (int)strlen(b) };
+            nj++;
             for (int e = 0; e < NENG; e++) {
                 if (!engines[e].verify) continue;
-                jwt_result_t r[1]; engines[e].verify(&k, 1, tp, tlen, (int64_t)x, r);
-                CHECK(r[0].status == (int)y, "%s, engine %s: status %d, want %lld", src, engines[e].name, r[0].status, y);
+                jwt_result_t r[1];
+                engines[e].verify(&k, 1, tp, tlen, (int64_t)x, r);
+                CHECK(r[0].status == (int)y, "%s, engine %s: status %d, want %lld", src, engines[e].name, r[0].status,
+                      y);
             }
             free(tok);
         }
     }
-    fclose(f); free(line); free(vmsg); for (int i = 0; i < 24; i++) free(fill[i]);
-    printf("  external vectors: %ld HMAC-SHA256 (%ld with invalid tags) x every engine, %ld JWS checks\n", nh, nbad, nj);
+    fclose(f);
+    free(line);
+    free(vmsg);
+    for (int i = 0; i < 24; i++) free(fill[i]);
+    printf("  external vectors: %ld HMAC-SHA256 (%ld with invalid tags) x every engine, %ld JWS checks\n", nh, nbad,
+           nj);
 }
 
 int main(int argc, char **argv) {

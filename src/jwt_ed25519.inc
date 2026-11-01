@@ -17,7 +17,7 @@
 #define JWT_ED_W 7 /* comb window: 37 rows x 64 points x 120 B = 284 KB per base point */
 #endif
 #define ED_NW ((254 + JWT_ED_W - 1) / JWT_ED_W)
-#define ED_H (1 << (JWT_ED_W - 1))
+#define ED_H  (1 << (JWT_ED_W - 1))
 
 typedef uint64_t fe25_t[5]; /* fiat's unsaturated 5 x 51-bit limbs */
 typedef struct {
@@ -33,7 +33,7 @@ typedef struct ed_key {
 
 /* ---- field helpers over fiat's tight (carried) / loose (sum) bounds ---- */
 #define F_MUL(o, a, b) fiat_25519_carry_mul(o, a, b)
-#define F_SQR(o, a) fiat_25519_carry_square(o, a)
+#define F_SQR(o, a)    fiat_25519_carry_square(o, a)
 static void f_add(fe25_t o, const fe25_t a, const fe25_t b) { /* tight result */
     fe25_t t;
     fiat_25519_add(t, a, b);
@@ -56,7 +56,7 @@ static int f_eq(const fe25_t a, const fe25_t b) { /* canonical comparison */
     return !memcmp(x, y, 32);
 }
 static int f_iszero(const fe25_t a) {
-    uint8_t x[32], z[32] = {0};
+    uint8_t x[32], z[32] = { 0 };
     fiat_25519_to_bytes(x, a);
     return !memcmp(x, z, 32);
 }
@@ -70,12 +70,14 @@ static void f_pow(fe25_t o, const fe25_t a, const uint8_t e[32]) {
     }
     memcpy(o, r, sizeof r);
 }
-static const uint8_t ED_P_MINUS_2[32] = {0xeb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f};
-static const uint8_t ED_P_SQRT_EXP[32] = {0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, /* (p-5)/8 */
+static const uint8_t ED_P_MINUS_2[32] = { 0xeb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                                           0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f};
+                                          0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f };
+static const uint8_t ED_P_SQRT_EXP[32] = {
+    0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, /* (p-5)/8 */
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f
+};
 static void f_sqn(fe25_t o, const fe25_t a, int n) {
     F_SQR(o, a);
     while (--n > 0) F_SQR(o, o);
@@ -83,18 +85,18 @@ static void f_sqn(fe25_t o, const fe25_t a, int n) {
 /* a^(p-2) with the standard addition chain (ref10's fe_invert): 254 squarings + 11 multiplications, not ~500 */
 static void f_inv(fe25_t o, const fe25_t z) {
     fe25_t t0, t1, t2, t3;
-    F_SQR(t0, z);                           /* 2 */
-    f_sqn(t1, t0, 2), F_MUL(t1, z, t1);     /* 9 */
-    F_MUL(t0, t0, t1);                      /* 11 */
-    F_SQR(t2, t0), F_MUL(t1, t1, t2);       /* 2^5 - 1 */
-    f_sqn(t2, t1, 5), F_MUL(t1, t2, t1);    /* 2^10 - 1 */
-    f_sqn(t2, t1, 10), F_MUL(t2, t2, t1);   /* 2^20 - 1 */
-    f_sqn(t3, t2, 20), F_MUL(t2, t3, t2);   /* 2^40 - 1 */
-    f_sqn(t2, t2, 10), F_MUL(t1, t2, t1);   /* 2^50 - 1 */
-    f_sqn(t2, t1, 50), F_MUL(t2, t2, t1);   /* 2^100 - 1 */
-    f_sqn(t3, t2, 100), F_MUL(t2, t3, t2);  /* 2^200 - 1 */
-    f_sqn(t2, t2, 50), F_MUL(t1, t2, t1);   /* 2^250 - 1 */
-    f_sqn(t1, t1, 5), F_MUL(o, t1, t0);     /* 2^255 - 21 = p - 2 */
+    F_SQR(t0, z);                          /* 2 */
+    f_sqn(t1, t0, 2), F_MUL(t1, z, t1);    /* 9 */
+    F_MUL(t0, t0, t1);                     /* 11 */
+    F_SQR(t2, t0), F_MUL(t1, t1, t2);      /* 2^5 - 1 */
+    f_sqn(t2, t1, 5), F_MUL(t1, t2, t1);   /* 2^10 - 1 */
+    f_sqn(t2, t1, 10), F_MUL(t2, t2, t1);  /* 2^20 - 1 */
+    f_sqn(t3, t2, 20), F_MUL(t2, t3, t2);  /* 2^40 - 1 */
+    f_sqn(t2, t2, 10), F_MUL(t1, t2, t1);  /* 2^50 - 1 */
+    f_sqn(t2, t1, 50), F_MUL(t2, t2, t1);  /* 2^100 - 1 */
+    f_sqn(t3, t2, 100), F_MUL(t2, t3, t2); /* 2^200 - 1 */
+    f_sqn(t2, t2, 50), F_MUL(t1, t2, t1);  /* 2^250 - 1 */
+    f_sqn(t1, t1, 5), F_MUL(o, t1, t0);    /* 2^255 - 21 = p - 2 */
 }
 
 static fe25_t ED_D, ED_D2, ED_SQRTM1; /* d = -121665/121666, 2d, sqrt(-1): set once by ed_consts() */
@@ -105,9 +107,9 @@ static void ed_consts(void) {
     f_set(num, 121665), f_neg(num, num);
     f_set(den, 121666), f_inv(den, den);
     F_MUL(t, num, den);
-    static const uint8_t pm1_4[32] = {0xfb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, /* (p-1)/4 */
-                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f};
+    static const uint8_t pm1_4[32] = { 0xfb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, /* (p-1)/4 */
+                                       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                       0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f };
     fe25_t two, s;
     f_set(two, 2);
     f_pow(s, two, pm1_4);
@@ -122,9 +124,9 @@ static int ed_decode(ed_p3 *P, const uint8_t s[32]) {
     memcpy(b, s, 32);
     int sign = b[31] >> 7;
     b[31] &= 0x7f;
-    static const uint8_t p_le[32] = {0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                                     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f};
+    static const uint8_t p_le[32] = { 0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f };
     int i = 31;
     while (i > 0 && b[i] == p_le[i]) i--;
     if (b[i] >= p_le[i]) return 0; /* y >= p: not canonical */
@@ -189,8 +191,8 @@ static void ed_dbl(ed_p3 *P) { /* dbl-2008-hwcd, a = -1 */
     fe25_t a, b, c, e, f, g, h, t;
     F_SQR(a, P->X), F_SQR(b, P->Y), F_SQR(c, P->Z), f_add(c, c, c);
     f_add(t, P->X, P->Y), F_SQR(e, t), f_sub(e, e, a), f_sub(e, e, b);
-    f_sub(g, b, a);       /* D + B with D = -A */
-    f_sub(f, g, c);       /* G - C */
+    f_sub(g, b, a);              /* D + B with D = -A */
+    f_sub(f, g, c);              /* G - C */
     f_neg(h, a), f_sub(h, h, b); /* D - B */
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
@@ -220,8 +222,9 @@ static void ed_table(ed_niels tab[ED_NW][ED_H], const ed_p3 *P) {
 }
 
 /* ---- scalars mod L ---- */
-static const uint8_t ED_L[32] = {0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-                                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10};
+static const uint8_t ED_L[32] = { 0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+                                  0xa2, 0xde, 0xf9, 0xde, 0x14, 0,    0,    0,    0,    0,    0,
+                                  0,    0,    0,    0,    0,    0,    0,    0,    0,    0x10 };
 static int ed_lt_l(const uint8_t s[32]) { /* little-endian s < L */
     for (int i = 31; i >= 0; i--)
         if (s[i] != ED_L[i]) return s[i] < ED_L[i];
@@ -243,7 +246,10 @@ static void sc_reduce256(uint64_t x[4]) {
         for (int i = 0; i < 4; i++) m[i] = l[i] << sh | cy, cy = sh ? l[i] >> (64 - sh) : 0;
         int ge = 1;
         for (int i = 3; i >= 0; i--)
-            if (x[i] != m[i]) { ge = x[i] > m[i]; break; }
+            if (x[i] != m[i]) {
+                ge = x[i] > m[i];
+                break;
+            }
         if (!ge) continue;
         uint64_t bw = 0;
         for (int i = 0; i < 4; i++) {
@@ -254,15 +260,15 @@ static void sc_reduce256(uint64_t x[4]) {
 }
 /* k = h mod L for a 512-bit little-endian h: lo + hi 2^256, through fiat's Montgomery arithmetic mod L */
 static void sc_reduce512(uint64_t k[4], const uint8_t h[64]) {
-    uint64_t lo[4], hi[4], one[4] = {1}, r2[4], r3[4], a[4], b[4];
+    uint64_t lo[4], hi[4], one[4] = { 1 }, r2[4], r3[4], a[4], b[4];
     le_to_limbs(lo, h), le_to_limbs(hi, h + 32);
     sc_reduce256(lo), sc_reduce256(hi);
-    fiat_25519_scalar_to_montgomery(r2, one);     /* R */
-    fiat_25519_scalar_to_montgomery(r2, r2);      /* R^2 */
-    fiat_25519_scalar_to_montgomery(r3, r2);      /* R^3 */
-    fiat_25519_scalar_mul(a, lo, r2);             /* lo R */
-    fiat_25519_scalar_mul(b, hi, r3);             /* hi R^2 */
-    fiat_25519_scalar_add(a, a, b);               /* (lo + hi R) R */
+    fiat_25519_scalar_to_montgomery(r2, one); /* R */
+    fiat_25519_scalar_to_montgomery(r2, r2);  /* R^2 */
+    fiat_25519_scalar_to_montgomery(r3, r2);  /* R^3 */
+    fiat_25519_scalar_mul(a, lo, r2);         /* lo R */
+    fiat_25519_scalar_mul(b, hi, r3);         /* hi R^2 */
+    fiat_25519_scalar_add(a, a, b);           /* (lo + hi R) R */
     fiat_25519_scalar_from_montgomery(k, a);
 }
 /* signed base-2^W digits of a scalar < 2^253 (little-endian limbs) */
@@ -295,7 +301,8 @@ static const uint64_t K512[80] = {
     0x90befffa23631e28ull, 0xa4506cebde82bde9ull, 0xbef9a3f7b2c67915ull, 0xc67178f2e372532bull, 0xca273eceea26619cull,
     0xd186b8c721c0c207ull, 0xeada7dd6cde0eb1eull, 0xf57d4f7fee6ed178ull, 0x06f067aa72176fbaull, 0x0a637dc5a2c898a6ull,
     0x113f9804bef90daeull, 0x1b710b35131c471bull, 0x28db77f523047d84ull, 0x32caab7b40c72493ull, 0x3c9ebe0a15c9bebcull,
-    0x431d67c49c100d4cull, 0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull};
+    0x431d67c49c100d4cull, 0x4cc5d4becb3e42b6ull, 0x597f299cfc657e2aull, 0x5fcb6fab3ad6faecull, 0x6c44198c4a475817ull
+};
 #define ROR64(x, n) ((x) >> (n) | (x) << (64 - (n)))
 static void sha512_block(uint64_t st[8], const uint8_t *p) {
     uint64_t w[80], a = st[0], b = st[1], c = st[2], d = st[3], e = st[4], f = st[5], g = st[6], h = st[7];
@@ -318,8 +325,8 @@ static void sha512_block(uint64_t st[8], const uint8_t *p) {
 }
 /* SHA-512(p1 (32 bytes) || p2 (32 bytes) || m) */
 static void sha512_ram(uint8_t out[64], const uint8_t *p1, const uint8_t *p2, const uint8_t *m, size_t ml) {
-    uint64_t st[8] = {0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
-                      0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull};
+    uint64_t st[8] = { 0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull, 0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+                       0x510e527fade682d1ull, 0x9b05688c2b3e6c1full, 0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull };
     uint8_t blk[128];
     memcpy(blk, p1, 32), memcpy(blk + 32, p2, 32);
     size_t fill = 64, total = 64 + ml;
@@ -343,8 +350,9 @@ static ed_key_t *ed_key_new(const uint8_t pub[32]) {
     ed_consts();
     ed_p3 A, B;
     if (!ed_decode(&A, pub)) return NULL;
-    static const uint8_t b_enc[32] = {0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-                                      0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66};
+    static const uint8_t b_enc[32] = { 0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+                                       0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+                                       0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66 };
     if (!ed_decode(&B, b_enc)) return NULL;
     ed_key_t *k = malloc(sizeof *k);
     if (!k) return NULL;
