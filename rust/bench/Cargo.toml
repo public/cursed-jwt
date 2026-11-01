@@ -17,3 +17,14 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 [[bench]]
 name = "hs256"
 harness = false
+
+[[bench]]
+name = "pk"
+harness = false
+
+[dev-dependencies]
+# candidate crates for the public-key arithmetic, measured against the ports of the C designs
+p256 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"

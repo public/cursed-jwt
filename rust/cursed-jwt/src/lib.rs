@@ -46,10 +46,14 @@ mod b64;
 mod engine;
 mod hs256;
 mod json;
+#[cfg(feature = "pk")]
+mod pk;
 mod sha256;
 
 pub use engine::{CpuFeatures, Engine};
 pub use hs256::Hs256Key;
+#[cfg(feature = "pk")]
+pub use pk::{Ed25519Key, Es256Key, PublicKey, Rs256Key};
 
 pub use b64::{decode_scalar as b64url_decode_scalar, decoded_cap as b64url_decoded_cap};
 

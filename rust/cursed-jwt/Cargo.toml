@@ -12,7 +12,7 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["std"]
+default = ["std", "pk"]
 # run-time CPU feature detection (is_x86_feature_detected! / is_aarch64_feature_detected!) and the JWT_CPU_MASK
 # environment override; without it the engines are chosen from the compile-time target features
 std = ["alloc"]
