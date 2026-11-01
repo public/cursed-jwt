@@ -79,7 +79,7 @@ Perf is per token on the Xeon, against `main` in the same run.
 | 10 | Drop the NEON multi-buffer engine | ~−60 est. | None | Removes `jwt_hmac_neon`, `jwt_verify_batch_neon` (the submission names the latter) | None on SHA2-capable ARM | Rejected: it is the engine for ARMv8 cores without the crypto extension (e.g. Cortex-A72 in a Raspberry Pi 4), and the template makes it cheap |
 | 11 | "Merge the batch and single paths" | 0 | — | — | — | Already merged: batch 1 and leftover lanes go through the same drivers to `hmac1_scalar` (OpenSSL's asm on x86-64 Linux) |
 
-Options 1–3 together remove 813 lines of non-vendored code (9,086 → 8,273, −9%). None of them changes a default code
+Options 1–3 together remove 812 lines of non-vendored code (9,086 → 8,274, −9%). None of them changes a default code
 path: 1 removes code the default build never compiled, 2 removes engines dispatch never picks, and 3 leaves the
 x86-64 object code byte-identical.
 
