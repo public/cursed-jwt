@@ -101,10 +101,10 @@ dependencies = [
 name = "cursed-jwt"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "fiat-crypto 0.3.0",
  "memchr",
  "sha2",
- "subtle",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@
 use alloc::boxed::Box;
 
 use crate::engine::{b64_decode, Engine};
-use crate::hs256::{claims_one, header_ok, split, Scratch};
+use crate::hs256::{claims_one, split_header, Scratch};
 use crate::json::Now;
 use crate::{Error, Verdict};
 
@@ -34,7 +34,7 @@ pub(crate) trait PkAlg {
     /// `alg` as the header must spell it.
     const NAME: &'static [u8];
     /// `{"alg":"<NAME>","typ":"JWT"}` in base64url: skips the header parse.
-    const CANON: &'static [u8];
+    const CANON: &'static [u8; 36];
     /// Signature length in bytes (RS256: the modulus length).
     fn sig_bytes(&self) -> usize;
     /// `ok[i]` = whether `sig[i]` is a valid signature of `msg[i]`; every slice has the same length (at most
@@ -74,8 +74,7 @@ fn verify_batch<A: PkAlg, T: AsRef<[u8]>>(k: &A, toks: &[T], now: i64, out: &mut
         let mut c = 0;
         for (i, (t, r)) in tc.iter().zip(oc.iter_mut()).enumerate() {
             let t = t.as_ref();
-            let good = split(t, sig_chars)
-                .filter(|&(d1, _)| header_ok(&t[..d1], A::CANON, A::NAME, &mut sc));
+            let good = split_header(t, sig_chars, A::CANON, A::NAME, &mut sc);
             let Some((d1, d2)) = good else {
                 *r = Err(Error::Invalid);
                 continue;

@@ -478,7 +478,7 @@ impl Ed25519Key {
 
 impl PkAlg for Ed25519Key {
     const NAME: &'static [u8] = b"EdDSA";
-    const CANON: &'static [u8] = b"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9";
+    const CANON: &'static [u8; 36] = b"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9";
 
     fn sig_bytes(&self) -> usize {
         64

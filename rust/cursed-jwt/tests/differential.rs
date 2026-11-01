@@ -230,3 +230,24 @@ fn proptest_payloads_match_c() {
         })
         .unwrap();
 }
+
+/// The canonical-header fast split leaves a '.' inside the payload to the payload decoder: such tokens, even with
+/// a valid signature over the whole signing input, must stay INVALID, as the C library's scans make them.
+#[test]
+fn dot_inside_payload() {
+    let ck = cjwt_sys::Key::new(SECRET);
+    let k = Hs256Key::new(SECRET);
+    let canon = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    let pl = b64u(br#"{"sub":"7","username":"bob","exp":4102444800}"#);
+    for cut in [1, 5, pl.len() / 2, pl.len() - 1] {
+        let msg = format!("{canon}.{}.{}", &pl[..cut], &pl[cut..]);
+        let tok = format!("{msg}.{}", b64u(&hmac_ref(SECRET, msg.as_bytes())));
+        let c = flat_c(&ck.verify_batch(&[tok.as_bytes()], NOW)[0]);
+        for e in engines() {
+            let mut out = [Err(Error::Invalid)];
+            k.verify_batch_with(e, &[tok.as_bytes()], NOW, &mut out);
+            assert_eq!(flat(&out[0]), c, "cut {cut}");
+            assert_eq!(c.0, 1);
+        }
+    }
+}

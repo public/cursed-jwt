@@ -8,7 +8,7 @@ use crate::sha256::{Midstates, CH};
 use crate::{Claims, Error, Verdict, TOKEN_MAX};
 
 /// `{"alg":"HS256","typ":"JWT"}`, the header nearly every token carries: skips the header parse.
-const CANON_HDR: &[u8] = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+const CANON_HDR: &[u8; 36] = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
 /// An HS256 secret, prepared once: the HMAC ipad/opad midstates.
 ///
@@ -71,6 +71,29 @@ impl Hs256Key {
     }
 }
 
+/// Splits a token into header, payload and signature and checks the header: `(d1, d2)`, the two dot positions.
+///
+/// Fast path for the canonical 36-character header: it has no '.', so d1 = 36, and the signature has a fixed
+/// length, so d2 is fixed too; that skips both scans.  A '.' inside the payload, which the scans would have
+/// rejected here, is rejected later instead (the payload is not base64url), so the result is the same.
+#[inline(always)]
+pub(crate) fn split_header(
+    t: &[u8],
+    sig_chars: usize,
+    canon: &[u8; 36],
+    alg: &[u8],
+    sc: &mut Scratch,
+) -> Option<(usize, usize)> {
+    if t.len() > 36 + 2 + sig_chars && t.len() <= TOKEN_MAX {
+        let d2 = t.len() - 1 - sig_chars;
+        if t[36] == b'.' && t[d2] == b'.' && t.first_chunk::<36>() == Some(canon) {
+            return Some((36, d2));
+        }
+    }
+    let (d1, d2) = split(t, sig_chars)?;
+    header_ok(&t[..d1], canon, alg, sc).then_some((d1, d2))
+}
+
 /// Splits a token into header, payload and signature, all non-empty, the signature `sig_chars` long.
 #[inline(always)]
 pub(crate) fn split(t: &[u8], sig_chars: usize) -> Option<(usize, usize)> {
@@ -130,8 +153,9 @@ impl Scratch {
 /// The header check shared with the public-key algorithms: the canonical header, or a JSON header whose `alg`
 /// is exactly `alg`.
 #[inline(always)]
-pub(crate) fn header_ok(h64: &[u8], canon: &[u8], alg: &[u8], sc: &mut Scratch) -> bool {
-    h64 == canon || sc.decode(h64).is_some_and(|h| json::header_ok(h, alg))
+fn header_ok(h64: &[u8], canon: &[u8; 36], alg: &[u8], sc: &mut Scratch) -> bool {
+    h64.first_chunk::<36>() == Some(canon) && h64.len() == 36
+        || sc.decode(h64).is_some_and(|h| json::header_ok(h, alg))
 }
 
 /// Payload of a token whose signature checked out: base64url, JSON, claims, written into `r` in place.  A slot
@@ -174,10 +198,7 @@ pub(crate) fn be_words(b: &[u8; 32]) -> [u32; 8] {
 /// Structure, header and signature encoding of one token: the expected tag and the two dot positions.
 #[inline(always)]
 fn candidate(t: &[u8], sc: &mut Scratch) -> Option<([u32; 8], (usize, usize))> {
-    let (d1, d2) = split(t, 43)?;
-    if !header_ok(&t[..d1], CANON_HDR, b"HS256", sc) {
-        return None;
-    }
+    let (d1, d2) = split_header(t, 43, CANON_HDR, b"HS256", sc)?;
     let mut sb = [0u8; 64];
     if b64_decode(&mut sb, &t[d2 + 1..]) != Some(32) {
         return None;

@@ -281,6 +281,7 @@ impl Now {
 }
 
 /// Compares a JSON number with now: Less / Equal / Greater for num < / == / > now.
+#[inline(always)]
 fn jnum_cmp(s: &[u8], isint: bool, now: &Now) -> core::cmp::Ordering {
     use core::cmp::Ordering;
     if isint && now.len != 0 && s.first() != Some(&b'-') {
@@ -592,14 +593,14 @@ pub(crate) fn payload_check(pl: &[u8], now: &Now, r: &mut Claims) -> Status {
 fn word8(b: &[u8], i: usize) -> u64 {
     match b.get(i..i + 8) {
         Some(s) => u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]),
-        None => {
-            let mut t = [0u8; 8];
-            if let Some(s) = b.get(i..) {
-                let n = s.len().min(8);
-                t[..n].copy_from_slice(&s[..n]);
-            }
-            u64::from_le_bytes(t)
-        }
+        // near the end: byte by byte (a copy_from_slice here became a memcpy call per read, ~4 ns a token)
+        None => b
+            .get(i..)
+            .unwrap_or_default()
+            .iter()
+            .take(8)
+            .enumerate()
+            .fold(0, |v, (k, &x)| v | (x as u64) << (8 * k)),
     }
 }
 

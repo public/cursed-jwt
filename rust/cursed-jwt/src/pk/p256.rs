@@ -555,7 +555,7 @@ impl Es256Key {
 
 impl PkAlg for Es256Key {
     const NAME: &'static [u8] = b"ES256";
-    const CANON: &'static [u8] = b"eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9";
+    const CANON: &'static [u8; 36] = b"eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9";
 
     fn sig_bytes(&self) -> usize {
         64

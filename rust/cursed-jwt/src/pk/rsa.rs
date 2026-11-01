@@ -264,7 +264,7 @@ impl Rs256Key {
 
 impl PkAlg for Rs256Key {
     const NAME: &'static [u8] = b"RS256";
-    const CANON: &'static [u8] = b"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+    const CANON: &'static [u8; 36] = b"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
 
     fn sig_bytes(&self) -> usize {
         self.k
