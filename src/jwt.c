@@ -1352,8 +1352,9 @@ JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
     }
 }
 
-/* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256"). */
-static int header_ok(const uint8_t *h, int n, const char *want) {
+/* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256").  Inlined: the RS256 / ES256 path
+ * shares it, and as a called function it would cost HS256 a call per token. */
+JWT_INLINE int header_ok(const uint8_t *h, int n, const char *want) {
     jcur_t c = { h, h + n };
     const uint8_t *s;
     int len, esc, alg = 0;
@@ -1407,7 +1408,7 @@ JWT_INLINE int sub_value(const uint8_t *s, int len, int64_t *uid) {
 
 /* Payload claims -> result.  Precedence: malformed/expired/not-yet-valid -> INVALID, then
  * sub/username problems -> BAD_PAYLOAD. */
-static int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
+JWT_INLINE int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
     jcur_t c = { pl, pl + n };
     const uint8_t *s;
     int len, esc, seen = 0, bad = 0, isint;
@@ -1753,7 +1754,7 @@ JWT_INLINE int jstrspan(const uint8_t *p, int max) {
 }
 #define JLIT(p, s) (!memcmp((p), (s), sizeof(s) - 1))
 
-static int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
+JWT_INLINE int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
     const uint8_t *p = pl, *e = pl + n;
     if (n < 44 || !JLIT(p, "{\"sub\":\"")) return -1;
     p += 8;
@@ -2019,8 +2020,9 @@ static int json_lane_claims(const uint8_t *pl, const jlane_t *o, const jnow_t *n
 
 static const char canon_hdr[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"; /* {"alg":"HS256","typ":"JWT"} */
 
-/* Payload of a token whose signature checked out: base64url-decode, JSON, claims -> r->status. */
-static void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
+/* Payload of a token whose signature checked out: base64url-decode, JSON, claims -> r->status.  Inlined for the
+ * same reason as header_ok. */
+JWT_INLINE void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
     uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
     int pn = jwt_b64url_decode(pb, (const char *)p64, n64);
     if (pn < 0) return;
@@ -2230,6 +2232,6 @@ void jwt_sha256_batch(int n, const uint8_t *const *msg, const int *len, uint32_t
     JWT_LOAD_FN(sha256_impl)(n, msg, len, dig);
 }
 
-#ifdef JWT_PK
+#ifndef JWT_NO_PK /* RS256 / ES256 / EdDSA; -DJWT_NO_PK leaves them out */
 #include "jwt_pk.inc"
 #endif

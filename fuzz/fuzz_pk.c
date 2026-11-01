@@ -1,4 +1,4 @@
-/* fuzz_pk.c — libFuzzer harness for the RS256 / ES256 / EdDSA prototype (-DJWT_PK), with OpenSSL as the oracle.
+/* fuzz_pk.c — libFuzzer harness for the RS256 / ES256 / EdDSA, with OpenSSL as the oracle.
  *
  * At start-up it makes one P-256, one RSA-2048 and one Ed25519 key with OpenSSL.  Each input picks an algorithm, a message and a
  * list of mutations; the message is signed with OpenSSL, the signature is mutated (byte XORs, ECDSA's other valid s,

@@ -10,7 +10,7 @@ The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JS
 path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates. One
 binary picks the best engine for the CPU it runs on.
 
-RS256, ES256 and EdDSA (Ed25519) are an opt-in prototype with the same front end ([PK.md](PK.md)).
+RS256, ES256 and EdDSA (Ed25519) use the same front end ([PK.md](PK.md)).
 
 **Why it exists.** JWT libraries verify one token per call, and HMAC-SHA256 is most of that call's cost. A server
 that already reads requests in batches (an io_uring or epoll loop handling many connections per wakeup) can verify
@@ -19,8 +19,8 @@ per vector lane, an HMAC costs 154 ns per token at batch 8 on a Cascade Lake Xeo
 (see [Benchmarks](#benchmarks)). cursed-jwt is that batch verifier, with a strict JSON front end and tests against
 independent implementations.
 
-**Status.** The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are a
-prototype: tested against the same vectors, but off by default and not yet used by anything. There are no tagged
+**Status.** The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are
+built in and tested against the same kinds of vectors; they don't parse JWKS yet (you pass the key's numbers). There are no tagged
 releases yet; `main` is the current version. It has not had an external security review (see [Security](#security)).
 
 ## At a glance
@@ -38,7 +38,7 @@ Lake, no SHA-NI). Every implementation accepted the same 20,000 tokens and rejec
 That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521. How these
 were measured, and the caveats, are under [Benchmarks](#benchmarks).
 
-**RS256 / ES256 / EdDSA** (prototype, fastest build), µs per token against OpenSSL `EVP_DigestVerify`:
+**RS256 / ES256 / EdDSA** (fastest build: `-DJWT_S2N -DJWT_OPENSSL`), µs per token against OpenSSL `EVP_DigestVerify`:
 
 | | Xeon, batch 1 | Xeon, batch 16 | Xeon, OpenSSL | M5, batch 16 | M5, OpenSSL |
 |---|---|---|---|---|---|
@@ -54,11 +54,11 @@ were measured, and the caveats, are under [Benchmarks](#benchmarks).
   (pyca/cryptography, Python's `hmac`), an independent Python model of the claim rules (Hypothesis) and libFuzzer.
   The vectors are fetched at pinned versions and cross-checked against pyca/cryptography before use. Planted bugs
   are used to check that the tests can fail. Details: [Testing](#testing).
-- **Formally verified code it can use:** the opt-in RS256/ES256/EdDSA prototype takes its P-256 and curve25519 field
+- **Formally verified code it can use:** the RS256/ES256/EdDSA code takes its P-256 and curve25519 field
   and scalar arithmetic from [fiat-crypto](https://github.com/mit-plv/fiat-crypto), whose generated C is proven
   correct in Coq upstream, and can use [s2n-bignum](https://github.com/awslabs/s2n-bignum)'s assembly, which is
   proven correct in HOL Light upstream. Those proofs are about the arithmetic, not about how cursed-jwt uses it, and
-  neither is used by the default HS256 build.
+  neither is used by HS256.
 
 ## Quick start
 
@@ -112,7 +112,7 @@ jwt_verify_batch(&key, n, tok, len, time(NULL), out);   // live iff nbf <= now <
   - `jwt_verify_batch_<engine>`: the full verify on a chosen engine.
 - **A complete program:** `examples/verify.c`, built as `build/verify SECRET TOKEN...`.
 
-**RS256 / ES256 / EdDSA** (prototype, build with `-DJWT_PK`; see [PK.md](PK.md)):
+**RS256 / ES256 / EdDSA** (built by default; `-DJWT_NO_PK` leaves them out; see [PK.md](PK.md)):
 
 ```c
 jwt_pkey_t *pk = jwt_pkey_es256(x, y);      // or jwt_pkey_rs256(n, n_len, e, e_len), jwt_pkey_ed25519(pub32); NULL if invalid
@@ -235,11 +235,11 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 | `-DJWT_FAST_JSON` | the simdjson-style path (3–4% slower on a Xeon) |
 | `-DJWT_LANE_JSON` | lane-parallel JSON, which only pays at batch ≥ 32 |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
-| `-DJWT_PK` | the RS256 / ES256 / EdDSA prototype; needs fiat-crypto's generated C (`scripts/fetch-fiat.sh`) |
-| `-DJWT_S2N` | with `JWT_PK`: s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
-| `-DJWT_OPENSSL` | with `JWT_PK`: libcrypto's bignum asm for RSA (links `-lcrypto`) |
-| `-DJWT_RSA_SCREEN` | with `JWT_PK`: RSA batch screening (read the caveat in [PK.md](PK.md) first) |
-| `-DJWT_CRYPTO_MB` | with `JWT_PK`: Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA, used only on IFMA CPUs (`scripts/build-crypto-mb.sh`; Linux x86-64; not yet run on IFMA hardware) |
+| `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `src/fiat/`) |
+| `-DJWT_S2N` | s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
+| `-DJWT_OPENSSL` | libcrypto's bignum asm for RSA (links `-lcrypto`) |
+| `-DJWT_RSA_SCREEN` | RSA batch screening (read the caveat in [PK.md](PK.md) first) |
+| `-DJWT_CRYPTO_MB` | Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA, used only on IFMA CPUs (`scripts/build-crypto-mb.sh`; Linux x86-64; not yet run on IFMA hardware) |
 
 **Targets:**
 
@@ -490,7 +490,7 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 
 ## Limits
 
-- **Algorithms.** HS256 by default. RS256, ES256 and EdDSA (Ed25519 only) are an opt-in prototype; there's no Ed448, no JWE and no
+- **Algorithms.** HS256 by default. RS256, ES256 and EdDSA (Ed25519 only) are built in, without JWKS parsing; there's no Ed448, no JWE and no
   `kid` lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
 - **A lone token ties OpenSSL, it doesn't beat it.** On x86-64 Linux it *is* OpenSSL's code. Its SHA-NI path is

@@ -10,8 +10,8 @@
  * Field and scalar arithmetic: fiat-crypto's generated, formally verified curve25519_64.c / curve25519_scalar_64.c
  * (MIT), fetched by scripts/fetch-fiat.sh.  Verification handles public data only, so nothing here is constant-time.
  */
-#include "curve25519_64.c"
-#include "curve25519_scalar_64.c"
+#include "fiat/curve25519_64.c"
+#include "fiat/curve25519_scalar_64.c"
 
 #ifndef JWT_ED_W
 #define JWT_ED_W 7 /* comb window: 37 rows x 64 points x 120 B = 284 KB per base point */

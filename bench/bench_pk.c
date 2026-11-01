@@ -1,4 +1,4 @@
-/* bench_pk.c — RS256 / ES256 prototype (-DJWT_PK) ns/token vs OpenSSL.  Unity build: includes jwt.c.
+/* bench_pk.c — RS256 / ES256 ns/token vs OpenSSL.  Unity build: includes jwt.c.
  *   ./bench_pk [pk_tokens.txt] [seconds-per-cell]          (tokens from bench/gen_pk_tokens.py)
  * OpenSSL baselines, both with the EVP_PKEY parsed once (what a server holding a JWKS does):
  *   EVP_DigestVerify   one EVP_DigestVerifyInit/Update/Final per token, as jwt-cpp and most libraries call it;

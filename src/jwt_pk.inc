@@ -1,4 +1,4 @@
-/* jwt_pk.inc — RS256 and ES256 verification (prototype), #included by jwt.c under -DJWT_PK.
+/* jwt_pk.inc — RS256, ES256 (and, via jwt_ed25519.inc, EdDSA) verification, #included by jwt.c unless -DJWT_NO_PK.
  *
  * Neither algorithm batches the way HMAC does: one P-256 or RSA-2048 verify is 10-100x the cost of the whole
  * HS256 pipeline, and SIMD across tokens needs 52-bit multipliers (AVX-512 IFMA) that Cascade Lake lacks.
@@ -22,8 +22,8 @@
  * Arithmetic backends (PK.md "Backends" has the measurements): portable C by default; -DJWT_S2N links s2n-bignum's
  * verified assembly for the P-256 field and RSA-2048; -DJWT_OPENSSL hands RSA to libcrypto's BN Montgomery asm.
  */
-#include "p256_64.c"
-#include "p256_scalar_64.c"
+#include "fiat/p256_64.c"
+#include "fiat/p256_scalar_64.c"
 
 #ifndef JWT_P256_W
 #define JWT_P256_W                                                                                                     \

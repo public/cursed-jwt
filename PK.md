@@ -1,11 +1,11 @@
-# RS256, ES256 and EdDSA in cursed-jwt: survey, prototype, numbers
+# RS256, ES256 and EdDSA in cursed-jwt: survey, design, numbers
 
 This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 
 - **Targets:**
   - Apple M5 Pro: ARMv8 SHA2/SHA512 and NEON, no AVX-512 IFMA equivalent.
   - Xeon Platinum 8260 (Cascade Lake): AVX-512F/BW/VL/DQ, **no IFMA**, no SHA-NI, 1 vCPU KVM, OpenSSL 3.0.13.
-- **Prototype:** `src/jwt_pk.inc`, built with `-DJWT_PK`, behind `jwt_verify_batch_pk` (same front end and claim
+- **Code:** `src/jwt_pk.inc`, in the default build (`-DJWT_NO_PK` leaves it out), behind `jwt_verify_batch_pk` (same front end and claim
   rules as `jwt_verify_batch`).
 - **Three arithmetic backends**, chosen at compile time:
   - portable C (the default; no dependencies beyond fiat-crypto's generated C);
@@ -52,7 +52,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - **Portable C, batch 32: 8.8× faster than OpenSSL on the M5 (4.6 vs 40.4 µs), 9.2× on the Xeon (16.3 vs
     150.2 µs).** Already 6.2× / 7.0× at batch 1.
 - **Recommendation:**
-  1. Ship the fast build's backend choice as the default for `-DJWT_PK`, and keep the portable C as the fallback
+  1. Ship the fast build's backend choice as the default for the default build, and keep the portable C as the fallback
      when it has no dependencies.
   2. Keep RS256 screening as an explicit batch option.
   3. Ed25519 is done the same way; give it s2n-bignum's verified `p25519` field asm next (see Next steps).
@@ -249,7 +249,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   Wycheproof's "valid" set read it. Non-canonical encodings of A (y ≥ p) are rejected at key setup.
 - **Not constant-time,** like the ES256 code: every input is public.
 
-## The prototype
+## The implementation
 
 ```c
 jwt_pkey_t *k = jwt_pkey_es256(x, y);        // or jwt_pkey_rs256(n, nlen, e, elen), jwt_pkey_ed25519(pub); NULL if invalid
@@ -276,7 +276,7 @@ jwt_pkey_free(k);
     branching. That's fine for public data, but the code is deliberately not constant-time.
 - **Field arithmetic:**
   - fiat-crypto's generated `p256_64.c` / `p256_scalar_64.c` (formally verified, MIT), fetched by
-    `scripts/fetch-fiat.sh` at a pinned commit, plus my `fe_mul`.
+    vendored in `src/fiat/` (pinned and re-checked by `scripts/fetch-fiat.sh`), plus my `fe_mul`.
   - `fe_mul` is a Montgomery CIOS that uses p's limb structure: −p⁻¹ ≡ 1 (mod 2⁶⁴), and p₂ = 0. Each round needs
     2 multiplications instead of 4.
   - `-DJWT_S2N` swaps in s2n-bignum's `bignum_montmul_p256`, `bignum_montsqr_p256`, `bignum_add_p256` and
@@ -310,7 +310,7 @@ jwt_pkey_free(k);
     4. all the Z of the chunk inverted together (Montgomery's trick + the ref10 addition chain);
     5. accept iff the encoding of the result equals R byte for byte.
   - Field arithmetic is fiat-crypto's `curve25519_64.c` and `curve25519_scalar_64.c` (MIT), fetched by
-    `scripts/fetch-fiat.sh` like the P-256 files. `JWT_ED_W` sets the window.
+    vendored in `src/fiat/` like the P-256 files. `JWT_ED_W` sets the window.
 - **Screening (`-DJWT_RSA_SCREEN`):**
   - A = ∏ sᵢ and B = ∏ EMᵢ, each by chained Montgomery products of the raw values, so both carry R^−(c−1).
   - Accept the whole batch iff mont(pow(A·R, e), K_c) = B, where K_c = R^((c−1)(e−1)) mod n is precomputed per
@@ -407,6 +407,6 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
    plus `kid` selection across keys.
 3. **Run the crypto_mb path on an IFMA machine:** `make pk-test-ifma pk-bench-ifma`. Then decide, per algorithm,
    whether it or the existing path is the default on IFMA CPUs.
-4. **Make the fast build the `-DJWT_PK` default.**
+4. **Make the fast build the the default build default.**
    - It currently needs libcrypto and the s2n-bignum fetch.
    - A build that has neither falls back to the portable C, which is still 2.8–3.6× ahead of OpenSSL on ES256.

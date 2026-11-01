@@ -1,4 +1,4 @@
-/* test_pk.c — the RS256 / ES256 prototype (-DJWT_PK) against tests/make_pk_vectors.py's output: Wycheproof, NIST
+/* test_pk.c — the RS256 / ES256 against tests/make_pk_vectors.py's output: Wycheproof, NIST
  * CAVP, RFC 7515 A.2/A.3 and random pyca/cryptography cases, all pre-checked against cryptography.
  *   ./test_pk pk_vectors.txt
  * Every raw vector runs alone, then each run of vectors under one key runs as whole batches in random order and in
@@ -66,7 +66,7 @@ static void run_batch(const jwt_pkey_t *k, rv_t *v, const int *ord, int n, const
 
 static void run_group(int es, const char *ka, const char *kb, rv_t *v, int n, long *nkey_rejected) {
     jwt_pkey_t *k = make_key(es, ka, kb);
-    if (!k) { /* a key the prototype refuses (e.g. a point not on the curve): every vector must be invalid */
+    if (!k) { /* a key the library refuses (e.g. a point not on the curve): every vector must be invalid */
         for (int i = 0; i < n; i++) CHECK(!v[i].expect, "%s: key rejected but the vector is valid", v[i].src);
         *nkey_rejected += n;
         return;
@@ -306,7 +306,7 @@ int main(int argc, char **argv) {
     FLUSH_TOKENS();
     fclose(f);
     printf(
-        "  ES256: %ld raw vectors, RS256: %ld raw vectors (%ld under keys the prototype refuses), %ld tokens, %d s*x / s/x pairs\n",
+        "  ES256: %ld raw vectors, RS256: %ld raw vectors (%ld under keys the library refuses), %ld tokens, %d s*x / s/x pairs\n",
         counts[1], counts[0], nrej, nj, npair);
     printf("  EdDSA (Ed25519): %ld raw vectors\n", counts[2]);
 #ifdef JWT_RSA_SCREEN

@@ -122,7 +122,7 @@ jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2; /* x2: 16 lanes = two interleaved 8-
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
 #endif
 
-/* ---- RS256 / ES256 (prototype; build with -DJWT_PK, needs scripts/fetch-fiat.sh, see PK.md) ----
+/* ---- RS256 / ES256 / EdDSA (built by default; -DJWT_NO_PK leaves them out; see PK.md) ----
  * Optional asm backends: -DJWT_S2N (s2n-bignum, scripts/fetch-s2n-bignum.sh, link build/libs2n.a) and
  * -DJWT_OPENSSL (libcrypto BN for RSA, link -lcrypto); with both, the fastest kernel per platform and key size.
  * The same front end and claim rules as jwt_verify_batch, with a public key instead of a secret.  The key

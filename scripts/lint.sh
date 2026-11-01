@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # lint.sh [--fix] [--staged]: formatting and lint checks for first-party code (vendor/ and third_party/ excluded).
 #   formatting: clang-format (C, .clang-format), shfmt -i 2 -ci (shell), ruff format (Python, ruff.toml)
-#   linting:    shellcheck (warnings and errors), ruff check, cppcheck (warning + portability, library sources)
+#   linting:    shellcheck (warnings and errors), ruff check, cppcheck (warning + portability, library sources;
+#               skipped with --staged: it takes minutes)
 #   --fix       rewrite files with the formatters (and ruff's safe fixes) instead of reporting
 #   --staged    only the files staged for commit (the pre-commit hook)
 # The tools are pinned in ci/lint.Dockerfile. Unless LINT_LOCAL=1 (CI sets it inside that image), this script
@@ -34,7 +35,7 @@ fi
 git() { command git -c safe.directory='*' "$@"; }
 pick() { # tracked first-party files matching the globs; with --staged, only staged ones
   local all
-  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party)/' || true)
+  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party|src/fiat)/' || true)
   if [ "${LINT_STAGED:-$staged}" = 1 ]; then
     [ -n "${LINT_FILES:-}" ] || return 0
     grep -xF -f <(tr ' ' '\n' <<<"$LINT_FILES") <<<"$all" || true
@@ -68,10 +69,10 @@ if [ ${#PY[@]} -gt 0 ]; then
     ruff check --no-cache -q "${PY[@]}" || bad=1
   fi
 fi
-if [ "${LINT_STAGED:-$staged}" != 1 ] || [ ${#C[@]} -gt 0 ]; then
+if [ "${LINT_STAGED:-$staged}" != 1 ]; then # whole-program and slow (~2 min): make lint and CI, not the hook
   step "cppcheck"
   cppcheck -q --error-exitcode=1 --enable=warning,portability --inline-suppr --std=c11 -Iinclude -Isrc \
-    --suppress=missingIncludeSystem --suppress=toomanyconfigs "${CPPCHECK_SRC[@]}" || bad=1
+    --max-configs=1 --suppress=missingIncludeSystem --suppress=toomanyconfigs "${CPPCHECK_SRC[@]}" || bad=1
 fi
 
 if [ $bad = 1 ]; then

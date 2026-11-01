@@ -1,5 +1,5 @@
 /* pyshim.c — the library as a shared object for tests/test_hypothesis.py (ctypes).  Unity build: includes jwt.c,
- * with -DJWT_PK, so the property tests reach every HS256 engine the target has and the RS256 / ES256 prototype.
+ * so the property tests reach every HS256 engine the target has and RS256 / ES256 / EdDSA.
  *   jt_engines()                      number of full-verify engines
  *   jt_engine_name(i)                 its name
  *   jt_verify(i, key, n, tok, len, now, out)   jwt_verify_batch on engine i

@@ -5,7 +5,7 @@
 #   RFC 7515   Appendix A.1, the HS256 JWS example                 https://www.rfc-editor.org/rfc/rfc7515.txt
 #   NIST CAVP  HMAC.rsp, [L=32] (HMAC-SHA-256, keys 40-70 bytes)  csrc.nist.gov hmactestvectors.zip
 #   Wycheproof hmac_sha256_test.json (valid + invalid tags)        github.com/C2SP/wycheproof @ d17cc89
-# and, for the RS256 / ES256 prototype (make pk-test):
+# and, for RS256 / ES256 / EdDSA (make pk-test):
 #   Wycheproof ecdsa_secp256r1_sha256_p1363, rsa_signature_{2048,3072,4096}_sha256   (same commit)
 #   NIST CAVP  186-4ecdsatestvectors.zip SigVer.rsp [P-256,SHA-256]; 186-3rsatestvectors.zip SigVer15_186-3.rsp
 #   Wycheproof ed25519_test.json; RFC 8032 section 7.1 (Ed25519 test vectors); RFC 8037 A.4 (the EdDSA JWS)

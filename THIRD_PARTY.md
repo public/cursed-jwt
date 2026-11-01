@@ -38,17 +38,17 @@ cursed-jwt credits these projects for techniques and data:
   code is copied.
 
 - **fiat-crypto** (https://github.com/mit-plv/fiat-crypto, MIT / Apache-2.0 / BSD-1-Clause, used under MIT,
-  Copyright the fiat-crypto authors): the RS256/ES256 prototype (`-DJWT_PK`, `src/jwt_pk.inc`) `#include`s its
+  Copyright the fiat-crypto authors): RS256/ES256/EdDSA (`src/jwt_pk.inc`, `src/jwt_ed25519.inc`) `#include` its
   generated, formally verified `p256_64.c`, `p256_scalar_64.c`, and for Ed25519 `curve25519_64.c` and
-  `curve25519_scalar_64.c`. They are fetched by `scripts/fetch-fiat.sh` at a
+  `curve25519_scalar_64.c`. They are vendored in `src/fiat/` with fiat-crypto's `LICENSE-MIT`; `scripts/fetch-fiat.sh` re-fetches and checks them at a
   pinned commit and never committed. The P-256-specific `fe_mul` follows the reduction structure of OpenSSL's
   `ecp_nistz256` (Gueron and Krasnov); no code is copied.
 - **s2n-bignum** (https://github.com/awslabs/s2n-bignum, Apache-2.0 OR ISC OR MIT-0, used under MIT-0, Copyright
-  Amazon.com, Inc. or its affiliates): with `-DJWT_S2N`, the PK prototype links its formally verified assembly. That
+  Amazon.com, Inc. or its affiliates): with `-DJWT_S2N`, the RS256/ES256 code links its formally verified assembly. That
   covers the P-256 field (`bignum_montmul_p256`, `bignum_montsqr_p256`, `bignum_add_p256`, `bignum_sub_p256`) and
   RSA-2048 (`bignum_kmul_32_64`, `bignum_ksqr_32_64`, `bignum_emontredc_8n`). It is fetched by
   `scripts/fetch-s2n-bignum.sh` at a pinned commit and never committed.
-- **OpenSSL libcrypto** (Apache-2.0): with `-DJWT_OPENSSL`, the PK prototype calls `BN_mod_exp_mont` /
+- **OpenSSL libcrypto** (Apache-2.0): with `-DJWT_OPENSSL`, the RS256/ES256 code calls `BN_mod_exp_mont` /
   `BN_mod_mul_montgomery` for RSA. That makes libcrypto a link dependency of that build, not just of the tests.
 - **RSA batch screening** (`-DJWT_RSA_SCREEN`) is Bellare, Garay and Rabin's "screening", from *Fast Batch
   Verification for Modular Exponentiation and Digital Signatures* (EUROCRYPT 1998).

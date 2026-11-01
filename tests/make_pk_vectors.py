@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """make_pk_vectors.py VECTOR_DIR N_RANDOM SEED > pk_vectors.txt
 
-RS256 / ES256 vectors for tests/test_pk.c (the -DJWT_PK prototype).  Sources, all fetched by scripts/fetch-vectors.sh:
+RS256 / ES256 vectors for tests/test_pk.c .  Sources, all fetched by scripts/fetch-vectors.sh:
   Wycheproof ecdsa_secp256r1_sha256_p1363_test.json (JOSE's r || s format) and rsa_signature_{2048,3072,4096}_sha256;
   NIST CAVP SigVer.rsp [P-256,SHA-256] and SigVer15_186-3.rsp (SHA256, mod >= 2048, assorted public exponents;
   its messages (128 bytes) and signatures are printed without leading zero nibbles, so they are left-padded);
