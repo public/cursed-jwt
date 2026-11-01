@@ -70,7 +70,7 @@ static const hengine_t all_hengines[] = {
 #if defined(__aarch64__)
     { "sha2-1stream", jwt_hmac_sha2_1, JWT_CPU_SHA2 },
     { "sha2-2stream", jwt_hmac_sha2_2, JWT_CPU_SHA2 },
-    { "sha2-4stream", jwt_hmac_sha2_4, JWT_CPU_SHA2 },
+    { "sha2-4stream", jwt_hmac_sha2, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
     { "avx2-8lane", jwt_hmac_avx2, JWT_CPU_AVX2 },

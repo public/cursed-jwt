@@ -110,7 +110,7 @@ jwt_hmac_fn jwt_hmac_scalar;
 jwt_hmac_fn jwt_hmac_neon;
 #endif
 #if defined(__aarch64__)
-jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2, jwt_hmac_sha2_4; /* JWT_SHA2_STREAMS (default 4), 1, 4 */
+jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2; /* 4 interleaved streams (the default), 1, 2 */
 #endif
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 block function (batch-1 path) */

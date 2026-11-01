@@ -30,10 +30,7 @@
     8 /* comb window: 33 windows x 128 points x 64 B = 264 KB per base point (W=7: 148 KB, ~12% slower) */
 #endif
 #define P256_NW ((257 + JWT_P256_W - 1) / JWT_P256_W)
-#ifndef JWT_ES_ILV
-#define JWT_ES_ILV 1 /* ES256 tokens whose point additions run interleaved; no gain measured on an M5 (PK.md) */
-#endif
-#define P256_H (1 << (JWT_P256_W - 1))
+#define P256_H  (1 << (JWT_P256_W - 1))
 
 typedef uint64_t fe_t[4]; /* little-endian 64-bit limbs; field elements in fiat's Montgomery domain */
 typedef struct {

@@ -94,34 +94,30 @@ JWT_INLINE void EC(p256_add_digit)(p256_jac_t *acc, const p256_aff_t *row, int d
 /* the point additions and the x-coordinate check for c tokens whose digits are recoded */
 static void EC(es_points)(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
                           const int *at, uint8_t *ok) {
-    /* the point additions, JWT_ES_ILV tokens in lockstep: each token's 66 additions are one serial chain,
-     * so running several side by side lets the core overlap their multiplications */
-    for (int i0 = 0; i0 < c; i0 += JWT_ES_ILV) {
-        int ni = c - i0 < JWT_ES_ILV ? c - i0 : JWT_ES_ILV;
-        p256_jac_t acc[JWT_ES_ILV];
-        for (int q = 0; q < ni; q++) acc[q].inf = 1;
+    /* one token at a time: running 2-4 tokens' addition chains in lockstep gained nothing on the Xeon or the M5
+     * (PK.md), the out-of-order core already overlaps them */
+    for (int i = 0; i < c; i++) {
+        p256_jac_t acc;
+        acc.inf = 1;
         for (int j = 0; j < P256_NW; j++) {
-            for (int q = 0; q < ni; q++) EC(p256_add_digit)(&acc[q], k->tg[j], d1[i0 + q][j]);
-            for (int q = 0; q < ni; q++) EC(p256_add_digit)(&acc[q], k->tq[j], d2[i0 + q][j]);
+            EC(p256_add_digit)(&acc, k->tg[j], d1[i][j]);
+            EC(p256_add_digit)(&acc, k->tq[j], d2[i][j]);
         }
-        for (int q = 0; q < ni; q++) {
-            int i = i0 + q;
-            if (acc[q].inf) continue;
-            /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
-            fe_t z2, rf, t;
-            fe_sqr(z2, acc[q].z);
-            fiat_p256_to_montgomery(rf, r[i]);
+        if (acc.inf) continue;
+        /* x(R) mod n == r  <=>  X == r' Z^2 for r' in {r, r + n} with r' < p */
+        fe_t z2, rf, t;
+        fe_sqr(z2, acc.z);
+        fiat_p256_to_montgomery(rf, r[i]);
+        fe_mul(t, rf, z2);
+        int good = fe_eq(t, acc.x);
+        uint64_t rn[4];
+        fiat_p256_scalar_uint1 cy = 0;
+        for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
+        if (!good && !cy && u256_lt(rn, P256_P)) {
+            fiat_p256_to_montgomery(rf, rn);
             fe_mul(t, rf, z2);
-            int good = fe_eq(t, acc[q].x);
-            uint64_t rn[4];
-            fiat_p256_scalar_uint1 cy = 0;
-            for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
-            if (!good && !cy && u256_lt(rn, P256_P)) {
-                fiat_p256_to_montgomery(rf, rn);
-                fe_mul(t, rf, z2);
-                good = fe_eq(t, acc[q].x);
-            }
-            ok[at[i]] = (uint8_t)good;
+            good = fe_eq(t, acc.x);
         }
+        ok[at[i]] = (uint8_t)good;
     }
 }
