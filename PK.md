@@ -47,7 +47,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - **The catch:** screening proves that every *message* was signed. It does not prove that every *signature string*
     is the canonical one: s₁·x and s₂/x pass together. So it's opt-in (`-DJWT_RSA_SCREEN`); see below.
 - **EdDSA (Ed25519): the biggest ratio.** OpenSSL's Ed25519 verify is slow (40 µs on the M5, 150 µs on the Xeon).
-  The ES256 fixed-key trick applies unchanged: verify = [S]B + [k](−A), with comb tables for B and −A built at key
+  The ES256 fixed-key trick applies unchanged: verify = `[S]B + [k](−A)`, with comb tables for B and −A built at key
   setup, and Edwards additions are cheaper than Jacobian ones.
   - **Portable C, batch 32: 8.8× faster than OpenSSL on the M5 (4.6 vs 40.4 µs), 9.2× on the Xeon (16.3 vs
     150.2 µs).** Already 6.2× / 7.0× at batch 1.
@@ -69,8 +69,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   `EVP_PKEY` parsed once.
 - **Machines:**
   - M5: Apple clang, best of two runs under a load average of 5–10.
-  - Xeon: clang 18, `-O3 -march=cascadelake`, broker experiments exp79 (C), exp107 (s2n), exp109 (OpenSSL BN) and
-    exp110 (fast build).
+  - Xeon: clang 18, `-O3 -march=cascadelake`, one run per build (C, s2n, OpenSSL BN, fast).
 
 **ES256**
 
@@ -81,7 +80,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | Xeon, portable C | 28.2 | 24.7 | 23.0 | 22.1 | 21.6 | 21.4 | 78.6 |
 | **Xeon, fast (s2n-bignum P-256)** | **21.8** | 18.3 | 16.3 | 15.3 | **14.9** | 14.8 | 78.8 |
 
-**EdDSA (Ed25519)**, portable C only (fiat-crypto curve25519 field; Xeon exp168, clang 18)
+**EdDSA (Ed25519)**, portable C only (fiat-crypto curve25519 field; Xeon, clang 18)
 
 | build \ batch | 1 | 2 | 4 | 8 | 16 | 32 | OpenSSL |
 |---|---|---|---|---|---|---|---|
@@ -129,7 +128,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
     signature.
   - **The signing-input SHA-256 is now batched.** Each chunk's inputs go through the multi-buffer engines: 8 lanes
     on AVX-512VL/AVX2, 4 SHA2 streams on ARM. On the Xeon that took screened RS256-2048 from 3.78 to 3.16 µs and
-    ES256 from 15.4 to 14.9 µs (exp144). On the M5 it's within noise, because a single SHA2 stream was already
+    ES256 from 15.4 to 14.9 µs. On the M5 it's within noise, because a single SHA2 stream was already
     ~0.1 µs per token.
 - **Interleaving ES256 tokens** (`JWT_ES_ILV`, running the point additions of 2–4 tokens in lockstep) gained
   nothing on either machine: 8.86–8.90 vs 8.87 µs on the M5, 14.78–14.90 vs 14.80 on the Xeon. The out-of-order
@@ -137,7 +136,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **Batch 32 equals batch 16**, because the screening chunk is 16 tokens.
 - **gcc vs clang on the Xeon:**
   - with the asm backends the two are within 6%;
-  - with the portable C, gcc is 1.2–1.7× slower (exp79), so prefer clang for the C build on x86.
+  - with the portable C, gcc is 1.2–1.7× slower, so prefer clang for the C build on x86.
 
 ## Backends
 
@@ -162,7 +161,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
     libcrypto (if built in), otherwise C. Larger moduli and ARM use libcrypto.
   - `cmb_ok()`: crypto_mb runs only with AVX-512 IFMA (below).
   - On the Xeon, the fast build passes every vector both with s2n-bignum and with BMI2/ADX masked off
-    (`JWT_CPU_MASK=0x3`, exp135).
+    (`JWT_CPU_MASK=0x3`).
 - **Rosetta doesn't implement ADX,** so the x86 s2n-bignum kernels can't run under Docker on a Mac. They were
   tested on the real Xeon.
 
@@ -294,7 +293,7 @@ jwt_pkey_free(k);
   - Montgomery multiplication is product scanning with a 3-word accumulator, plus a squaring that doubles the
     cross products.
     - **On x86 the accumulator goes through `_addcarry_u64`.** gcc compiled a plain `acc += z; c2 += acc < z` into
-      branches and stack spills, which ran 6.7× slower than OpenSSL on the Xeon (exp75).
+      branches and stack spills, which ran 6.7× slower than OpenSSL on the Xeon.
     - Fixed-size copies exist for 2048/3072/4096 bits.
   - **`-DJWT_S2N` (2048-bit moduli):** s2n-bignum's Karatsuba `bignum_kmul_32_64` / `bignum_ksqr_32_64` and
     `bignum_emontredc_8n`, which is how AWS-LC uses them. Cross-checked against the C on 20,000 random operands.
@@ -324,10 +323,9 @@ the asm backends with and without screening. Each build makes about 14,500 check
 - macOS arm64 (Apple clang), every build;
 - Linux arm64 in Docker (gcc 13.3, clang 18.1), every build, plus ASan/UBSan on the fast screening build;
 - Linux amd64 in Docker, the portable C builds plus ASan/UBSan (Rosetta can't run the ADX asm);
-- the real Xeon: portable C with gcc (exp75/79), and the s2n, libcrypto and fast builds with clang (exp107/109/110);
-  EdDSA with clang (exp168).
+- the Xeon: portable C with gcc, and the s2n, libcrypto and fast builds with clang; EdDSA with clang.
 
-HS256 is unchanged by the shared front end (`claims_one`, `header_ok` taking the alg). On the Xeon (exp79), full
+HS256 is unchanged by the shared front end (`claims_one`, `header_ok` taking the alg). On the Xeon, full
 verify is 277.9 ns at batch 8 and 1,178.7 at batch 1. The README had 277 and 1,178 at the time; batch 1 has since
 moved to the extracted OpenSSL SHA-256 code (938 ns). `make test-vectors` passes on the M5.
 

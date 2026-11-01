@@ -12,14 +12,14 @@ binary picks the best engine for the CPU it runs on.
 
 RS256, ES256 and EdDSA (Ed25519) are an opt-in prototype with the same front end ([PK.md](PK.md)).
 
-**Why it exists.** It was written for [cursed-http](https://github.com/public/cursed-http), an entry in the
-[$12 server challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge). That server authenticates every
-request with an HS256 Bearer token on one vCPU, and it already handles requests in batches, so verifying a batch of
-tokens in one SIMD pass was the natural next step. It's the server's JWT code, extracted into a library with its own
-tests and benchmarks.
+**Why it exists.** JWT libraries verify one token per call, and HMAC-SHA256 is most of that call's cost. A server
+that already reads requests in batches (an io_uring or epoll loop handling many connections per wakeup) can verify
+all of their tokens at once. One SHA-256 has no parallelism to spare, but independent messages do: with one message
+per vector lane, an HMAC costs 154 ns per token at batch 8 on a Cascade Lake Xeon, against 762 ns for one at a time
+(see [Benchmarks](#benchmarks)). cursed-jwt is that batch verifier, with a strict JSON front end and tests against
+independent implementations.
 
-**Status.** Its one user so far is cursed-http, which the challenge's organisers scored at
-275,000 simulated users. The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are a
+**Status.** The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are a
 prototype: tested against the same vectors, but off by default and not yet used by anything. There are no tagged
 releases yet; `main` is the current version. It has not had an external security review (see [Security](#security)).
 
@@ -218,10 +218,10 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
   returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
 - **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine.
-  It has only been run on the Xeon, by forcing it with `JWT_CPU_FORCE_ZMM=1` (every vector passes, exp168); it
+  It has only been run on the Xeon, by forcing it with `JWT_CPU_FORCE_ZMM=1` (every vector passes); it
   hasn't been timed on a Zen yet.
 - **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
-  within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64 (exp143).
+  within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64.
   `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
 - **Engine-specific functions** are exported for tests and benchmarks; call one only if `jwt_cpu_features()` has
   its bit. `jwt_hmac_avx512x2` exists only for benchmarks.
@@ -377,9 +377,7 @@ JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in bu
 
 ## Benchmarks
 
-**Method.** Labels like `exp121` name the run in cursed-http's
-[`synteq-experiments/`](https://github.com/public/cursed-http/tree/main/synteq-experiments) folder that produced a
-number, on rented 1 vCPU Xeon Platinum 8260 boxes (Ubuntu 24.04, kernel 6.8) matching the challenge's scored machine.
+**Method.**
 - `bench/bench_jwt.c`, ns per token, best of several runs, hot cache.
 - Tokens are ~140-byte signing inputs: 3 inner SHA-256 blocks + 1 outer.
 - "Full verify" includes split, header, signature decode, HMAC, payload base64url, JSON and claims.
@@ -387,7 +385,7 @@ number, on rented 1 vCPU Xeon Platinum 8260 boxes (Ubuntu 24.04, kernel 6.8) mat
   midstates, OpenSSL's best case.
 
 **Xeon Platinum 8260** (Cascade Lake, 2.4 GHz, no SHA-NI), 1 vCPU VM, Ubuntu 24.04, kernel 6.8, gcc 13.3,
-`-O3 -march=cascadelake` (exp121; the default build, with no `-march` and run-time dispatch, has the same HMAC
+`-O3 -march=cascadelake` (the default build, with no `-march` and run-time dispatch, has the same HMAC
 speed and full verify within 2–7%).
 
 HMAC only, ns/token:
