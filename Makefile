@@ -121,6 +121,10 @@ avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
 licence: bench/licence_probe.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< $(X86SHA) -o $(B)/licence_probe && ./$(B)/licence_probe
 
+# RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit.
+# Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
+PK := -DJWT_PK -Ithird_party/fiat
+PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc third_party/fiat/p256_64.c
 # property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
 HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run
 $(B)/pyenv-hyp: | $(B)
@@ -148,9 +152,7 @@ FUZZ_SECS ?= 10
 fuzz:
 	./scripts/fuzz.sh "" $(FUZZ_SECS)
 
-# RS256 / ES256 prototype (src/jwt_pk.inc, PK.md): needs fiat-crypto's P-256 arithmetic, fetched at a pinned commit
-PK := -DJWT_PK -Ithird_party/fiat
-PKSRC := $(SRC) src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc third_party/fiat/p256_64.c
+# RS256 / ES256 prototype: PK and PKSRC are defined above (before the first rule that uses them)
 third_party/fiat/p256_64.c: scripts/fetch-fiat.sh
 	./scripts/fetch-fiat.sh
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)
