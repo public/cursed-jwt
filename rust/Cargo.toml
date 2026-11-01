@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cursed-jwt", "cjwt-sys", "bench"]
+members = ["cursed-jwt", "cjwt-sys", "bench", "pyshim"]
 # fuzz/ is a cargo-fuzz project (nightly, libFuzzer); it has its own workspace
 exclude = ["fuzz"]
 

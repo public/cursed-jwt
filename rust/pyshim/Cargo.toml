@@ -1,0 +1,14 @@
+[package]
+name = "cursed-jwt-pyshim"
+version = "0.0.0"
+description = "Test-only: the Rust port behind the C library's ABI, so tests/test_hypothesis.py (ctypes) can drive it"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cursed-jwt = { path = "../cursed-jwt" }

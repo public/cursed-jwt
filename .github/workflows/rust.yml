@@ -42,6 +42,11 @@ jobs:
       - run: cargo test --release -p cursed-jwt
         env:
           JWT_CPU_MASK: "0"
+      # the independent Python model of the claim rules (Hypothesis), through a C-ABI shim of the Rust port
+      - run: |
+          cargo build --release -p cursed-jwt-pyshim
+          make -C .. build/pyenv-hyp
+          cd .. && $(cat build/pyenv-hyp) -I tests/test_hypothesis.py rust/target/release/libcursed_jwt_pyshim.so 200
       # the AVX-512 ymm engines must not touch a zmm register (frequency-licence drop on Intel)
       - if: runner.arch == 'X64'
         run: |

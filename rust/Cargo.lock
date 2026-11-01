@@ -325,6 +325,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cursed-jwt-pyshim"
+version = "0.0.0"
+dependencies = [
+ "cursed-jwt",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "4.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
