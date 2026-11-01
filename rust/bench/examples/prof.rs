@@ -58,7 +58,9 @@ fn main() {
     let etoks: Vec<Vec<u8>> = (1..=n)
         .map(|i| {
             use ed25519_dalek::Signer;
-            let pl = format!(r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#);
+            let pl = format!(
+                r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#
+            );
             let msg = format!("{ehead}.{}", b64u(pl.as_bytes()));
             format!("{msg}.{}", b64u(&sk.sign(msg.as_bytes()).to_bytes())).into_bytes()
         })
