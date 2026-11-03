@@ -74,7 +74,7 @@ static unsigned jwt_cpu_bits;
 __attribute__((constructor)) static void jwt_cpu_init(void) {
     unsigned f = JWT_CPU_DETECTED;
 #if defined(JWT_X86)
-    unsigned a, b, c, d, ecx1 = 0, ebx7 = 0;
+    unsigned a = 0, b = 0, c = 0, d = 0, ecx1 = 0, ebx7 = 0;
     if (__get_cpuid(1, &a, &b, &c, &d)) ecx1 = c;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b;
     unsigned xcr0 = 0;
@@ -90,17 +90,17 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
     if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+    unsigned vb = 0, vc = 0, vd = 0, fam;
+    __get_cpuid(0, &a, &vb, &vc, &vd);
+    int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
+    __get_cpuid(1, &a, &b, &c, &d);
+    fam = ((a >> 8) & 0xF) == 0xF ? ((a >> 8) & 0xF) + ((a >> 20) & 0xFF) : (a >> 8) & 0xF;
     /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
-     * drop Intel's do, so there the 16-lane zmm engine is the better one (llvm-mca/uiCA models: ~2x per byte vs 8-lane
-     * ymm; not yet measured on hardware).  Intel always keeps the ymm engine. */
-    if (f & JWT_CPU_AVX512VL) {
-        unsigned vb = 0, vc = 0, vd = 0, fam;
-        __get_cpuid(0, &a, &vb, &vc, &vd);
-        int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
-        __get_cpuid(1, &a, &b, &c, &d);
-        fam = ((a >> 8) & 0xF) == 0xF ? ((a >> 8) & 0xF) + ((a >> 20) & 0xFF) : (a >> 8) & 0xF;
-        if (amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
-    }
+     * drop Intel's do, so there the 16-lane zmm engine beats the 8-lane ymm one.  Intel always keeps the ymm engine. */
+    if ((f & JWT_CPU_AVX512VL) && amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
+    /* Every Zen has SHA-NI, and there 4 interleaved SHA-NI streams beat every vector engine at every batch size
+     * (Zen 2, 3 and 4 measured).  Intel's SHA-NI parts have not been timed, so they keep the vector engines. */
+    if ((f & JWT_CPU_SHANI) && amd) f |= JWT_CPU_FAST_SHANI;
     /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
     if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1')
         f |= JWT_CPU_FAST_ZMM;
@@ -884,6 +884,132 @@ void jwt_hmac_sha2_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const
 }
 JWT_END_SHA2
 #endif /* SHA2 */
+
+/* ---- x86 SHA-NI: S independent streams interleaved for latency hiding (the ARM engine's layout) ----
+ * Every Zen has SHA-NI; Cascade Lake doesn't, so there this code is compiled and never picked.  The state lives as
+ * ABEF / CDGH (the order sha256rnds2 wants); ni_ld / ni_st convert from / to the natural h0..h7. */
+#if defined(JWT_X86)
+#if defined(__clang__)
+#define JWT_BEGIN_SHANI                                                                                                \
+    _Pragma("clang attribute push (__attribute__((target(\"sha,sse4.1,ssse3\"))), apply_to = function)")
+#else
+#define JWT_BEGIN_SHANI _Pragma("GCC push_options") _Pragma("GCC target(\"sha,sse4.1,ssse3\")")
+#endif
+JWT_BEGIN_SHANI
+JWT_INLINE void ni_ld(const uint32_t h[8], __m128i *abef, __m128i *cdgh) {
+    __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)h), 0xB1);       /* CDAB */
+    __m128i u = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)(h + 4)), 0x1B); /* EFGH */
+    *abef = _mm_alignr_epi8(t, u, 8);
+    *cdgh = _mm_blend_epi16(u, t, 0xF0);
+}
+JWT_INLINE void ni_st(__m128i abef, __m128i cdgh, uint32_t h[8]) {
+    __m128i t = _mm_shuffle_epi32(abef, 0x1B), u = _mm_shuffle_epi32(cdgh, 0xB1); /* FEBA, DCHG */
+    _mm_storeu_si128((__m128i *)h, _mm_blend_epi16(t, u, 0xF0));                  /* DCBA */
+    _mm_storeu_si128((__m128i *)(h + 4), _mm_alignr_epi8(u, t, 8));               /* HGFE */
+}
+/* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
+JWT_INLINE void ni_compress(int S, __m128i *st0, __m128i *st1, __m128i (*m)[4]) {
+    __m128i a0[4], a1[4];
+    for (int s = 0; s < S; s++) a0[s] = st0[s], a1[s] = st1[s];
+#if defined(__clang__)
+#pragma clang loop unroll(full)
+#else
+#pragma GCC unroll 16
+#endif
+    for (int r = 0; r < 16; r++) {
+        __m128i kr = _mm_loadu_si128((const __m128i *)(K256 + 4 * r));
+        for (int s = 0; s < S; s++) {
+            __m128i wk = _mm_add_epi32(m[s][r & 3], kr);
+            st1[s] = _mm_sha256rnds2_epu32(st1[s], st0[s], wk);
+            st0[s] = _mm_sha256rnds2_epu32(st0[s], st1[s], _mm_shuffle_epi32(wk, 0x0E));
+            if (r < 12) { /* W[4(r+4)..] from the last four groups: msg1, + W[t-7] (alignr), msg2 */
+                __m128i w = _mm_sha256msg1_epu32(m[s][r & 3], m[s][(r + 1) & 3]);
+                w = _mm_add_epi32(w, _mm_alignr_epi8(m[s][(r + 3) & 3], m[s][(r + 2) & 3], 4));
+                m[s][r & 3] = _mm_sha256msg2_epu32(w, m[s][(r + 3) & 3]);
+            }
+        }
+    }
+    for (int s = 0; s < S; s++) st0[s] = _mm_add_epi32(st0[s], a0[s]), st1[s] = _mm_add_epi32(st1[s], a1[s]);
+}
+/* S plans with identical nb; raw: plain SHA-256 (k = sha_iv_key, no outer hash) */
+JWT_INLINE void ni_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+    __m128i st0[4], st1[4], m[4][4], ih0, ih1;
+    ni_ld(k->ih, &ih0, &ih1);
+    for (int s = 0; s < S; s++) st0[s] = ih0, st1[s] = ih1;
+    for (int b = 0; b < p[0]->nb; b++) {
+        for (int s = 0; s < S; s++) {
+            const uint8_t *blk = hplan_block(p[s], b);
+            for (int j = 0; j < 4; j++)
+                m[s][j] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(blk + 16 * j)), bswap);
+        }
+        ni_compress(S, st0, st1, m);
+    }
+    if (raw) {
+        for (int s = 0; s < S; s++) ni_st(st0[s], st1[s], mac[s]);
+        return;
+    }
+    __m128i oh0, oh1;
+    ni_ld(k->oh, &oh0, &oh1);
+    for (int s = 0; s < S; s++) {
+        uint32_t d[8];
+        ni_st(st0[s], st1[s], d);
+        m[s][0] = _mm_loadu_si128((const __m128i *)d), m[s][1] = _mm_loadu_si128((const __m128i *)(d + 4));
+        m[s][2] = _mm_set_epi32(0, 0, 0, (int)0x80000000u), m[s][3] = _mm_set_epi32((64 + 32) * 8, 0, 0, 0);
+        st0[s] = oh0, st1[s] = oh1;
+    }
+    ni_compress(S, st0, st1, m);
+    for (int s = 0; s < S; s++) ni_st(st0[s], st1[s], mac[s]);
+}
+JWT_INLINE void ni_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                           uint32_t (*mac)[8]) {
+    enum { CH = 64 };
+    hplan_t plan[CH];
+    const hplan_t *pp[CH];
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH;
+        for (int i = 0; i < m; i++) hplan_init_off(&plan[i], msg[base + i], len[base + i], raw ? 0 : 64);
+        for (int i = 0; i < m; i++) { /* sort by nb so groups of S share a block count */
+            const hplan_t *p = &plan[i];
+            int j = i;
+            while (j > 0 && pp[j - 1]->nb > p->nb) pp[j] = pp[j - 1], j--;
+            pp[j] = p;
+        }
+        int g = 0;
+        while (g < m) {
+            int s = S;
+            if (m - g < s) s = m - g;
+            for (int i = 1; i < s; i++)
+                if (pp[g + i]->nb != pp[g]->nb) {
+                    s = i;
+                    break;
+                }
+            uint32_t *out[4];
+            for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
+            switch (s) { /* constant S per call so ni_hmac fully specialises */
+                case 4: ni_hmac(4, raw, k, pp + g, out); break;
+                case 3:
+                    ni_hmac(2, raw, k, pp + g, out);
+                    ni_hmac(1, raw, k, pp + g + 2, out + 2);
+                    break;
+                case 2: ni_hmac(2, raw, k, pp + g, out); break;
+                default: ni_hmac(1, raw, k, pp + g, out); break;
+            }
+            g += s;
+        }
+    }
+}
+void jwt_hmac_shani_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(1, 0, k, n, msg, len, mac);
+}
+void jwt_hmac_shani_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(2, 0, k, n, msg, len, mac);
+}
+void jwt_hmac_shani_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(4, 0, k, n, msg, len, mac);
+}
+JWT_END_TARGET
+#endif /* SHA-NI */
 
 /* ======================================================================================
  * 3. base64url
@@ -2157,6 +2283,7 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
+    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
     if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
@@ -2189,6 +2316,7 @@ const char *jwt_engine(void) {
     if (h == jwt_hmac_sha2) return "sha2";
 #endif
 #if defined(JWT_X86)
+    if (h == jwt_hmac_shani_4) return "shani";
     if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
     if (h == jwt_hmac_avx2) return "avx2";
