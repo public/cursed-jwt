@@ -167,55 +167,40 @@ $(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
 	for f in $(S2N_FILES); do $(CC) -c -DS2N_BN_HIDE_SYMBOLS=1 -Ithird_party/s2n-bignum/include \
 	  third_party/s2n-bignum/$(S2N_ARCH)/$$f.S -o $(B)/s2n/$${f#*/}.o || exit 1; done
 	rm -f $@ && ar rcs $@ $(addprefix $(B)/s2n/,$(addsuffix .o,$(notdir $(S2N_FILES))))
-$(B)/test_pk_s2n: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(S2N) -o $@
-$(B)/test_pk_s2n_screen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(S2N) -o $@
-$(B)/bench_pk_s2n: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $(SSLINC) $< $(S2N) $(SSLLIB) -lcrypto -o $@
-$(B)/bench_pk_s2n_screen: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $(SSLINC) $< $(S2N) $(SSLLIB) -lcrypto -o $@
 # -DJWT_OPENSSL: RSA arithmetic through libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery (OpenSSL's asm);
 # pk-test-fast / pk-bench-fast build the fastest combination: s2n-bignum for P-256, OpenSSL for RSA
 FAST := -DJWT_S2N -DJWT_OPENSSL $(SSLINC) $(B)/libs2n.a $(SSLLIB) -lcrypto
-$(B)/test_pk_fast: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(FAST) -o $@
-$(B)/test_pk_fast_screen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(FAST) -o $@
-$(B)/bench_pk_fast: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(FAST) -o $@
-$(B)/bench_pk_fast_screen: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(FAST) -o $@
-pk-test-fast: $(B)/test_pk_fast $(B)/test_pk_fast_screen $(B)/pk_vectors.txt
-	./$(B)/test_pk_fast $(B)/pk_vectors.txt
-	./$(B)/test_pk_fast_screen $(B)/pk_vectors.txt
-pk-bench-fast: $(B)/bench_pk_fast $(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
-	./$(B)/bench_pk_fast $(B)/pk_tokens.txt
-	./$(B)/bench_pk_fast_screen $(B)/pk_tokens.txt
 # -DJWT_CRYPTO_MB: Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA (scripts/build-crypto-mb.sh; Linux x86-64; used only
 # on CPUs with IFMA, checked at run time).  pk-test-ifma / pk-bench-ifma = the fast build plus crypto_mb.
 CMB := -DJWT_CRYPTO_MB -Ithird_party/crypto-mb/include third_party/crypto-mb/lib/libcrypto_mb.a
 third_party/crypto-mb/lib/libcrypto_mb.a:
 	./scripts/build-crypto-mb.sh
-$(B)/test_pk_ifma: tests/test_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< $(CMB) $(FAST) -o $@
-$(B)/test_pk_ifma_noscreen: tests/test_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(CMB) $(FAST) -o $@
-$(B)/bench_pk_ifma: bench/bench_pk.c $(PKSRC) $(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< $(CMB) $(FAST) -o $@
-pk-test-ifma: $(B)/test_pk_ifma $(B)/test_pk_ifma_noscreen $(B)/pk_vectors.txt
-	./$(B)/test_pk_ifma $(B)/pk_vectors.txt
-	./$(B)/test_pk_ifma_noscreen $(B)/pk_vectors.txt
+
+# Every backend builds test_pk<v>, test_pk<v>_screen, bench_pk<v> and bench_pk<v>_screen from one template:
+# $(1) = the suffix ("" for portable C), $(2) = its flags and libraries, $(3) = their prerequisites.
+# _screen adds -DJWT_RSA_SCREEN.  pk-test-<v> / pk-bench-<v> run both builds; pk-test also runs the W=5 and W=7 combs.
+define PK_BACKEND
+$(B)/test_pk$(1) $(B)/test_pk$(1)_screen: tests/test_pk.c $(PKSRC) $(3) | $(B)
+	$$(CC) $$(CFLAGS) $$(ARCHFLAGS) $$(WARN) $$(INC) $$(PK) $$(if $$(findstring _screen,$$@),-DJWT_RSA_SCREEN) $$< $(2) -o $$@
+$(B)/bench_pk$(1) $(B)/bench_pk$(1)_screen: bench/bench_pk.c $(PKSRC) $(3) | $(B)
+	$$(CC) $$(CFLAGS) $$(ARCHFLAGS) $$(WARN) $$(INC) $$(PK) $$(if $$(findstring _screen,$$@),-DJWT_RSA_SCREEN) $$(SSLINC) $$< $(2) $$(SSLLIB) -lcrypto -o $$@
+endef
+$(eval $(call PK_BACKEND,,,))
+$(eval $(call PK_BACKEND,_s2n,$(S2N),$(B)/libs2n.a))
+$(eval $(call PK_BACKEND,_fast,$(FAST),$(B)/libs2n.a))
+$(eval $(call PK_BACKEND,_ifma,$(CMB) $(FAST),$(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a))
+pk-test-s2n pk-test-fast pk-test-ifma: pk-test-%: $(B)/test_pk_% $(B)/test_pk_%_screen $(B)/pk_vectors.txt
+	./$(B)/test_pk_$* $(B)/pk_vectors.txt
+	./$(B)/test_pk_$*_screen $(B)/pk_vectors.txt
+pk-bench-s2n pk-bench-fast: pk-bench-%: $(B)/bench_pk_% $(B)/bench_pk_%_screen $(B)/pk_tokens.txt
+	./$(B)/bench_pk_$* $(B)/pk_tokens.txt
+	./$(B)/bench_pk_$*_screen $(B)/pk_tokens.txt
 pk-bench-ifma: $(B)/bench_pk_ifma $(B)/pk_tokens.txt
 	./$(B)/bench_pk_ifma $(B)/pk_tokens.txt
 	JWT_CPU_MASK=0xef ./$(B)/bench_pk_ifma $(B)/pk_tokens.txt   # the same binary with IFMA masked off, for comparison
 $(B)/pk_vectors.txt: tests/make_pk_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
 	./scripts/fetch-vectors.sh
 	$$(cat $(B)/pyenv) -I tests/make_pk_vectors.py third_party/vectors $(VECTORS_N) 1 > $@
-$(B)/test_pk: tests/test_pk.c $(PKSRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $< -o $@
-$(B)/test_pk_screen: tests/test_pk.c $(PKSRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $< -o $@
 $(B)/test_pk_w%: tests/test_pk.c $(PKSRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_P256_W=$* $< -o $@
 $(B)/asan_pk: tests/test_pk.c $(PKSRC) | $(B)
@@ -225,21 +210,11 @@ pk-test: $(B)/test_pk $(B)/test_pk_screen $(B)/test_pk_w5 $(B)/test_pk_w7 $(B)/p
 	./$(B)/test_pk_screen $(B)/pk_vectors.txt
 	./$(B)/test_pk_w5 $(B)/pk_vectors.txt | tail -1
 	./$(B)/test_pk_w7 $(B)/pk_vectors.txt | tail -1
-pk-test-s2n: $(B)/test_pk_s2n $(B)/test_pk_s2n_screen $(B)/pk_vectors.txt
-	./$(B)/test_pk_s2n $(B)/pk_vectors.txt
-	./$(B)/test_pk_s2n_screen $(B)/pk_vectors.txt
 $(B)/pk_tokens.txt: bench/gen_pk_tokens.py $(B)/pyenv
 	$$(cat $(B)/pyenv) -I bench/gen_pk_tokens.py 64 1 > $@
-$(B)/bench_pk: bench/bench_pk.c $(PKSRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
-$(B)/bench_pk_screen: bench/bench_pk.c $(PKSRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(PK) -DJWT_RSA_SCREEN $(SSLINC) $< $(SSLLIB) -lcrypto -o $@
 pk-bench: $(B)/bench_pk $(B)/bench_pk_screen $(B)/pk_tokens.txt
 	./$(B)/bench_pk $(B)/pk_tokens.txt
 	./$(B)/bench_pk_screen $(B)/pk_tokens.txt
-pk-bench-s2n: $(B)/bench_pk_s2n $(B)/bench_pk_s2n_screen $(B)/pk_tokens.txt
-	./$(B)/bench_pk_s2n $(B)/pk_tokens.txt
-	./$(B)/bench_pk_s2n_screen $(B)/pk_tokens.txt
 pk-asan: $(B)/asan_pk $(B)/pk_vectors.txt
 	ASAN_OPTIONS=detect_leaks=0 ./$(B)/asan_pk $(B)/pk_vectors.txt
 

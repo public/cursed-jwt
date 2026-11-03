@@ -395,10 +395,7 @@ JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t
         neon_tr4((s)[4], (s)[5], (s)[6], (s)[7], o_ + 4);                                                              \
         for (int l_ = 0; l_ < 4; l_++) vst1q_u32((out)[l_], o_[l_]), vst1q_u32((out)[l_] + 4, o_[4 + l_]);             \
     } while (0)
-#ifndef JWT_NEON_MIN_LANES
-#define JWT_NEON_MIN_LANES 2
-#endif
-#define MB_MIN_LANES JWT_NEON_MIN_LANES
+#define MB_MIN_LANES 2
 #include "jwt_mb.inc"
 #undef MB
 #undef MB_LANES
@@ -453,24 +450,20 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
         avx2_tr8((s), o_);                                                                                             \
         for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);                              \
     } while (0)
-#define MB_LANES   8
-#define V          __m256i
-#define VSET1(x)   _mm256_set1_epi32((int)(x))
-#define VADD(a, b) _mm256_add_epi32(a, b)
-#define VXOR(a, b) _mm256_xor_si256(a, b)
-#define VSHR(x, n) _mm256_srli_epi32(x, n)
-#define VMASK(arr) _mm256_loadu_si256((const __m256i *)(arr))
-#ifndef JWT_AVX_MIN_LANES
+#define MB_LANES          8
+#define V                 __m256i
+#define VSET1(x)          _mm256_set1_epi32((int)(x))
+#define VADD(a, b)        _mm256_add_epi32(a, b)
+#define VXOR(a, b)        _mm256_xor_si256(a, b)
+#define VSHR(x, n)        _mm256_srli_epi32(x, n)
+#define VMASK(arr)        _mm256_loadu_si256((const __m256i *)(arr))
 #define JWT_AVX_MIN_LANES 2
-#endif
 /* AVX2 alone: with OpenSSL's single-stream code for leftovers, 2 messages one at a time (2 x 753 ns) beat one
  * 2-lane AVX2 group (822 ns) on a Xeon Platinum 8260; from 3 lanes the vector wins (555 ns) */
-#ifndef JWT_AVX2_MIN_LANES
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 #define JWT_AVX2_MIN_LANES 3
 #else
 #define JWT_AVX2_MIN_LANES JWT_AVX_MIN_LANES
-#endif
 #endif
 #define MB_MIN_LANES JWT_AVX2_MIN_LANES
 
@@ -719,16 +712,10 @@ void jwt_hmac_sha2_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const
     ce_drive(1, k, n, msg, len, mac);
 }
 void jwt_hmac_sha2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-#ifndef JWT_SHA2_STREAMS
-#define JWT_SHA2_STREAMS 4
-#endif
-    ce_drive(JWT_SHA2_STREAMS, k, n, msg, len, mac);
+    ce_drive(4, k, n, msg, len, mac); /* 4 streams: 15% faster than 1 on an M5 */
 }
 void jwt_hmac_sha2_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     ce_drive(2, k, n, msg, len, mac);
-}
-void jwt_hmac_sha2_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    ce_drive(4, k, n, msg, len, mac);
 }
 JWT_END_SHA2
 #endif /* SHA2 */
