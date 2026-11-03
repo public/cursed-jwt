@@ -81,6 +81,7 @@ static const hengine_t all_hengines[] = {
     { "avx512vl-8lane", jwt_hmac_avx512, JWT_CPU_AVX512VL },
     { "avx512vl-2x8lane", jwt_hmac_avx512x2, JWT_CPU_AVX512VL },
     { "avx512-zmm16", jwt_hmac_zmm, JWT_CPU_AVX512VL },
+    { "shani+zmm", jwt_hmac_shani_zmm, JWT_CPU_SHANI | JWT_CPU_AVX512VL },
 #endif
 };
 static hengine_t hengines[sizeof all_hengines / sizeof all_hengines[0]];
