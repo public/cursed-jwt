@@ -2,8 +2,8 @@
 
 Batch JWT verification in C. Instead of checking HS256 tokens one at a time, cursed-jwt checks many at once with **one
 multi-buffer SIMD HMAC-SHA256 pass**, one token per vector lane:
-- on AMD Zen, 4 interleaved SHA-NI streams;
-- elsewhere on x86, AVX-512VL or AVX2 hash 8 tokens per vector;
+- with SHA-NI (every AMD Zen, Intel Ice Lake and later), 4 interleaved SHA-NI streams;
+- without it, AVX-512VL or AVX2 hash 8 tokens per vector;
 - interleaved ARMv8 SHA2 instructions hash 4 streams on ARM;
 - a lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
 
@@ -203,7 +203,8 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 
 | CPU | HS256 engine | RS256 / ES256 kernels (`-DJWT_PK`) |
 |---|---|---|
-| AMD with SHA-NI (every Zen) | 4 interleaved SHA-NI streams | as the rows below |
+| AMD Zen 5 (family 1Ah) | groups of 16 on zmm, the rest on 4 SHA-NI streams | as the rows below |
+| any other x86-64 with SHA-NI (Zen 1–4, Intel Ice Lake and later, Atom cores) | 4 interleaved SHA-NI streams | as the rows below |
 | AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512, SHA-NI masked | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
 | x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
 | x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
@@ -212,16 +213,18 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 | other AArch64 | NEON, 4 lanes | portable C |
 | anything else | scalar | portable C |
 
-- **Single tokens.** On AMD they run one SHA-NI stream of the same engine. On other x86-64 Linux they run OpenSSL's
+- **Single tokens.** With SHA-NI they run one SHA-NI stream of the same engine. On other x86-64 Linux they run OpenSSL's
   extracted SHA-256 code, which dispatches itself (SHA-NI, AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile
   assembles `src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own
   program, do the same, or leave both out to get the compiled scalar code; `make OSSL_SHA=` builds without it.
 - **Inspecting and masking the choice.** `jwt_engine()` names the HS256 engine in use, and `jwt_cpu_features()`
   returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
-- **AMD.** `JWT_CPU_FAST_SHANI` is set for AMD CPUs with SHA-NI (every Zen) and selects the 4-stream SHA-NI
-  engine. On Zen 3 (EPYC Milan) it beats every vector engine at every batch size. Intel CPUs with SHA-NI (Ice Lake
-  and later) haven't been timed, so they keep the vector engines; `jwt_hmac_shani_4` can be called directly there.
+- **SHA-NI.** `JWT_CPU_FAST_SHANI` is set on every CPU with SHA-NI except Zen 5, and selects the 4-stream SHA-NI
+  engine. On Zen 3 (EPYC Milan) it beats every vector engine at every batch size. On the other CPUs it is an
+  expectation, not a measurement: Intel's SHA-NI parts and Zen 5 haven't been timed. Zen 5 runs 512-bit vectors at
+  full width, so there `jwt_hmac_shani_zmm` sends whole groups of 16 to the zmm engine and the rest to SHA-NI.
+  Masking SHA-NI (`JWT_CPU_MASK` without bit 8) restores the vector engines.
 - **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine
   when SHA-NI is masked off.
 - **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
@@ -495,8 +498,8 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 - **Algorithms.** HS256 by default. RS256, ES256 and EdDSA (Ed25519 only) are built in, without JWKS parsing; there's no Ed448, no JWE and no
   `kid` lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
-- **A lone token ties OpenSSL, it doesn't beat it,** except on AMD. On other x86-64 Linux it *is* OpenSSL's code.
-  On AMD the SHA-NI engine's single stream is used instead (132 vs 160 ns per HMAC on EPYC Milan).
+- **A lone token ties OpenSSL, it doesn't beat it,** except with SHA-NI. Elsewhere on x86-64 Linux it *is* OpenSSL's
+  code. With SHA-NI the engine's single stream is used instead (132 vs 160 ns per HMAC on EPYC Milan).
 - **x86-64 macOS and Windows** use the compiled scalar template for single tokens: the extracted file is ELF-only.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.

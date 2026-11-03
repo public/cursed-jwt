@@ -151,6 +151,7 @@ static const engine_t all_engines[] = {
     { "avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
     { "avx512x2", jwt_hmac_avx512x2, NULL, JWT_CPU_AVX512VL },
     { "zmm", jwt_hmac_zmm, NULL, JWT_CPU_AVX512VL },
+    { "shani+zmm", jwt_hmac_shani_zmm, NULL, JWT_CPU_SHANI | JWT_CPU_AVX512VL },
 #endif
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
     { "ossl", jwt_hmac_ossl, NULL, 0 },
