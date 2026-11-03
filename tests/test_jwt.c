@@ -144,6 +144,9 @@ static const engine_t all_engines[] = {
     { "sha2x4", jwt_hmac_sha2_4, NULL, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
+    { "shani1", jwt_hmac_shani_1, NULL, JWT_CPU_SHANI },
+    { "shani2", jwt_hmac_shani_2, NULL, JWT_CPU_SHANI },
+    { "shani4", jwt_hmac_shani_4, NULL, JWT_CPU_SHANI },
     { "avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2 },
     { "avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
     { "zmm", jwt_hmac_zmm, NULL, JWT_CPU_AVX512VL },

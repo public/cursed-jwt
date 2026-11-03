@@ -73,6 +73,9 @@ static const hengine_t all_hengines[] = {
     { "sha2-4stream", jwt_hmac_sha2_4, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
+    { "shani-1stream", jwt_hmac_shani_1, JWT_CPU_SHANI },
+    { "shani-2stream", jwt_hmac_shani_2, JWT_CPU_SHANI },
+    { "shani-4stream", jwt_hmac_shani_4, JWT_CPU_SHANI },
     { "avx2-8lane", jwt_hmac_avx2, JWT_CPU_AVX2 },
     { "avx512vl-8lane", jwt_hmac_avx512, JWT_CPU_AVX512VL },
     { "avx512-zmm16", jwt_hmac_zmm, JWT_CPU_AVX512VL },
