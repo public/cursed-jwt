@@ -41,6 +41,8 @@ jobs:
       - run: cargo test --release --workspace
         env:
           CURSED_JWT_REQUIRE_VECTORS: 1
+      # which engines this runner exercised (x64 runners are often AMD EPYC: SHA-NI is the default there)
+      - run: cargo test --release -p cursed-jwt --test hs256 crafted -- --nocapture 2>&1 | grep -E "engines|test result"
       - run: cargo test --release -p cursed-jwt --no-default-features --features std
       # with every SIMD engine masked off: the scalar fallbacks under the default dispatch
       - run: cargo test --release -p cursed-jwt
