@@ -516,6 +516,48 @@ JWT_BEGIN_AVX512
 #undef MB_STORE8
 #undef MB_MIN_LANES
 
+/* driver for the zmm engine: full 16-groups go to zmm, smaller ones to the 8-lane engine, or one at a time below 2.
+ * It stays out of the AVX-512 region, calls both engines through pointers and is never inlined: merged into one
+ * function with the zmm code, a batch of 8 ran 19% slower on a Xeon Platinum 8260 (512-bit frequency licence). */
+JWT_END_TARGET
+JWT_BEGIN_AVX2
+typedef void lanes_fn(const jwt_key_t *, int, const hplan_t *const *, uint32_t (*)[8]);
+__attribute__((noinline)) static void zmm_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n,
+                                                const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    enum { CH = 64, ZMM_MIN = 9 }; /* <= 8 live lanes: a single 8-lane group is cheaper */
+    hplan_t plan[CH];
+    const hplan_t *pp[CH];
+    uint32_t tmp[16][8];
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH;
+        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
+        for (int i = 0; i < m; i++) {
+            const hplan_t *p = &plan[i];
+            int j = i;
+            while (j > 0 && pp[j - 1]->nb > p->nb) pp[j] = pp[j - 1], j--;
+            pp[j] = p;
+        }
+        for (int g = 0; g < m;) {
+            int nl = m - g;
+            if (nl >= ZMM_MIN) {
+                if (nl > 16) nl = 16;
+                l16(k, nl, &pp[g], tmp);
+            } else {
+                if (nl > 8) nl = 8;
+                if (nl < JWT_AVX_MIN_LANES) {
+                    for (int l = 0; l < nl; l++) hmac1_scalar(k, pp[g + l], tmp[l]);
+                } else {
+                    l8(k, nl, &pp[g], tmp);
+                }
+            }
+            for (int l = 0; l < nl; l++) memcpy(mac[base + (int)(pp[g + l] - plan)], tmp[l], 32);
+            g += nl;
+        }
+    }
+}
+JWT_END_TARGET
+JWT_BEGIN_AVX512
+
 /* ---- zmm, 16 lanes: NOT the default.  Fewest cycles per lane, but heavy 512-bit integer work can
  * drop the core's frequency licence for everything that runs after it; bench/licence_probe.c measures
  * that on real hardware.  Loads/stores reuse the ymm 8x8 transposes and glue the halves. */
@@ -574,38 +616,8 @@ JWT_BEGIN_AVX512
 #undef MB_LOAD16
 #undef MB_STORE8
 #undef MB_MIN_LANES
-/* full 16-groups go to zmm; smaller ones to the 8-lane ymm engine, or one at a time below 2 */
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    enum { CH = 64, ZMM_MIN = 9 }; /* <= 8 live lanes: a single 8-lane group is cheaper */
-    hplan_t plan[CH];
-    const hplan_t *pp[CH];
-    uint32_t tmp[16][8];
-    for (int base = 0; base < n; base += CH) {
-        int m = n - base < CH ? n - base : CH;
-        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
-        for (int i = 0; i < m; i++) {
-            const hplan_t *p = &plan[i];
-            int j = i;
-            while (j > 0 && pp[j - 1]->nb > p->nb) pp[j] = pp[j - 1], j--;
-            pp[j] = p;
-        }
-        for (int g = 0; g < m;) {
-            int nl = m - g;
-            if (nl >= ZMM_MIN) {
-                if (nl > 16) nl = 16;
-                lanes_zmm(k, nl, &pp[g], tmp);
-            } else {
-                if (nl > 8) nl = 8;
-                if (nl < JWT_AVX_MIN_LANES) {
-                    for (int l = 0; l < nl; l++) hmac1_scalar(k, pp[g + l], tmp[l]);
-                } else {
-                    lanes_avx512(k, nl, &pp[g], tmp);
-                }
-            }
-            for (int l = 0; l < nl; l++) memcpy(mac[base + (int)(pp[g + l] - plan)], tmp[l], 32);
-            g += nl;
-        }
-    }
+    zmm_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
 JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 #endif
