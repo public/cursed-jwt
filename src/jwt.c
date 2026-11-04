@@ -98,9 +98,11 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
      * drop Intel's do, so there the 16-lane zmm engine beats the 8-lane ymm one.  Intel always keeps the ymm engine. */
     if ((f & JWT_CPU_AVX512VL) && amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
-    /* Every Zen has SHA-NI, and there 4 interleaved SHA-NI streams beat every vector engine at every batch size
-     * (Zen 2, 3 and 4 measured).  Intel's SHA-NI parts have not been timed, so they keep the vector engines. */
-    if ((f & JWT_CPU_SHANI) && amd) f |= JWT_CPU_FAST_SHANI;
+    /* 4 interleaved SHA-NI streams beat every vector engine at every batch size on Zen 2, 3 and 4 (measured), and are
+     * expected to on the other SHA-NI CPUs too: Zen 1 and Intel (Ice Lake and later, the Atom cores).  The exception is
+     * Zen 5 (family 1Ah), whose full-width 512-bit units may let the 16-lane zmm engine win big batches: there
+     * jwt_hmac_shani_zmm splits the work. */
+    if ((f & JWT_CPU_SHANI) && !(amd && fam >= 0x1A && (f & JWT_CPU_AVX512VL))) f |= JWT_CPU_FAST_SHANI;
     /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
     if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1')
         f |= JWT_CPU_FAST_ZMM;
@@ -996,6 +998,12 @@ void jwt_hmac_shani_4(const jwt_key_t *k, int n, const uint8_t *const *msg, cons
     ni_drive_x(4, 0, k, n, msg, len, mac);
 }
 JWT_END_TARGET
+/* whole groups of 16 on the zmm engine, the rest (and batches under 16) on 4 SHA-NI streams */
+void jwt_hmac_shani_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    int z = n & ~15;
+    if (z) jwt_hmac_zmm(k, z, msg, len, mac);
+    if (n > z) jwt_hmac_shani_4(k, n - z, msg + z, len + z, mac + z);
+}
 #endif /* SHA-NI */
 
 /* ======================================================================================
@@ -1790,7 +1798,9 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
-    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
+    if ((f & JWT_CPU_FAST_SHANI) && (f & JWT_CPU_SHANI)) return jwt_hmac_shani_4; /* 4 interleaved SHA-NI streams */
+    if ((f & JWT_CPU_SHANI) && (f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL))
+        return jwt_hmac_shani_zmm;                                             /* Zen 5: SHA-NI + zmm */
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
     if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
@@ -1824,6 +1834,7 @@ const char *jwt_engine(void) {
 #endif
 #if defined(JWT_X86)
     if (h == jwt_hmac_shani_4) return "shani";
+    if (h == jwt_hmac_shani_zmm) return "shani+zmm";
     if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
     if (h == jwt_hmac_avx2) return "avx2";
