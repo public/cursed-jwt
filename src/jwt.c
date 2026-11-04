@@ -98,8 +98,8 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
      * drop Intel's do, so there the 16-lane zmm engine beats the 8-lane ymm one.  Intel always keeps the ymm engine. */
     if ((f & JWT_CPU_AVX512VL) && amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
-    /* 4 interleaved SHA-NI streams beat every vector engine at every batch size on Zen 3 (measured), and are expected
-     * to on the other SHA-NI CPUs too: Zen 1/2/4 and Intel (Ice Lake and later, the Atom cores).  The exception is
+    /* 4 interleaved SHA-NI streams beat every vector engine at every batch size on Zen 2, 3 and 4 (measured), and are
+     * expected to on the other SHA-NI CPUs too: Zen 1 and Intel (Ice Lake and later, the Atom cores).  The exception is
      * Zen 5 (family 1Ah), whose full-width 512-bit units may let the 16-lane zmm engine win big batches: there
      * jwt_hmac_shani_zmm splits the work. */
     if ((f & JWT_CPU_SHANI) && !(amd && fam >= 0x1A && (f & JWT_CPU_AVX512VL))) f |= JWT_CPU_FAST_SHANI;

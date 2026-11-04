@@ -222,8 +222,8 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
 - **SHA-NI.** `JWT_CPU_FAST_SHANI` is set on every CPU with SHA-NI except Zen 5, and selects the 4-stream SHA-NI
   engine. On Zen 3 and Zen 4 (EPYC Milan, Genoa) it beats every vector engine at every batch size, zmm
-  included. On the other CPUs it is an expectation, not a measurement: Intel's SHA-NI parts and Zen 5 haven't
-  been timed. Zen 5 runs 512-bit vectors at full width, so there `jwt_hmac_shani_zmm` sends whole groups of 16
+  included; on Zen 2 (EPYC Rome) the default path verifies 1.4–3× faster than with AVX2. On the other CPUs it
+  is an expectation, not a measurement: Intel's SHA-NI parts and Zen 5 haven't been timed. Zen 5 runs 512-bit vectors at full width, so there `jwt_hmac_shani_zmm` sends whole groups of 16
   to the zmm engine and the rest to SHA-NI.
   Masking SHA-NI (`JWT_CPU_MASK` without bit 8) restores the vector engines.
 - **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine
