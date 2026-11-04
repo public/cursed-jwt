@@ -2,7 +2,8 @@
 
 Batch JWT verification in C. Instead of checking HS256 tokens one at a time, cursed-jwt checks many at once with **one
 multi-buffer SIMD HMAC-SHA256 pass**, one token per vector lane:
-- AVX-512VL or AVX2 hash 8 tokens per vector on x86;
+- on AMD Zen, 4 interleaved SHA-NI streams;
+- elsewhere on x86, AVX-512VL or AVX2 hash 8 tokens per vector;
 - interleaved ARMv8 SHA2 instructions hash 4 streams on ARM;
 - a lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
 
@@ -182,8 +183,8 @@ key's algorithm; the rest is identical.
     and falls back to the strict parser (131 ns) for anything else;
   - SWAR integer parsing;
   - `exp`/`nbf` are compared with `now` by digit count, then bytewise, with no number conversion.
-- **Identical results either way.** The shape matcher and the opt-in simdjson-style path both defer to the strict
-  parser on anything unusual. The tests fuzz each against it.
+- **Identical results either way.** The shape matcher defers to the strict parser on anything unusual. The tests
+  fuzz it against the strict parser.
 - **RS256 / ES256** don't batch like HMAC: SIMD across tokens would need AVX-512 IFMA. Instead:
   - ES256 precomputes comb tables for the public key at key setup, so a verify is two fixed-base multiplications.
   - RS256 can check a whole batch with one exponentiation ("screening"), which is opt-in because of a caveat.
@@ -202,7 +203,8 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 
 | CPU | HS256 engine | RS256 / ES256 kernels (`-DJWT_PK`) |
 |---|---|---|
-| AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512 | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
+| AMD with SHA-NI (every Zen) | 4 interleaved SHA-NI streams | as the rows below |
+| AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512, SHA-NI masked | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
 | x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
 | x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
 | other x86-64 | scalar | portable C |
@@ -210,16 +212,18 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 | other AArch64 | NEON, 4 lanes | portable C |
 | anything else | scalar | portable C |
 
-- **Single tokens.** On x86-64 Linux they run OpenSSL's extracted SHA-256 code, which dispatches itself (SHA-NI,
-  AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile assembles `src/sha256_x86_64_ossl.S` and defines
-  `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own program, do the same, or leave both out to get the
-  compiled scalar code; `make OSSL_SHA=` builds without it.
+- **Single tokens.** On AMD they run one SHA-NI stream of the same engine. On other x86-64 Linux they run OpenSSL's
+  extracted SHA-256 code, which dispatches itself (SHA-NI, AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile
+  assembles `src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own
+  program, do the same, or leave both out to get the compiled scalar code; `make OSSL_SHA=` builds without it.
 - **Inspecting and masking the choice.** `jwt_engine()` names the HS256 engine in use, and `jwt_cpu_features()`
   returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
-- **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine.
-  It has only been run on the Xeon, by forcing it with `JWT_CPU_FORCE_ZMM=1` (every vector passes); it
-  hasn't been timed on a Zen yet.
+- **AMD.** `JWT_CPU_FAST_SHANI` is set for AMD CPUs with SHA-NI (every Zen) and selects the 4-stream SHA-NI
+  engine. On Zen 3 (EPYC Milan) it beats every vector engine at every batch size. Intel CPUs with SHA-NI (Ice Lake
+  and later) haven't been timed, so they keep the vector engines; `jwt_hmac_shani_4` can be called directly there.
+- **Zen 4/5.** `JWT_CPU_FAST_ZMM` is set for AMD family ≥ 0x19 with AVX-512, and selects the 16-lane zmm engine
+  when SHA-NI is masked off.
 - **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
   within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64.
   `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
@@ -232,8 +236,6 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 |---|---|
 | `-DJWT_INPUT_PADDED` | every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads |
 | `-DJWT_NO_SHAPE_JSON` | strict parser only |
-| `-DJWT_FAST_JSON` | the simdjson-style path (3–4% slower on a Xeon) |
-| `-DJWT_LANE_JSON` | lane-parallel JSON, which only pays at batch ≥ 32 |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `src/fiat/`) |
 | `-DJWT_S2N` | s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
@@ -293,7 +295,7 @@ vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SH
 
 - **Engines covered.** Every vector runs on every engine the machine has:
   - scalar, NEON and SHA2 ×1/×2/×4 on ARM;
-  - AVX2, AVX2 ×2, AVX-512VL, 2×ymm and zmm on x86;
+  - SHA-NI ×1/×2/×4, AVX2, AVX2 ×2, AVX-512VL, 2×ymm and zmm on x86;
   - each dispatch path of the extracted OpenSSL code (SHA-NI, AVX2, AVX, SSSE3, x86-64);
   - a C emulation of `vpternlogd` with the same immediates, so the AVX-512 logic is exercised on any machine.
 - **How the external vectors run.** Each one sits in a batch of 1–24 messages, at a random lane. The other lanes are
@@ -351,7 +353,7 @@ Two generators look for cases nobody wrote down.
 
 | harness | oracle |
 |---|---|
-| `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher and the simdjson-style path agree with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
+| `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher agrees with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
 | `fuzz_b64` | SIMD and scalar base64url decoders agree with an RFC 4648 reference written in the harness |
 | `fuzz_pk` | mutated real ES256/RS256/EdDSA signatures (byte flips; the other valid s and r or s at 0/1/n−1/n/n+1 for ES256; S + L and R's sign bit for EdDSA) get OpenSSL's verdict, alone and among valid fillers in a batch; built as portable C, with screening and with libcrypto BN |
 
@@ -493,8 +495,8 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 - **Algorithms.** HS256 by default. RS256, ES256 and EdDSA (Ed25519 only) are built in, without JWKS parsing; there's no Ed448, no JWE and no
   `kid` lookup.
 - **The claim profile is fixed** (see above). There's no `aud`/`iss` checking.
-- **A lone token ties OpenSSL, it doesn't beat it.** On x86-64 Linux it *is* OpenSSL's code. Its SHA-NI path is
-  untested here: neither the Xeon nor Rosetta has SHA-NI.
+- **A lone token ties OpenSSL, it doesn't beat it,** except on AMD. On other x86-64 Linux it *is* OpenSSL's code.
+  On AMD the SHA-NI engine's single stream is used instead (132 vs 160 ns per HMAC on EPYC Milan).
 - **x86-64 macOS and Windows** use the compiled scalar template for single tokens: the extracted file is ELF-only.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.
@@ -515,5 +517,5 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 MIT, see [LICENSE](LICENSE).
 - The one vendored file, `src/sha256_x86_64_ossl.S`, is OpenSSL's, under Apache-2.0
   ([licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)).
-- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques (simdjson,
-  cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).
+- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques
+  (cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).

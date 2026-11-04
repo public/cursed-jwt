@@ -3,7 +3,7 @@
  *   2. SHA-256 engines: scalar / NEON 4-lane / AVX2 8-lane / AVX-512VL 8-lane (all from jwt_mb.inc),
  *      ARMv8 SHA2 instructions with 1/2/4 interleaved streams
  *   3. base64url decode: scalar / NEON (vld4 de-interleave + vqtbl4) / AVX2
- *   4. strict JSON for the header and payload
+ *   4. strict JSON for the header and payload; 4b. the shape-matched fast path for the payload
  *   5. the batch front end
  */
 #include "jwt.h"
@@ -74,7 +74,7 @@ static unsigned jwt_cpu_bits;
 __attribute__((constructor)) static void jwt_cpu_init(void) {
     unsigned f = JWT_CPU_DETECTED;
 #if defined(JWT_X86)
-    unsigned a, b, c, d, ecx1 = 0, ebx7 = 0;
+    unsigned a = 0, b = 0, c = 0, d = 0, ecx1 = 0, ebx7 = 0;
     if (__get_cpuid(1, &a, &b, &c, &d)) ecx1 = c;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b;
     unsigned xcr0 = 0;
@@ -90,17 +90,17 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
     if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+    unsigned vb = 0, vc = 0, vd = 0, fam;
+    __get_cpuid(0, &a, &vb, &vc, &vd);
+    int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
+    __get_cpuid(1, &a, &b, &c, &d);
+    fam = ((a >> 8) & 0xF) == 0xF ? ((a >> 8) & 0xF) + ((a >> 20) & 0xFF) : (a >> 8) & 0xF;
     /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
-     * drop Intel's do, so there the 16-lane zmm engine is the better one (llvm-mca/uiCA models: ~2x per byte vs 8-lane
-     * ymm; not yet measured on hardware).  Intel always keeps the ymm engine. */
-    if (f & JWT_CPU_AVX512VL) {
-        unsigned vb = 0, vc = 0, vd = 0, fam;
-        __get_cpuid(0, &a, &vb, &vc, &vd);
-        int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
-        __get_cpuid(1, &a, &b, &c, &d);
-        fam = ((a >> 8) & 0xF) == 0xF ? ((a >> 8) & 0xF) + ((a >> 20) & 0xFF) : (a >> 8) & 0xF;
-        if (amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
-    }
+     * drop Intel's do, so there the 16-lane zmm engine beats the 8-lane ymm one.  Intel always keeps the ymm engine. */
+    if ((f & JWT_CPU_AVX512VL) && amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
+    /* Every Zen has SHA-NI, and there 4 interleaved SHA-NI streams beat every vector engine at every batch size
+     * (Zen 2, 3 and 4 measured).  Intel's SHA-NI parts have not been timed, so they keep the vector engines. */
+    if ((f & JWT_CPU_SHANI) && amd) f |= JWT_CPU_FAST_SHANI;
     /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
     if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1')
         f |= JWT_CPU_FAST_ZMM;
@@ -395,10 +395,7 @@ JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t
         neon_tr4((s)[4], (s)[5], (s)[6], (s)[7], o_ + 4);                                                              \
         for (int l_ = 0; l_ < 4; l_++) vst1q_u32((out)[l_], o_[l_]), vst1q_u32((out)[l_] + 4, o_[4 + l_]);             \
     } while (0)
-#ifndef JWT_NEON_MIN_LANES
-#define JWT_NEON_MIN_LANES 2
-#endif
-#define MB_MIN_LANES JWT_NEON_MIN_LANES
+#define MB_MIN_LANES 2
 #include "jwt_mb.inc"
 #undef MB
 #undef MB_LANES
@@ -453,24 +450,20 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
         avx2_tr8((s), o_);                                                                                             \
         for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[l_], o_[l_]);                              \
     } while (0)
-#define MB_LANES   8
-#define V          __m256i
-#define VSET1(x)   _mm256_set1_epi32((int)(x))
-#define VADD(a, b) _mm256_add_epi32(a, b)
-#define VXOR(a, b) _mm256_xor_si256(a, b)
-#define VSHR(x, n) _mm256_srli_epi32(x, n)
-#define VMASK(arr) _mm256_loadu_si256((const __m256i *)(arr))
-#ifndef JWT_AVX_MIN_LANES
+#define MB_LANES          8
+#define V                 __m256i
+#define VSET1(x)          _mm256_set1_epi32((int)(x))
+#define VADD(a, b)        _mm256_add_epi32(a, b)
+#define VXOR(a, b)        _mm256_xor_si256(a, b)
+#define VSHR(x, n)        _mm256_srli_epi32(x, n)
+#define VMASK(arr)        _mm256_loadu_si256((const __m256i *)(arr))
 #define JWT_AVX_MIN_LANES 2
-#endif
 /* AVX2 alone: with OpenSSL's single-stream code for leftovers, 2 messages one at a time (2 x 753 ns) beat one
  * 2-lane AVX2 group (822 ns) on a Xeon Platinum 8260; from 3 lanes the vector wins (555 ns) */
-#ifndef JWT_AVX2_MIN_LANES
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 #define JWT_AVX2_MIN_LANES 3
 #else
 #define JWT_AVX2_MIN_LANES JWT_AVX_MIN_LANES
-#endif
 #endif
 #define MB_MIN_LANES JWT_AVX2_MIN_LANES
 
@@ -871,19 +864,139 @@ void jwt_hmac_sha2_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const
     ce_drive(1, k, n, msg, len, mac);
 }
 void jwt_hmac_sha2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-#ifndef JWT_SHA2_STREAMS
-#define JWT_SHA2_STREAMS 4
-#endif
-    ce_drive(JWT_SHA2_STREAMS, k, n, msg, len, mac);
+    ce_drive(4, k, n, msg, len, mac); /* 4 streams: 15% faster than 1 on an M5 */
 }
 void jwt_hmac_sha2_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     ce_drive(2, k, n, msg, len, mac);
 }
-void jwt_hmac_sha2_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    ce_drive(4, k, n, msg, len, mac);
-}
 JWT_END_SHA2
 #endif /* SHA2 */
+
+/* ---- x86 SHA-NI: S independent streams interleaved for latency hiding (the ARM engine's layout) ----
+ * Every Zen has SHA-NI; Cascade Lake doesn't, so there this code is compiled and never picked.  The state lives as
+ * ABEF / CDGH (the order sha256rnds2 wants); ni_ld / ni_st convert from / to the natural h0..h7. */
+#if defined(JWT_X86)
+#if defined(__clang__)
+#define JWT_BEGIN_SHANI                                                                                                \
+    _Pragma("clang attribute push (__attribute__((target(\"sha,sse4.1,ssse3\"))), apply_to = function)")
+#else
+#define JWT_BEGIN_SHANI _Pragma("GCC push_options") _Pragma("GCC target(\"sha,sse4.1,ssse3\")")
+#endif
+JWT_BEGIN_SHANI
+JWT_INLINE void ni_ld(const uint32_t h[8], __m128i *abef, __m128i *cdgh) {
+    __m128i t = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)h), 0xB1);       /* CDAB */
+    __m128i u = _mm_shuffle_epi32(_mm_loadu_si128((const __m128i *)(h + 4)), 0x1B); /* EFGH */
+    *abef = _mm_alignr_epi8(t, u, 8);
+    *cdgh = _mm_blend_epi16(u, t, 0xF0);
+}
+JWT_INLINE void ni_st(__m128i abef, __m128i cdgh, uint32_t h[8]) {
+    __m128i t = _mm_shuffle_epi32(abef, 0x1B), u = _mm_shuffle_epi32(cdgh, 0xB1); /* FEBA, DCHG */
+    _mm_storeu_si128((__m128i *)h, _mm_blend_epi16(t, u, 0xF0));                  /* DCBA */
+    _mm_storeu_si128((__m128i *)(h + 4), _mm_alignr_epi8(u, t, 8));               /* HGFE */
+}
+/* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
+JWT_INLINE void ni_compress(int S, __m128i *st0, __m128i *st1, __m128i (*m)[4]) {
+    __m128i a0[4], a1[4];
+    for (int s = 0; s < S; s++) a0[s] = st0[s], a1[s] = st1[s];
+#if defined(__clang__)
+#pragma clang loop unroll(full)
+#else
+#pragma GCC unroll 16
+#endif
+    for (int r = 0; r < 16; r++) {
+        __m128i kr = _mm_loadu_si128((const __m128i *)(K256 + 4 * r));
+        for (int s = 0; s < S; s++) {
+            __m128i wk = _mm_add_epi32(m[s][r & 3], kr);
+            st1[s] = _mm_sha256rnds2_epu32(st1[s], st0[s], wk);
+            st0[s] = _mm_sha256rnds2_epu32(st0[s], st1[s], _mm_shuffle_epi32(wk, 0x0E));
+            if (r < 12) { /* W[4(r+4)..] from the last four groups: msg1, + W[t-7] (alignr), msg2 */
+                __m128i w = _mm_sha256msg1_epu32(m[s][r & 3], m[s][(r + 1) & 3]);
+                w = _mm_add_epi32(w, _mm_alignr_epi8(m[s][(r + 3) & 3], m[s][(r + 2) & 3], 4));
+                m[s][r & 3] = _mm_sha256msg2_epu32(w, m[s][(r + 3) & 3]);
+            }
+        }
+    }
+    for (int s = 0; s < S; s++) st0[s] = _mm_add_epi32(st0[s], a0[s]), st1[s] = _mm_add_epi32(st1[s], a1[s]);
+}
+/* S plans with identical nb; raw: plain SHA-256 (k = sha_iv_key, no outer hash) */
+JWT_INLINE void ni_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+    __m128i st0[4], st1[4], m[4][4], ih0, ih1;
+    ni_ld(k->ih, &ih0, &ih1);
+    for (int s = 0; s < S; s++) st0[s] = ih0, st1[s] = ih1;
+    for (int b = 0; b < p[0]->nb; b++) {
+        for (int s = 0; s < S; s++) {
+            const uint8_t *blk = hplan_block(p[s], b);
+            for (int j = 0; j < 4; j++)
+                m[s][j] = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(blk + 16 * j)), bswap);
+        }
+        ni_compress(S, st0, st1, m);
+    }
+    if (raw) {
+        for (int s = 0; s < S; s++) ni_st(st0[s], st1[s], mac[s]);
+        return;
+    }
+    __m128i oh0, oh1;
+    ni_ld(k->oh, &oh0, &oh1);
+    for (int s = 0; s < S; s++) {
+        uint32_t d[8];
+        ni_st(st0[s], st1[s], d);
+        m[s][0] = _mm_loadu_si128((const __m128i *)d), m[s][1] = _mm_loadu_si128((const __m128i *)(d + 4));
+        m[s][2] = _mm_set_epi32(0, 0, 0, (int)0x80000000u), m[s][3] = _mm_set_epi32((64 + 32) * 8, 0, 0, 0);
+        st0[s] = oh0, st1[s] = oh1;
+    }
+    ni_compress(S, st0, st1, m);
+    for (int s = 0; s < S; s++) ni_st(st0[s], st1[s], mac[s]);
+}
+JWT_INLINE void ni_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                           uint32_t (*mac)[8]) {
+    enum { CH = 64 };
+    hplan_t plan[CH];
+    const hplan_t *pp[CH];
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH;
+        for (int i = 0; i < m; i++) hplan_init_off(&plan[i], msg[base + i], len[base + i], raw ? 0 : 64);
+        for (int i = 0; i < m; i++) { /* sort by nb so groups of S share a block count */
+            const hplan_t *p = &plan[i];
+            int j = i;
+            while (j > 0 && pp[j - 1]->nb > p->nb) pp[j] = pp[j - 1], j--;
+            pp[j] = p;
+        }
+        int g = 0;
+        while (g < m) {
+            int s = S;
+            if (m - g < s) s = m - g;
+            for (int i = 1; i < s; i++)
+                if (pp[g + i]->nb != pp[g]->nb) {
+                    s = i;
+                    break;
+                }
+            uint32_t *out[4];
+            for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
+            switch (s) { /* constant S per call so ni_hmac fully specialises */
+                case 4: ni_hmac(4, raw, k, pp + g, out); break;
+                case 3:
+                    ni_hmac(2, raw, k, pp + g, out);
+                    ni_hmac(1, raw, k, pp + g + 2, out + 2);
+                    break;
+                case 2: ni_hmac(2, raw, k, pp + g, out); break;
+                default: ni_hmac(1, raw, k, pp + g, out); break;
+            }
+            g += s;
+        }
+    }
+}
+void jwt_hmac_shani_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(1, 0, k, n, msg, len, mac);
+}
+void jwt_hmac_shani_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(2, 0, k, n, msg, len, mac);
+}
+void jwt_hmac_shani_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ni_drive_x(4, 0, k, n, msg, len, mac);
+}
+JWT_END_TARGET
+#endif /* SHA-NI */
 
 /* ======================================================================================
  * 3. base64url
@@ -1491,218 +1604,7 @@ JWT_INLINE int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_re
 }
 
 /* ======================================================================================
- * 4b. simdjson-style fast path for the payload
- *
- * Stage 1 (after simdjson, Apache-2.0/MIT, github.com/simdjson/simdjson): classify 64-byte
- * blocks into bitmasks (whitespace and operators via simdjson's 16-entry shuffle tables, quotes,
- * backslashes, control and non-ASCII bytes), turn quotes into an in-string mask with prefix-XOR
- * (carry-less multiply on x86, shift cascade on ARM, as simdjson does), and derive the token starts:
- * operators, opening quotes and the first byte of each scalar.  Stage 2 walks those bits once,
- * checking the object grammar and the claims as it goes.
- *
- * Opt-in (-DJWT_FAST_JSON): on a Xeon Platinum 8260 it measured 3-4% slower end to end than the
- * strict parser, and a wash on an Apple M5, so the strict parser is the default.
- *
- * It covers only the common subset: <= 256 bytes, ASCII, no backslashes, no nested containers,
- * no control characters.  Anything else, including anything malformed, returns -1 and the strict
- * parser above decides, so the strict parser stays the single source of truth for odd inputs;
- * test.c cross-checks the two on fuzzed payloads.
- * ====================================================================================== */
-
-/* Per 64-byte block: space, operator and quote bitmasks, plus "odd": any backslash, control byte
- * (incl. \t \n \r) or non-ASCII byte, which sends the whole payload to the strict parser. */
-typedef struct {
-    uint64_t sp, op, quote, odd;
-} jcls_t;
-
-#if defined(__AVX2__)
-JWT_INLINE uint64_t avx2_mask64(__m256i lo, __m256i hi) {
-    return (uint32_t)_mm256_movemask_epi8(lo) | (uint64_t)(uint32_t)_mm256_movemask_epi8(hi) << 32;
-}
-JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
-    /* simdjson's operator table: | 0x20 folds [ ] into { }, low nibble picks the candidate */
-    const __m256i op_t = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ':', '{', ',', '}', 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                          0, 0, 0, ':', '{', ',', '}', 0, 0);
-    __m256i v0 = _mm256_loadu_si256((const __m256i *)p), v1 = _mm256_loadu_si256((const __m256i *)(p + 32));
-    __m256i x20 = _mm256_set1_epi8(0x20);
-    __m256i op0 = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(op_t, v0), _mm256_or_si256(v0, x20));
-    __m256i op1 = _mm256_cmpeq_epi8(_mm256_shuffle_epi8(op_t, v1), _mm256_or_si256(v1, x20));
-    /* odd: < 0x20 (signed compare also catches >= 0x80, which is negative) or '\\' */
-    __m256i bs = _mm256_set1_epi8('\\');
-    __m256i odd0 = _mm256_or_si256(_mm256_cmpgt_epi8(x20, v0), _mm256_cmpeq_epi8(v0, bs));
-    __m256i odd1 = _mm256_or_si256(_mm256_cmpgt_epi8(x20, v1), _mm256_cmpeq_epi8(v1, bs));
-    c->odd = avx2_mask64(odd0, odd1);
-    c->op = avx2_mask64(op0, op1);
-    c->sp = avx2_mask64(_mm256_cmpeq_epi8(v0, x20), _mm256_cmpeq_epi8(v1, x20));
-    __m256i q = _mm256_set1_epi8('"');
-    c->quote = avx2_mask64(_mm256_cmpeq_epi8(v0, q), _mm256_cmpeq_epi8(v1, q));
-}
-JWT_INLINE uint64_t prefix_xor(uint64_t m) { /* simdjson haswell: one carry-less multiply */
-#if defined(__PCLMUL__)
-    return (uint64_t)_mm_cvtsi128_si64(
-        _mm_clmulepi64_si128(_mm_set_epi64x(0, (long long)m), _mm_set1_epi8((char)0xFF), 0));
-#else
-    m ^= m << 1, m ^= m << 2, m ^= m << 4, m ^= m << 8, m ^= m << 16, m ^= m << 32;
-    return m;
-#endif
-}
-#elif defined(JWT_HAVE_NEON)
-JWT_INLINE uint64_t neon_mask64(uint8x16_t m0, uint8x16_t m1, uint8x16_t m2, uint8x16_t m3) {
-    const uint8x16_t bit = { 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128 };
-    uint8x16_t s0 = vpaddq_u8(vandq_u8(m0, bit), vandq_u8(m1, bit));
-    uint8x16_t s1 = vpaddq_u8(vandq_u8(m2, bit), vandq_u8(m3, bit));
-    s0 = vpaddq_u8(s0, s1);
-    s0 = vpaddq_u8(s0, s0);
-    return vgetq_lane_u64(vreinterpretq_u64_u8(s0), 0);
-}
-JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
-    const uint8x16_t op_t = { 0xff, 0, ',', ':', 0, '[', ']', '{', '}', 0, 0, 0, 0, 0, 0, 0 }; /* simdjson arm64 */
-    uint8x16_t v[4], op[4], sp[4], q[4], odd[4];
-    for (int i = 0; i < 4; i++) {
-        v[i] = vld1q_u8(p + 16 * i);
-        op[i] = vceqq_u8(vqtbl1q_u8(op_t, vshrq_n_u8(vaddq_u8(v[i], vdupq_n_u8(3)), 4)), v[i]);
-        sp[i] = vceqq_u8(v[i], vdupq_n_u8(' '));
-        q[i] = vceqq_u8(v[i], vdupq_n_u8('"'));
-        /* odd: (v - 0x20) >= 0x60 catches < 0x20 and >= 0x80 in one unsigned compare */
-        odd[i] =
-            vorrq_u8(vcgeq_u8(vsubq_u8(v[i], vdupq_n_u8(0x20)), vdupq_n_u8(0x60)), vceqq_u8(v[i], vdupq_n_u8('\\')));
-    }
-    c->odd = neon_mask64(odd[0], odd[1], odd[2], odd[3]);
-    c->op = neon_mask64(op[0], op[1], op[2], op[3]);
-    c->sp = neon_mask64(sp[0], sp[1], sp[2], sp[3]);
-    c->quote = neon_mask64(q[0], q[1], q[2], q[3]);
-}
-JWT_INLINE uint64_t prefix_xor(uint64_t m) { /* simdjson arm64: PMULL round trips cost more than this */
-    m ^= m << 1, m ^= m << 2, m ^= m << 4, m ^= m << 8, m ^= m << 16, m ^= m << 32;
-    return m;
-}
-#else
-JWT_INLINE void jclassify(const uint8_t *p, jcls_t *c) {
-    memset(c, 0, sizeof *c);
-    for (int i = 0; i < 64; i++) {
-        uint64_t b = 1ull << i;
-        uint8_t ch = p[i];
-        if (ch == ' ') c->sp |= b;
-        if (ch == '{' || ch == '}' || ch == '[' || ch == ']' || ch == ':' || ch == ',') c->op |= b;
-        if (ch == '"') c->quote |= b;
-        if (ch < 0x20 || ch >= 0x80 || ch == '\\') c->odd |= b;
-    }
-}
-JWT_INLINE uint64_t prefix_xor(uint64_t m) {
-    m ^= m << 1, m ^= m << 2, m ^= m << 4, m ^= m << 8, m ^= m << 16, m ^= m << 32;
-    return m;
-}
-#endif
-
-/* bitmask -> positions (simdjson's "flatten", 4 per step so the loop branch rarely mispredicts;
- * the extra slots it may write are past the count and never read) */
-JWT_INLINE int jflatten(uint16_t *out, int cnt, uint64_t m, int base) {
-    int c = __builtin_popcountll(m);
-    uint16_t *o = out + cnt;
-    for (int i = 0; i < c; i += 4) {
-        o[i] = (uint16_t)(base + __builtin_ctzll(m | 1ull << 63)), m &= m - 1;
-        o[i + 1] = (uint16_t)(base + __builtin_ctzll(m | 1ull << 63)), m &= m - 1;
-        o[i + 2] = (uint16_t)(base + __builtin_ctzll(m | 1ull << 63)), m &= m - 1;
-        o[i + 3] = (uint16_t)(base + __builtin_ctzll(m | 1ull << 63)), m &= m - 1;
-    }
-    return cnt + c;
-}
-
-/* first set bit of a 4-word mask at or after position i (or 256) */
-JWT_INLINE int jbit_from(const uint64_t *m, int i) {
-    uint64_t w = m[i >> 6] & (~0ull << (i & 63));
-    if (w) return (i & ~63) + __builtin_ctzll(w);
-    for (int b = (i >> 6) + 1; b < 4; b++)
-        if (m[b]) return (b << 6) + __builtin_ctzll(m[b]);
-    return 256;
-}
-
-/* pl must be readable up to n rounded up to 64.  The bytes past n are not written (a padding
- * memset right before the vector loads stalls store forwarding); they're masked out of the
- * bitmasks instead, as if they were spaces. */
-static int payload_fast(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
-    if (n < 2 || n > 256) return -1;
-    int nb = (n + 63) >> 6;
-    uint16_t tk[256 + 4]; /* token starts */
-    int nt = 0;
-    uint64_t prev_in = 0, sc[4] = { 0 }, nsc[4] = { ~0ull, ~0ull, ~0ull, ~0ull }, cq[4] = { 0 };
-    jcls_t c[4];
-    for (int b = 0; b < nb; b++) {
-        jclassify(pl + (b << 6), &c[b]);
-        if (b == nb - 1 && (n & 63)) { /* bytes past n behave as spaces */
-            uint64_t valid = (1ull << (n & 63)) - 1;
-            c[b].odd &= valid, c[b].op &= valid, c[b].quote &= valid, c[b].sp |= ~valid;
-        }
-        if (c[b].odd) return -1;
-        uint64_t in = prefix_xor(c[b].quote) ^ prev_in; /* opening quote .. byte before the closing one */
-        prev_in = 0 - (in >> 63);                       /* all ones if the last byte is inside a string */
-        uint64_t op = c[b].op & ~in;
-        sc[b] = ~(in | c[b].sp | op | c[b].quote); /* scalar bytes outside strings */
-        nsc[b] = ~sc[b];
-        cq[b] = c[b].quote & ~in; /* closing quotes */
-        uint64_t prev_sc = b ? sc[b - 1] >> 63 : 0;
-        nt = jflatten(tk, nt, op | (c[b].quote & in) | (sc[b] & ~(sc[b] << 1 | prev_sc)), b << 6);
-    }
-    if (prev_in) return -1;
-
-    /* stage 2: '{' (key ':' value (',' key ':' value)*) '}', all values flat */
-    int t = 0, seen = 0, badp = 0;
-    if (nt < 5 || pl[tk[t++]] != '{') return -1;
-    for (;;) {
-        if (t + 3 > nt) return -1;
-        int k = tk[t++], colon = tk[t++], v = tk[t++];
-        if (pl[k] != '"' || pl[colon] != ':') return -1;
-        int ke = jbit_from(cq, k + 1), key = jkey(pl + k + 1, ke - k - 1, 0), str = pl[v] == '"', vend;
-        if (str) {
-            vend = jbit_from(cq, v + 1);
-        } else {
-            uint8_t ch = pl[v];
-            if (ch == '{' || ch == '[' || ch == '}' || ch == ']' || ch == ',' || ch == ':') return -1;
-            vend = jbit_from(nsc, v);
-        }
-        if (key != K_OTHER && key != K_ALG) {
-            if (seen & (1 << key)) return JWT_INVALID;
-            seen |= 1 << key;
-        }
-        const uint8_t *vs = pl + v + str;
-        int vl = vend - v - str;
-        if (!str) { /* the scalar must be exactly one number or literal */
-            jcur_t cc = { pl + v, pl + vend };
-            const uint8_t *nsp;
-            int nl, isint = 0;
-            int isnum = (*vs == '-' || (*vs >= '0' && *vs <= '9')) && jnum(&cc, &nsp, &nl, &isint) && cc.p == cc.e;
-            if (!isnum && !(vl == 4 && (!memcmp(vs, "true", 4) || !memcmp(vs, "null", 4))) &&
-                !(vl == 5 && !memcmp(vs, "false", 5)))
-                return -1;
-            if (key == K_EXP || key == K_NBF) {
-                if (!isnum) return JWT_INVALID;
-                int cmp = jnum_cmp(vs, vl, isint, now);
-                if (key == K_EXP ? cmp <= 0 : cmp > 0) return JWT_INVALID;
-            } else if (key == K_SUB || key == K_USERNAME) {
-                badp = 1;
-            }
-        } else if (key == K_EXP || key == K_NBF) {
-            return JWT_INVALID;
-        } else if (key == K_SUB) {
-            if (!sub_value(vs, vl, &r->uid)) badp = 1;
-        } else if (key == K_USERNAME) { /* ASCII, no escapes, no control bytes: verbatim */
-            if (vl > JWT_USERNAME_MAX) badp = 1;
-            else memcpy(r->ubuf, vs, vl), r->username_len = (uint16_t)vl, r->username_escape = 0;
-        }
-        if (t >= nt) return -1;
-        uint8_t sep = pl[tk[t++]];
-        if (sep == ',') continue;
-        if (sep != '}' || t != nt) return -1;
-        break;
-    }
-    if (!(seen & (1 << K_EXP))) return JWT_INVALID;
-    if (badp || !(seen & (1 << K_SUB)) || !(seen & (1 << K_USERNAME))) return JWT_BAD_PAYLOAD;
-    r->ubuf[r->username_len] = 0;
-    return JWT_OK;
-}
-
-/* ======================================================================================
- * 4c. shape-matched fast path (default; -DJWT_NO_SHAPE_JSON turns it off)
+ * 4b. shape-matched fast path (default; -DJWT_NO_SHAPE_JSON turns it off)
  *
  * The common payload is {"sub":"<id>","username":"<name>","iat":<n>,"exp":<n>}, and minting code
  * (JSON.stringify, Python's json.dumps with compact separators, ...) emits exactly that order with
@@ -1784,237 +1686,6 @@ JWT_INLINE int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_re
 }
 
 /* ======================================================================================
- * 4d. lane-parallel JSON: one payload per SIMD byte lane (32 on AVX2, 16 on NEON)
- *
- * The payloads are transposed (16x16 byte zips) so that one vector holds byte p of every payload.
- * One branch-free step per byte position then runs, in every lane at once:
- *   - a 10-state DFA for a flat object of string / non-negative-integer values (next state via one
- *     16-entry shuffle table per character class, merged with blends);
- *   - key matching against sub / username / exp / nbf: per-lane offset into the key, expected byte via
- *     a shuffle of each key's spelling, candidate masks AND-ed down;
- *   - per-key value spans (start, end, type) captured with blends, and duplicate-key detection.
- * A scalar post-pass per lane applies the claim rules to the captured spans.  Any lane that leaves
- * the subset (escapes, non-ASCII, control bytes, negative/float/literal values, nesting, leading
- * zeros, malformed) is flagged and goes to the strict parser instead.  Cost is per batch, not per
- * token: it only pays when batches are large.
- *
- * Opt-in (-DJWT_LANE_JSON), NOT recommended: on a Xeon Platinum 8260 a 32-lane batch costs ~3 us of
- * JSON (93 ns/token at batch 32) vs 35 ns/token for the shape matcher at any batch size.
- * ====================================================================================== */
-#define JL_MAXN 240 /* byte positions must fit in a byte lane */
-#ifndef JWT_LANES_MIN
-#define JWT_LANES_MIN 8 /* fewer MAC-valid tokens in a batch: per-token parsing */
-#endif
-#if defined(__AVX2__) || defined(JWT_HAVE_NEON)
-#if defined(__AVX2__)
-#define JL 32
-typedef __m256i jv8;
-#define JV_SET1(x)      _mm256_set1_epi8((char)(x))
-#define JV_LOAD(p)      _mm256_load_si256((const __m256i *)(p))
-#define JV_STORE(p, v)  _mm256_store_si256((__m256i *)(p), v)
-#define JV_EQ(a, b)     _mm256_cmpeq_epi8(a, b)
-#define JV_OR(a, b)     _mm256_or_si256(a, b)
-#define JV_AND(a, b)    _mm256_and_si256(a, b)
-#define JV_ANDN(a, b)   _mm256_andnot_si256(a, b) /* ~a & b */
-#define JV_ADD(a, b)    _mm256_add_epi8(a, b)
-#define JV_SUB(a, b)    _mm256_sub_epi8(a, b)
-#define JV_MINU(a, b)   _mm256_min_epu8(a, b)
-#define JV_MAXU(a, b)   _mm256_max_epu8(a, b)
-#define JV_SEL(m, a, b) _mm256_blendv_epi8(b, a, m) /* m ? a : b */
-#define JV_TBL(t)       _mm256_broadcastsi128_si256(_mm_loadu_si128((const __m128i *)(t)))
-#define JV_LOOK(t, i)   _mm256_shuffle_epi8(t, i)
-typedef __m128i jv16;
-#define JZ_LO(a, b)    _mm_unpacklo_epi8(a, b)
-#define JZ_HI(a, b)    _mm_unpackhi_epi8(a, b)
-#define JZ_LOAD(p)     _mm_loadu_si128((const __m128i *)(p))
-#define JZ_STORE(p, v) _mm_store_si128((__m128i *)(p), v)
-#else
-#define JL              16
-typedef uint8x16_t jv8;
-#define JV_SET1(x)      vdupq_n_u8((uint8_t)(x))
-#define JV_LOAD(p)      vld1q_u8(p)
-#define JV_STORE(p, v)  vst1q_u8(p, v)
-#define JV_EQ(a, b)     vceqq_u8(a, b)
-#define JV_OR(a, b)     vorrq_u8(a, b)
-#define JV_AND(a, b)    vandq_u8(a, b)
-#define JV_ANDN(a, b)   vbicq_u8(b, a)
-#define JV_ADD(a, b)    vaddq_u8(a, b)
-#define JV_SUB(a, b)    vsubq_u8(a, b)
-#define JV_MINU(a, b)   vminq_u8(a, b)
-#define JV_MAXU(a, b)   vmaxq_u8(a, b)
-#define JV_SEL(m, a, b) vbslq_u8(m, a, b)
-#define JV_TBL(t)       vld1q_u8(t)
-#define JV_LOOK(t, i)   vqtbl1q_u8(t, i)
-typedef uint8x16_t jv16;
-#define JZ_LO(a, b)     vzip1q_u8(a, b)
-#define JZ_HI(a, b)     vzip2q_u8(a, b)
-#define JZ_LOAD(p)      vld1q_u8(p)
-#define JZ_STORE(p, v)  vst1q_u8(p, v)
-#endif
-
-typedef struct {
-    uint8_t ok, seen;
-    uint8_t start[5], end[5], type[5]; /* by key id: 1 sub, 2 username, 3 exp, 4 nbf; type 1 str, 2 int */
-} jlane_t;
-
-/* 16 rows of 16 bytes -> 16 columns: four rounds of byte zips (perfect shuffle) */
-JWT_INLINE void jl_tr16(jv16 *x) {
-    for (int r = 0; r < 4; r++) {
-        jv16 y[16];
-        for (int i = 0; i < 8; i++) y[2 * i] = JZ_LO(x[i], x[i + 8]), y[2 * i + 1] = JZ_HI(x[i], x[i + 8]);
-        for (int i = 0; i < 16; i++) x[i] = y[i];
-    }
-}
-
-enum { JS_OBJ, JS_KEY0, JS_KEY, JS_COLON, JS_VAL, JS_STR, JS_INT, JS_SEP, JS_DONE, JS_FAIL };
-#define F JS_FAIL
-static const uint8_t jl_t_other[16] = { F, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_ws[16] = { JS_OBJ,  JS_KEY0, JS_KEY, JS_COLON, JS_VAL, JS_STR, JS_SEP, JS_SEP,
-                                     JS_DONE, F,       F,      F,        F,      F,      F,      F };
-static const uint8_t jl_t_q[16] = { F, JS_KEY, JS_COLON, F, JS_STR, JS_SEP, F, F, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_colon[16] = { F, F, JS_KEY, JS_VAL, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_comma[16] = { F, F, JS_KEY, F, F, JS_STR, JS_KEY0, JS_KEY0, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_lb[16] = { JS_KEY0, F, JS_KEY, F, F, JS_STR, F, F, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_rb[16] = { F, F, JS_KEY, F, F, JS_STR, JS_DONE, JS_DONE, F, F, F, F, F, F, F, F };
-static const uint8_t jl_t_dg[16] = { F, F, JS_KEY, F, JS_INT, JS_STR, JS_INT, F, F, F, F, F, F, F, F, F };
-#undef F
-static const uint8_t jl_k_sub[16] = "sub", jl_k_user[16] = "username", jl_k_exp[16] = "exp", jl_k_nbf[16] = "nbf";
-static const uint8_t jl_seenbit[16] = { 0, 1, 2, 4, 8 };
-static const uint8_t jl_zero_payload[256 + 64] __attribute__((aligned(64))) = { 0 };
-
-/* m <= JL payloads, each readable for its length rounded up to 16 (+16).  Lanes with n > JL_MAXN
- * come back !ok. */
-static void json_lanes(int m, const uint8_t *const *pl, const int *n, jlane_t *out) {
-    uint8_t T[JL_MAXN + 16][JL] __attribute__((aligned(32)));
-    uint8_t nl[JL] __attribute__((aligned(32)));
-    int maxn = 0;
-    for (int l = 0; l < JL; l++) {
-        int ln = l < m ? n[l] : 0;
-        if (ln > JL_MAXN) ln = 0; /* -> never reaches DONE */
-        nl[l] = (uint8_t)ln;
-        if (ln > maxn) maxn = ln;
-    }
-    int rows = (maxn + 15) & ~15;
-    for (int g = 0; g < JL / 16; g++)
-        for (int c = 0; c < rows; c += 16) {
-            jv16 x[16];
-            for (int i = 0; i < 16; i++) {
-                int l = g * 16 + i;
-                x[i] = JZ_LOAD((l < m && nl[l] ? pl[l] : jl_zero_payload) + c);
-            }
-            jl_tr16(x);
-            for (int k = 0; k < 16; k++) JZ_STORE(&T[c + k][g * 16], x[k]);
-        }
-    const jv8 t_other = JV_TBL(jl_t_other), t_ws = JV_TBL(jl_t_ws), t_q = JV_TBL(jl_t_q), t_co = JV_TBL(jl_t_colon);
-    const jv8 t_cm = JV_TBL(jl_t_comma), t_lb = JV_TBL(jl_t_lb), t_rb = JV_TBL(jl_t_rb), t_dg = JV_TBL(jl_t_dg);
-    const jv8 k_sub = JV_TBL(jl_k_sub), k_user = JV_TBL(jl_k_user), k_exp = JV_TBL(jl_k_exp), k_nbf = JV_TBL(jl_k_nbf);
-    const jv8 seenbit = JV_TBL(jl_seenbit), ones = JV_SET1(0xFF), one = JV_SET1(1), zero = JV_SET1(0);
-    const jv8 nvec = JV_LOAD(nl);
-    jv8 st = JV_SET1(JS_OBJ), fail = zero, seen = zero, koff = zero, c_sub = zero, c_user = zero, c_exp = zero,
-        c_nbf = zero;
-    jv8 curkey = zero, vstart = zero, vtype = zero, z = zero;
-    jv8 s1 = zero, s2 = zero, s3 = zero, s4 = zero, e1 = zero, e2 = zero, e3 = zero, e4 = zero;
-    jv8 y1 = zero, y2 = zero, y3 = zero, y4 = zero;
-    for (int p = 0; p < maxn; p++) {
-        jv8 P = JV_SET1(p), P1 = JV_SET1(p + 1);
-        jv8 v = JV_SEL(JV_EQ(JV_MAXU(nvec, P1), nvec), JV_LOAD(T[p]), JV_SET1(' ')); /* past n: space */
-        jv8 ws = JV_EQ(v, JV_SET1(' ')), q = JV_EQ(v, JV_SET1('"')), co = JV_EQ(v, JV_SET1(':'));
-        jv8 cm = JV_EQ(v, JV_SET1(',')), lb = JV_EQ(v, JV_SET1('{')), rb = JV_EQ(v, JV_SET1('}'));
-        jv8 d = JV_SUB(v, JV_SET1('0')), dg = JV_EQ(JV_MINU(d, JV_SET1(9)), d);
-        jv8 x = JV_SUB(v, JV_SET1(0x20));
-        fail =
-            JV_OR(fail, JV_OR(JV_EQ(JV_MAXU(x, JV_SET1(0x60)), x), JV_EQ(v, JV_SET1('\\')))); /* <0x20, >=0x80, '\\' */
-        /* events from the old state */
-        jv8 inkey = JV_EQ(st, JV_SET1(JS_KEY)), inval = JV_EQ(st, JV_SET1(JS_VAL)), inint = JV_EQ(st, JV_SET1(JS_INT));
-        jv8 kbeg = JV_AND(JV_EQ(st, JV_SET1(JS_KEY0)), q), kbyte = JV_ANDN(q, inkey), kend = JV_AND(inkey, q);
-        jv8 sbeg = JV_AND(inval, q), ibeg = JV_AND(inval, dg);
-        jv8 vend = JV_OR(JV_AND(JV_EQ(st, JV_SET1(JS_STR)), q), JV_AND(inint, JV_OR(ws, JV_OR(cm, rb))));
-        /* next state */
-        jv8 nx = JV_LOOK(t_other, st);
-        nx = JV_SEL(ws, JV_LOOK(t_ws, st), nx);
-        nx = JV_SEL(q, JV_LOOK(t_q, st), nx);
-        nx = JV_SEL(co, JV_LOOK(t_co, st), nx);
-        nx = JV_SEL(cm, JV_LOOK(t_cm, st), nx);
-        nx = JV_SEL(lb, JV_LOOK(t_lb, st), nx);
-        nx = JV_SEL(rb, JV_LOOK(t_rb, st), nx);
-        nx = JV_SEL(dg, JV_LOOK(t_dg, st), nx);
-        st = nx;
-        /* integers: no leading zeros */
-        fail = JV_OR(fail, JV_AND(JV_AND(inint, dg), z));
-        z = JV_SEL(ibeg, JV_EQ(v, JV_SET1('0')), z);
-        /* key matching */
-        jv8 ko = JV_MINU(koff, JV_SET1(15));
-        c_sub = JV_SEL(kbyte, JV_AND(c_sub, JV_EQ(v, JV_LOOK(k_sub, ko))), c_sub);
-        c_user = JV_SEL(kbyte, JV_AND(c_user, JV_EQ(v, JV_LOOK(k_user, ko))), c_user);
-        c_exp = JV_SEL(kbyte, JV_AND(c_exp, JV_EQ(v, JV_LOOK(k_exp, ko))), c_exp);
-        c_nbf = JV_SEL(kbyte, JV_AND(c_nbf, JV_EQ(v, JV_LOOK(k_nbf, ko))), c_nbf);
-        koff = JV_SEL(kbeg, zero, JV_ADD(koff, JV_AND(kbyte, one)));
-        c_sub = JV_OR(c_sub, kbeg), c_user = JV_OR(c_user, kbeg), c_exp = JV_OR(c_exp, kbeg),
-        c_nbf = JV_OR(c_nbf, kbeg);
-        jv8 l3 = JV_EQ(koff, JV_SET1(3));
-        jv8 id = JV_SEL(JV_AND(c_nbf, l3), JV_SET1(4), zero);
-        id = JV_SEL(JV_AND(c_exp, l3), JV_SET1(3), id);
-        id = JV_SEL(JV_AND(c_user, JV_EQ(koff, JV_SET1(8))), JV_SET1(2), id);
-        id = JV_SEL(JV_AND(c_sub, l3), one, id);
-        curkey = JV_SEL(kend, id, curkey);
-        jv8 sb = JV_AND(kend, JV_LOOK(seenbit, id));
-        fail = JV_OR(fail, JV_ANDN(JV_EQ(JV_AND(seen, sb), zero), ones)); /* duplicate claim */
-        seen = JV_OR(seen, sb);
-        /* values */
-        vstart = JV_SEL(sbeg, P1, JV_SEL(ibeg, P, vstart));
-        vtype = JV_SEL(sbeg, one, JV_SEL(ibeg, JV_SET1(2), vtype));
-#define JL_CAPTURE(i, s_, e_, y_)                                                                                      \
-    do {                                                                                                               \
-        jv8 mk = JV_AND(vend, JV_EQ(curkey, JV_SET1(i)));                                                              \
-        s_ = JV_SEL(mk, vstart, s_), e_ = JV_SEL(mk, P, e_);                                                           \
-        y_ = JV_SEL(mk, vtype, y_);                                                                                    \
-    } while (0)
-        JL_CAPTURE(1, s1, e1, y1);
-        JL_CAPTURE(2, s2, e2, y2);
-        JL_CAPTURE(3, s3, e3, y3);
-        JL_CAPTURE(4, s4, e4, y4);
-#undef JL_CAPTURE
-    }
-    uint8_t A[16][JL] __attribute__((aligned(32)));
-    JV_STORE(A[0], JV_ANDN(fail, JV_EQ(st, JV_SET1(JS_DONE))));
-    JV_STORE(A[1], seen);
-    JV_STORE(A[2], s1), JV_STORE(A[3], s2), JV_STORE(A[4], s3), JV_STORE(A[5], s4);
-    JV_STORE(A[6], e1), JV_STORE(A[7], e2), JV_STORE(A[8], e3), JV_STORE(A[9], e4);
-    JV_STORE(A[10], y1), JV_STORE(A[11], y2), JV_STORE(A[12], y3), JV_STORE(A[13], y4);
-    for (int l = 0; l < m; l++) {
-        jlane_t *o = &out[l];
-        o->ok = A[0][l] && nl[l], o->seen = A[1][l];
-        for (int i = 1; i <= 4; i++) o->start[i] = A[1 + i][l], o->end[i] = A[5 + i][l], o->type[i] = A[9 + i][l];
-    }
-}
-
-/* claim rules on a lane's captured spans; -1 sends the payload to the strict parser */
-static int json_lane_claims(const uint8_t *pl, const jlane_t *o, const jnow_t *now, jwt_result_t *r) {
-    if (!o->ok) return -1;
-    if (!(o->seen & 4)) return JWT_INVALID; /* no exp */
-    int el = o->end[3] - o->start[3];
-    if (o->type[3] != 2) return JWT_INVALID;
-    if (el > 18) return -1; /* huge integer: let strtod in the strict parser decide */
-    if (jnum_cmp(pl + o->start[3], el, 1, now) <= 0) return JWT_INVALID;
-    if (o->seen & 8) {
-        int nl = o->end[4] - o->start[4];
-        if (o->type[4] != 2) return JWT_INVALID;
-        if (nl > 18) return -1;
-        if (jnum_cmp(pl + o->start[4], nl, 1, now) > 0) return JWT_INVALID;
-    }
-    int bad = !(o->seen & 1) || !(o->seen & 2) || o->type[1] != 1 || o->type[2] != 1;
-    if (!bad && !sub_value(pl + o->start[1], o->end[1] - o->start[1], &r->uid)) bad = 1;
-    int ul = o->end[2] - o->start[2];
-    if (!bad && ul > JWT_USERNAME_MAX) bad = 1;
-    if (bad) return JWT_BAD_PAYLOAD;
-    memcpy(r->ubuf, pl + o->start[2], ul);
-    r->ubuf[ul] = 0, r->username_len = (uint16_t)ul, r->username_escape = 0;
-    return JWT_OK;
-}
-#define JWT_HAVE_LANES 1
-#endif
-
-/* ======================================================================================
  * 5. batch front end
  * ====================================================================================== */
 
@@ -2026,9 +1697,7 @@ JWT_INLINE void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const j
     uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
     int pn = jwt_b64url_decode(pb, (const char *)p64, n64);
     if (pn < 0) return;
-#if defined(JWT_FAST_JSON) /* opt-in: measured 3-4% slower end to end on a Xeon Platinum 8260 */
-    int st = payload_fast(pb, pn, jn, r);
-#elif !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on a Xeon Platinum 8260 */
+#if !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on a Xeon Platinum 8260 */
     int st = payload_shape(pb, pn, jn, r);
 #else
     int st = -1;
@@ -2079,42 +1748,6 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
             for (int w = 0; w < 8; w++) diff |= mac[j][w] ^ want[j][w];
             if (!diff) good[ng++] = j;
         }
-#if defined(JWT_LANE_JSON) && defined(JWT_HAVE_LANES)
-        if (ng >= JWT_LANES_MIN) { /* lane-parallel JSON over the whole batch */
-            _Static_assert(JL <= CH, "lane group larger than a chunk");
-            uint8_t lb[CH][JL_MAXN + 80] __attribute__((aligned(16)));
-            const uint8_t *lp[CH];
-            int ln[CH], li[CH], nl = 0;
-            for (int g = 0; g < ng; g++) {
-                int j = good[g], el = mlen[j] - poff[j];
-                jwt_result_t *r = &out[base + idx[j]];
-                if (el / 4 * 3 + 2 > JL_MAXN) { /* too long for byte lanes: strict, per token */
-                    uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
-                    int pn = jwt_b64url_decode(pb, (const char *)msg[j] + poff[j], el);
-                    if (pn < 0) continue;
-                    r->status = (uint8_t)payload_check(pb, pn, &jn, r);
-                    if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
-                    continue;
-                }
-                int pn = jwt_b64url_decode(lb[nl], (const char *)msg[j] + poff[j], el);
-                if (pn < 0) continue;
-                lp[nl] = lb[nl], ln[nl] = pn, li[nl] = j, nl++;
-            }
-            for (int g0 = 0; g0 < nl; g0 += JL) {
-                int m = nl - g0 < JL ? nl - g0 : JL;
-                jlane_t o[JL];
-                json_lanes(m, lp + g0, ln + g0, o);
-                for (int q = 0; q < m; q++) {
-                    jwt_result_t *r = &out[base + idx[li[g0 + q]]];
-                    int st = json_lane_claims(lp[g0 + q], &o[q], &jn, r);
-                    if (st < 0) st = payload_check(lp[g0 + q], ln[g0 + q], &jn, r);
-                    r->status = (uint8_t)st;
-                    if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
-                }
-            }
-            continue;
-        }
-#endif
         for (int g = 0; g < ng; g++) {
             int j = good[g];
             claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
@@ -2157,6 +1790,7 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
+    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
     if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
@@ -2189,6 +1823,7 @@ const char *jwt_engine(void) {
     if (h == jwt_hmac_sha2) return "sha2";
 #endif
 #if defined(JWT_X86)
+    if (h == jwt_hmac_shani_4) return "shani";
     if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
     if (h == jwt_hmac_avx2) return "avx2";

@@ -141,9 +141,11 @@ static const engine_t all_engines[] = {
     { "sha2x1", jwt_hmac_sha2_1, NULL, JWT_CPU_SHA2 },
     { "sha2(default)", jwt_hmac_sha2, jwt_verify_batch_sha2, JWT_CPU_SHA2 },
     { "sha2x2", jwt_hmac_sha2_2, NULL, JWT_CPU_SHA2 },
-    { "sha2x4", jwt_hmac_sha2_4, NULL, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
+    { "shani1", jwt_hmac_shani_1, NULL, JWT_CPU_SHANI },
+    { "shani2", jwt_hmac_shani_2, NULL, JWT_CPU_SHANI },
+    { "shani4", jwt_hmac_shani_4, NULL, JWT_CPU_SHANI },
     { "avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2 },
     { "avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2 },
     { "avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
@@ -360,8 +362,8 @@ static void test_sha256_raw(void) {
            (int)(sizeof se / sizeof se[0]));
 }
 
-/* simdjson-style fast path vs the strict parser on fuzzed payloads: whenever the fast path
- * answers (>= 0) it must agree with payload_check exactly. */
+/* shape matcher vs the strict parser on fuzzed payloads: whenever the matcher answers (>= 0) it must agree with
+ * payload_check exactly. */
 static void test_json_diff(int64_t now) {
     static const char *base[] = {
         "{\"sub\":\"1\",\"username\":\"golden_ember_1\",\"iat\":1792832174,\"exp\":2108192174}",
@@ -375,7 +377,7 @@ static void test_json_diff(int64_t now) {
     };
     static const char alpha[] = "{}[]:,\"\\ \t\n\r0123456789-+.eEtrufalsn_abcxyz\x01\x7f\xc3\xa9";
     uint8_t a[400], b[400];
-    int fast = 0, total = 0, shaped = 0;
+    int total = 0, shaped = 0;
     jnow_t jn;
     jnow_init(&jn, now);
     for (int it = 0; it < (quick ? 30000 : 300000); it++) {
@@ -391,9 +393,8 @@ static void test_json_diff(int64_t now) {
             else if (pos < n) a[pos] = (uint8_t)ch;
         }
         memcpy(b, a, n);
-        jwt_result_t rf, rs;
-        memset(&rf, 0, sizeof rf), memset(&rs, 0, sizeof rs);
-        int sf = payload_fast(a, n, &jn, &rf);
+        jwt_result_t rs;
+        memset(&rs, 0, sizeof rs);
         int ss = payload_check(b, n, &jn, &rs);
         jwt_result_t rp;
         memset(&rp, 0, sizeof rp);
@@ -407,82 +408,12 @@ static void test_json_diff(int64_t now) {
                       !memcmp(rp.ubuf, rs.ubuf, rp.username_len) && rp.username_escape == rs.username_escape;
             CHECK(okp, "json diff: shape %d strict %d on '%.*s'", sp, ss, n, (const char *)b);
         }
-        if (sf < 0) continue;
-        fast++;
-        int ok = sf == ss;
-        if (ok && sf == JWT_OK)
-            ok = rf.uid == rs.uid && rf.username_len == rs.username_len && !memcmp(rf.ubuf, rs.ubuf, rf.username_len) &&
-                 rf.username_escape == rs.username_escape;
-        CHECK(ok, "json diff: fast %d strict %d on '%.*s'", sf, ss, n, (const char *)b);
     }
-    printf("  json fast path: decided %d of %d fuzzed payloads; shape matcher: %d; all agreed with the strict parser\n",
-           fast, total, shaped);
+    printf("  json shape matcher: decided %d of %d fuzzed payloads, all agreed with the strict parser\n", shaped,
+           total);
     CHECK(shaped > total / 20, "shape matcher decided too few (%d/%d)", shaped, total);
-    CHECK(fast > total / 10, "fast path decided too few (%d/%d)", fast, total);
 }
 
-#ifdef JWT_HAVE_LANES
-/* lane-parallel JSON vs the strict parser: random-size groups of fuzzed payloads */
-static void test_json_lanes(int64_t now) {
-    static const char *base[] = {
-        "{\"sub\":\"1\",\"username\":\"golden_ember_1\",\"iat\":1792832174,\"exp\":2108192174}",
-        "{\"sub\":\"20000\",\"username\":\"swift_nebula_20000\",\"iat\":1792832174,\"exp\":2108192174}",
-        "{\"exp\":2108192174,\"nbf\":100,\"username\":\"a b\",\"sub\":\"007\",\"x\":\"y\"}",
-        " {\"sub\" : \"9223372036854775807\" ,\"username\":\"\", \"exp\" : 4100000000 } ",
-        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":1}",
-        "{\"sub\":1,\"username\":\"n\",\"exp\":2108192174}",
-        "{\"sub\":\"1\",\"username\":0,\"exp\":2108192174}",
-        "{\"sub\":\"1\",\"username\":\"n\",\"exp\":2108192174,\"a\":[1,2],\"b\":{\"c\":1}}",
-        "{\"sub\":\"1\",\"sub\":\"2\",\"username\":\"n\",\"exp\":2108192174}",
-        "{\"subx\":\"1\",\"usernam\":\"n\",\"exp\":2108192174,\"nbf\":9999999999}",
-    };
-    static const char alpha[] = "{}[]:,\"\\ \t0123456789-+.eEtrufalsn_abcxyz\x01\x7f\xc3";
-    enum { G = 64 };
-    static uint8_t buf[G][320], ref[G][320];
-    const uint8_t *ptr[G];
-    int len[G], decided = 0, total = 0;
-    jnow_t jn;
-    jnow_init(&jn, now);
-    for (int it = 0; it < (quick ? 2000 : 20000); it++) {
-        int m = 1 + (int)(rnd() % JL);
-        for (int j = 0; j < m; j++) {
-            const char *src = base[rnd() % (sizeof base / sizeof *base)];
-            int n = (int)strlen(src);
-            memcpy(buf[j], src, n);
-            for (int k = 0, muts = (int)(rnd() % 4); k < muts; k++) {
-                int op = (int)(rnd() % 3), pos = n ? (int)(rnd() % (n + 1)) : 0;
-                char ch = alpha[rnd() % (sizeof alpha - 1)];
-                if (op == 0 && n < 238)
-                    memmove(buf[j] + pos + 1, buf[j] + pos, n - pos), buf[j][pos] = (uint8_t)ch, n++;
-                else if (op == 1 && pos < n) memmove(buf[j] + pos, buf[j] + pos + 1, n - pos - 1), n--;
-                else if (pos < n) buf[j][pos] = (uint8_t)ch;
-            }
-            for (int k = n; k < 320; k++) buf[j][k] = (uint8_t)rnd(); /* garbage past n must not matter */
-            memcpy(ref[j], buf[j], n);
-            ptr[j] = buf[j], len[j] = n;
-        }
-        jlane_t o[JL];
-        json_lanes(m, ptr, len, o);
-        for (int j = 0; j < m; j++) {
-            jwt_result_t rl, rs;
-            memset(&rl, 0, sizeof rl), memset(&rs, 0, sizeof rs);
-            int sl = json_lane_claims(buf[j], &o[j], &jn, &rl);
-            int ss = payload_check(ref[j], len[j], &jn, &rs);
-            total++;
-            if (sl < 0) continue;
-            decided++;
-            int ok = sl == ss;
-            if (ok && sl == JWT_OK)
-                ok = rl.uid == rs.uid && rl.username_len == rs.username_len &&
-                     !memcmp(rl.ubuf, rs.ubuf, rl.username_len);
-            CHECK(ok, "lanes: lane %d strict %d on '%.*s'", sl, ss, len[j], (const char *)ref[j]);
-        }
-    }
-    printf("  json lanes (%d wide): decided %d of %d fuzzed payloads, all agreed with the strict parser\n", JL, decided,
-           total);
-    CHECK(decided > total / 10, "lanes decided too few (%d/%d)", decided, total);
-}
-#endif
 
 static void test_seed(seedtok_t *t, int n, int64_t now) {
     jwt_key_t k;
@@ -880,9 +811,6 @@ int main(int argc, char **argv) {
     test_seed(t, n, now);
     test_cases(now);
     test_json_diff(now);
-#ifdef JWT_HAVE_LANES
-    test_json_lanes(now);
-#endif
     if (argc > 2) test_vectors(argv[2]);
     printf("%s: %d/%d checks passed\n", fails ? "FAILED" : "OK", checks - fails, checks);
     return fails != 0;

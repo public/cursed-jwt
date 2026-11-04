@@ -1,0 +1,642 @@
+--- a/include/haproxy/jwt-t.h
++++ b/include/haproxy/jwt-t.h
+@@ -67,6 +67,7 @@
+ 
+ struct jwt_cert_tree_entry {
+ 	EVP_PKEY *pubkey;
++	void *cursed; /* cursed-jwt key state (jwt_cursed.c), NULL if that key type is not handled */
+ 	struct ebmb_node node;
+ 	char path[VAR_ARRAY];
+ };
+--- a/include/haproxy/jwt_cursed.h
++++ b/include/haproxy/jwt_cursed.h
+@@ -0,0 +1,72 @@
++/*
++ * include/haproxy/jwt_cursed.h
++ * Signature checks for jwt_verify through cursed-jwt (HS256, RS256, ES256).
++ *
++ * Only the cryptographic check moves: tokenizing, the base64url decoding of
++ * the signature and every status code stay in src/jwt.c, so jwt_verify
++ * returns the same value for every input. Anything this file does not handle
++ * returns JWT_CURSED_FALLBACK and takes HAProxy's OpenSSL path unchanged.
++ *
++ * The glue (src/jwt_cursed.c) is built into libcursedjwt.a with cursed-jwt
++ * itself, whose jwt.h shares HAProxy's jwt_ prefix.
++ *
++ * Part of cursed-jwt's contrib/haproxy (https://github.com/public/cursed-jwt).
++ */
++#ifndef _HAPROXY_JWT_CURSED_H
++#define _HAPROXY_JWT_CURSED_H
++
++#include <haproxy/api.h>
++#include <haproxy/base64.h>
++
++/* the files that include this header get the cursed paths */
++#define USE_CURSED_JWT 1
++
++#ifdef USE_CURSED_JWT
++#include <stddef.h>
++#include <openssl/evp.h>
++
++#define JWT_CURSED_FALLBACK -1
++
++/* 0 disables the cursed paths (global "jwt.cursed off", and the unit tests) */
++extern int jwt_cursed_enabled;
++
++/* HMAC-SHA256 of <msg> under <key>, compared in constant time with the
++ * decoded signature. Returns 1 if they match, 0 otherwise. */
++int jwt_cursed_hs256(const char *key, size_t klen, const char *msg, size_t mlen,
++                     const unsigned char *sig, size_t slen);
++
++/* Per-key state built when the PEM public key is loaded: RSA (2048..4096-bit
++ * modulus, odd e < 2^64) or EC P-256. NULL for anything else. */
++void *jwt_cursed_pkey_new(EVP_PKEY *pkey);
++void jwt_cursed_pkey_free(void *ck);
++
++/* Checks a RS256 (<is_ecdsa> = 0) or ES256 (<is_ecdsa> = 1) signature. Returns
++ * 1 if valid, 0 if not, JWT_CURSED_FALLBACK if the key type does not match the
++ * algorithm or the signature length is not the canonical one, which OpenSSL
++ * then decides. */
++int jwt_cursed_pk_verify(const void *ck, int is_ecdsa, const char *msg, size_t mlen,
++                         const unsigned char *sig, size_t slen);
++
++/* base64url decoding, SIMD. Returns the decoded length, or -1 for anything it
++ * does not take (padding, non-canonical trailing bits, any other byte, too
++ * little room), which base64urldec() then decodes with its own rules. */
++int jwt_cursed_b64url(char *dst, size_t dsz, const char *src, size_t n);
++#endif
++
++/* base64urldec() with the cursed fast path in front. Same results: what the
++ * fast decoder accepts (A-Z a-z 0-9 - _, canonical tail) base64urldec() decodes
++ * to the same bytes. */
++static inline int jwt_b64dec(const char *in, size_t ilen, char *out, size_t olen)
++{
++#ifdef USE_CURSED_JWT
++	if (likely(jwt_cursed_enabled)) {
++		int r = jwt_cursed_b64url(out, olen, in, ilen);
++
++		if (r >= 0)
++			return r;
++	}
++#endif
++	return base64urldec(in, ilen, out, olen);
++}
++
++#endif /* _HAPROXY_JWT_CURSED_H */
+--- a/src/jwt.c
++++ b/src/jwt.c
+@@ -20,6 +20,7 @@
+ #include <haproxy/openssl-compat.h>
+ #include <haproxy/base64.h>
+ #include <haproxy/jwt.h>
++#include <haproxy/jwt_cursed.h>
+ #include <haproxy/buf.h>
+ #include <haproxy/ssl_ckch.h>
+ #include <haproxy/ssl_sock.h>
+@@ -109,6 +110,28 @@
+ 	if (item_num == 0)
+ 		return -1;
+ 
++#ifdef USE_CURSED_JWT
++	/* the same scan with memchr() */
++	if (likely(jwt_cursed_enabled)) {
++		char *dot;
++
++		while (1) {
++			items[index].start = ptr;
++			dot = memchr(ptr, '.', jwt_end - ptr);
++			if (!dot)
++				break;
++			items[index++].length = dot - ptr;
++			if (index == item_num)
++				return 1;
++			ptr = dot + 1;
++		}
++		if (index < item_num - 1)
++			return -1;
++		items[index].length = jwt_end - ptr;
++		return 0;
++	}
++#endif
++
+ 	items[index].start = ptr;
+ 	items[index].length = 0;
+ 
+@@ -178,6 +201,9 @@
+ 				memcpy(entry->path, path, pathlen + 1);
+ 
+ 				entry->pubkey = pubkey;
++#ifdef USE_CURSED_JWT
++				entry->cursed = jwt_cursed_pkey_new(pubkey);
++#endif
+ 
+ 				/* The entry insertion can't fail, we already
+ 				 * checked if the entry existed. */
+@@ -272,6 +298,14 @@
+ 		return JWT_VRFY_UNMANAGED_ALG;
+ 	}
+ 
++#ifdef USE_CURSED_JWT
++	if (ctx->alg == JWS_ALG_HS256 && jwt_cursed_enabled)
++		return jwt_cursed_hs256(ctx->key, ctx->key_length, ctx->jose.start,
++		                        ctx->jose.length + ctx->claims.length + 1,
++		                        (const unsigned char *)decoded_signature->area,
++		                        decoded_signature->data) ? JWT_VRFY_OK : JWT_VRFY_KO;
++#endif
++
+ 	switch(ctx->alg) {
+ 	case JWS_ALG_HS256:
+ 		evp = EVP_sha256();
+@@ -439,6 +473,21 @@
+ 		if (eb) {
+ 			entry = ebmb_entry(eb, struct jwt_cert_tree_entry, node);
+ 
++#ifdef USE_CURSED_JWT
++			/* RS256 / ES256 with a key cursed-jwt can take: no EVP
++			 * context, and no DER conversion of the ECDSA signature. */
++			if (entry->cursed && jwt_cursed_enabled &&
++			    (ctx->alg == JWS_ALG_RS256 || ctx->alg == JWS_ALG_ES256)) {
++				int ok = jwt_cursed_pk_verify(entry->cursed, is_ecdsa, ctx->jose.start,
++				                              ctx->jose.length + ctx->claims.length + 1,
++				                              (const unsigned char *)decoded_signature->area,
++				                              decoded_signature->data);
++				if (ok != JWT_CURSED_FALLBACK) {
++					EVP_MD_CTX_free(evp_md_ctx);
++					return ok ? JWT_VRFY_OK : JWT_VRFY_KO;
++				}
++			}
++#endif
+ 			pubkey = entry->pubkey;
+ 			if (pubkey)
+ 				EVP_PKEY_up_ref(pubkey);
+@@ -532,8 +581,8 @@
+ 	if (!decoded_sig)
+ 		return JWT_VRFY_OUT_OF_MEMORY;
+ 
+-	ret = base64urldec(ctx.signature.start, ctx.signature.length,
+-	                   decoded_sig->area, decoded_sig->size);
++	ret = jwt_b64dec(ctx.signature.start, ctx.signature.length,
++	                 decoded_sig->area, decoded_sig->size);
+ 	if (ret == -1) {
+ 		retval = JWT_VRFY_INVALID_TOKEN;
+ 		goto end;
+@@ -598,6 +647,25 @@
+ }
+ 
+ 
++#ifdef USE_CURSED_JWT
++/* Parse 'jwt.cursed on|off' (default on) */
++static int cfg_parse_global_jwt_cursed(char **args, int section_type, struct proxy *curpx,
++                                       const struct proxy *defpx, const char *file, int linenum, char **err)
++{
++	if (too_many_args(1, args, err, NULL))
++		return -1;
++	if (strcmp(args[1], "on") == 0)
++		jwt_cursed_enabled = 1;
++	else if (strcmp(args[1], "off") == 0)
++		jwt_cursed_enabled = 0;
++	else {
++		memprintf(err, "'%s' expects 'on' or 'off'.", args[0]);
++		return -1;
++	}
++	return 0;
++}
++#endif
++
+ static void jwt_deinit(void)
+ {
+ 	struct ebmb_node *node = NULL;
+@@ -608,6 +676,9 @@
+ 		entry = ebmb_entry(node, struct jwt_cert_tree_entry, node);
+ 		ebmb_delete(node);
+ 		EVP_PKEY_free(entry->pubkey);
++#ifdef USE_CURSED_JWT
++		jwt_cursed_pkey_free(entry->cursed);
++#endif
+ 		ha_free(&entry);
+ 		node = ebmb_first(&jwt_cert_tree);
+ 	}
+@@ -616,6 +687,9 @@
+ 
+ static struct cfg_kw_list cfg_kws = {ILH, {
+ 	{ CFG_GLOBAL, "jwt.allow_none_alg", cfg_parse_global_jwt_none_alg },
++#ifdef USE_CURSED_JWT
++	{ CFG_GLOBAL, "jwt.cursed", cfg_parse_global_jwt_cursed },
++#endif
+ 	{ 0, NULL, NULL },
+ }};
+ 
+--- a/src/jwt_cursed_test.c
++++ b/src/jwt_cursed_test.c
+@@ -0,0 +1,390 @@
++/*
++ * src/jwt_cursed_test.c
++ * Unit tests for the cursed-jwt paths of jwt_verify, jwt_header_query and
++ * jwt_payload_query. Built only with -DDEBUG_UNIT (add src/jwt_cursed_test.o
++ * to EXTRA_OBJS), run as
++ *
++ *   haproxy -U jwt-diff  <tokens.txt> [mutants] [v]  stock vs cursed results on every token and mutants of it
++ *   haproxy -U jwt-bench <tokens.txt> [iters]        ns per call, stock vs cursed, split into pieces
++ *
++ * tokens.txt: one "<label> <alg> <key> <token>" per line; <key> is the HMAC
++ * secret or the path of a PEM public key, as jwt_verify takes it
++ * (cursed-jwt's contrib/haproxy/gen_tokens.py writes them).
++ *
++ * Both sides run in the same binary: "stock" is the same call with
++ * jwt_cursed_enabled = 0.
++ */
++#define _GNU_SOURCE /* memrchr */
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include <haproxy/api.h>
++#include <haproxy/arg.h>
++#include <haproxy/base64.h>
++#include <haproxy/buf.h>
++#include <haproxy/chunk.h>
++#include <haproxy/global.h>
++#include <haproxy/sample.h>
++#include <haproxy/tools.h>
++
++#ifdef USE_OPENSSL
++#include <openssl/evp.h>
++#include <openssl/hmac.h>
++#include <openssl/pem.h>
++#include <haproxy/jwt.h>
++#endif
++#if __has_include(<haproxy/jwt_cursed.h>)
++#include <haproxy/jwt_cursed.h>   /* defines USE_CURSED_JWT */
++#endif
++
++static inline unsigned long long now_ns(void)
++{
++	struct timespec ts;
++
++	clock_gettime(CLOCK_MONOTONIC, &ts);
++	return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++}
++
++/* best of 5 rounds of <iters> calls of <body>, in ns per call */
++#define BENCH(iters, body) ({                                          \
++	double best_ = 1e30, d_;                                       \
++	unsigned long long t0_;                                        \
++	int r_, i_;                                                    \
++	for (r_ = 0; r_ < 5; r_++) {                                   \
++		t0_ = now_ns();                                        \
++		for (i_ = 0; i_ < (iters); i_++) { body; }             \
++		d_ = (double)(now_ns() - t0_) / (iters);               \
++		if (d_ < best_) best_ = d_;                            \
++	}                                                              \
++	best_; })
++
++static volatile long bench_sink;
++
++static uint64_t rng_state = 0x9E3779B97F4A7C15ULL;
++static inline uint64_t rnd(void)
++{
++	uint64_t x = rng_state;
++
++	x ^= x << 13; x ^= x >> 7; x ^= x << 17;
++	return rng_state = x;
++}
++
++static char *slurp(const char *path, size_t *len)
++{
++	FILE *f = fopen(path, "rb");
++	char *buf;
++	long n;
++
++	if (!f)
++		return NULL;
++	fseek(f, 0, SEEK_END);
++	n = ftell(f);
++	fseek(f, 0, SEEK_SET);
++	buf = malloc(n + 1);
++	if (!buf || fread(buf, 1, n, f) != (size_t)n) {
++		fclose(f);
++		free(buf);
++		return NULL;
++	}
++	fclose(f);
++	buf[n] = 0;
++	*len = n;
++	return buf;
++}
++
++#ifdef USE_OPENSSL
++/* ------------------------------------------------------------------ JWT */
++
++struct tok {
++	char label[64], alg[16], key[512];
++	char *tok;
++	size_t len;
++	EVP_PKEY *pk; /* the PEM key, for the crypto-only stock timing */
++};
++
++static int load_tokens(const char *path, struct tok **out)
++{
++	size_t len;
++	char *buf = slurp(path, &len), *line, *save = NULL;
++	struct tok *t = NULL;
++	int n = 0, cap = 0;
++
++	if (!buf)
++		return -1;
++	for (line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
++		char tokbuf[16384];
++
++		if (*line == '#' || !*line)
++			continue;
++		if (n == cap) {
++			cap = cap ? 2 * cap : 64;
++			t = realloc(t, cap * sizeof(*t));
++		}
++		memset(&t[n], 0, sizeof(t[n]));
++		if (sscanf(line, "%63s %15s %511s %16383s", t[n].label, t[n].alg, t[n].key, tokbuf) != 4)
++			continue;
++		t[n].len = strlen(tokbuf);
++		t[n].tok = strdup(tokbuf);
++		if (t[n].alg[0] != 'H') {
++			char *err = NULL;
++			FILE *f = fopen(t[n].key, "r");
++
++			if (f) {
++				t[n].pk = PEM_read_PUBKEY(f, NULL, NULL, NULL);
++				fclose(f);
++			}
++			jwt_tree_load_cert(t[n].key, strlen(t[n].key), 0, "bench", 0, &err);
++			free(err);
++		}
++		n++;
++	}
++	free(buf);
++	*out = t;
++	return n;
++}
++
++static enum jwt_vrfy_status verify(const struct tok *t, int cursed)
++{
++	struct buffer tb = b_make(t->tok, t->len, 0, t->len);
++	struct buffer ab = b_make((char *)t->alg, strlen(t->alg), 0, strlen(t->alg));
++	struct buffer kb = b_make((char *)t->key, strlen(t->key), 0, strlen(t->key));
++
++#ifdef USE_CURSED_JWT
++	jwt_cursed_enabled = cursed;
++#endif
++	return jwt_verify(&tb, &ab, &kb, 0);
++}
++
++/* the crypto alone, the way jwt.c calls OpenSSL (key already parsed) */
++static int stock_crypto(const struct tok *t, const unsigned char *sig, int slen, int mlen)
++{
++	unsigned char mac[EVP_MAX_MD_SIZE], der[256], *p = der;
++	unsigned int maclen = 0;
++	const unsigned char *dsig = sig;
++	size_t dlen = slen;
++	EVP_MD_CTX *ctx;
++	EVP_PKEY_CTX *pctx = NULL;
++	int ok = 0;
++
++	if (t->alg[0] == 'H') {
++		HMAC(EVP_sha256(), t->key, strlen(t->key), (unsigned char *)t->tok, mlen, mac, &maclen);
++		return maclen == (unsigned)slen && CRYPTO_memcmp(mac, sig, slen) == 0;
++	}
++	if (t->alg[0] == 'E') {
++		ECDSA_SIG *es = ECDSA_SIG_new();
++
++		ECDSA_SIG_set0(es, BN_bin2bn(sig, slen / 2, NULL), BN_bin2bn(sig + slen / 2, slen / 2, NULL));
++		dlen = i2d_ECDSA_SIG(es, &p);
++		dsig = der;
++		ECDSA_SIG_free(es);
++	}
++	ctx = EVP_MD_CTX_new();
++	if (EVP_DigestVerifyInit(ctx, &pctx, EVP_sha256(), NULL, t->pk) == 1 &&
++	    (t->alg[0] == 'E' || EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0) &&
++	    EVP_DigestVerifyUpdate(ctx, t->tok, mlen) == 1 &&
++	    EVP_DigestVerifyFinal(ctx, dsig, dlen) == 1)
++		ok = 1;
++	EVP_MD_CTX_free(ctx);
++	return ok;
++}
++
++static double conv_ns(const char *name, const struct tok *t, const char *q, int as_int, int iters)
++{
++	struct sample_conv *conv = find_sample_conv(name, strlen(name));
++	struct arg args[3];
++	struct sample smp;
++	char qbuf[64];
++
++	if (!conv)
++		return -1;
++	memset(args, 0, sizeof(args));
++	snprintf(qbuf, sizeof(qbuf), "%s", q);
++	args[0].type = ARGT_STR;
++	args[0].data.str = b_make(qbuf, sizeof(qbuf), 0, strlen(qbuf));
++	args[1].type = as_int ? ARGT_SINT : ARGT_STR;
++	if (!as_int)
++		args[1].data.str = b_make(qbuf, sizeof(qbuf), 0, 0);
++	args[2].type = ARGT_STOP;
++	return BENCH(iters, {
++		memset(&smp, 0, sizeof(smp));
++		smp.data.type = SMP_T_STR;
++		smp.data.u.str = b_make(t->tok, t->len, 0, t->len);
++		bench_sink += conv->process(args, &smp, conv->private);
++	});
++}
++
++/* the jwt_verify converter itself, with literal alg and key arguments */
++static double conv_verify_ns(const struct tok *t, int cursed, int iters)
++{
++	struct sample_conv *conv = find_sample_conv("jwt_verify", 10);
++	struct arg args[3];
++	struct sample smp;
++
++	memset(args, 0, sizeof(args));
++	args[0].type = ARGT_STR;
++	args[0].data.str = b_make((char *)t->alg, strlen(t->alg), 0, strlen(t->alg));
++	args[1].type = ARGT_STR;
++	args[1].data.str = b_make((char *)t->key, strlen(t->key), 0, strlen(t->key));
++	args[2].type = ARGT_STOP;
++#ifdef USE_CURSED_JWT
++	jwt_cursed_enabled = cursed;
++#endif
++	return BENCH(iters, {
++		memset(&smp, 0, sizeof(smp));
++		smp.data.type = SMP_T_STR;
++		smp.data.u.str = b_make(t->tok, t->len, 0, t->len);
++		conv->process(args, &smp, conv->private);
++		bench_sink += smp.data.u.sint;
++	});
++}
++
++static int jwt_bench(int argc, char **argv)
++{
++	struct tok *t;
++	int n, iters = argc > 2 ? atoi(argv[2]) : 2000;
++
++	if (argc < 2 || (n = load_tokens(argv[1], &t)) <= 0) {
++		fprintf(stderr, "usage: -U jwt-bench <tokens.txt> [iters]\n");
++		return 1;
++	}
++	printf("label\talg\ttoken_B\tstock_verify\tcursed_verify\tstock_conv\tcursed_conv\t"
++	       "tokenize\tb64_sig\tstock_crypto\tcursed_crypto\thdr_alg_query\tpay_exp_query\tpay_iss_query\tb64_payload\n");
++	for (int i = 0; i < n; i++) {
++		struct jwt_item it[3];
++		struct buffer tb = b_make(t[i].tok, t[i].len, 0, t[i].len);
++		unsigned char sig[1024];
++		int slen, mlen, its = t[i].alg[0] == 'H' ? iters * 10 : iters;
++		double sv, cv = -1, sc, cc = -1, tk, b64, scr, ccr = -1, qa, qe, qi, bp;
++		static char pbuf[16384];
++
++		if (jwt_tokenize(&tb, it, 3) != 0) {
++			printf("%s\tbad token\n", t[i].label);
++			continue;
++		}
++		mlen = it[0].length + it[1].length + 1;
++		slen = base64urldec(it[2].start, it[2].length, (char *)sig, sizeof(sig));
++		if (verify(&t[i], 0) != JWT_VRFY_OK) {
++			printf("%s\tstock rejects it (%d)\n", t[i].label, verify(&t[i], 0));
++			continue;
++		}
++		sv  = BENCH(its, bench_sink += verify(&t[i], 0));
++		sc  = conv_verify_ns(&t[i], 0, its);
++#ifdef USE_CURSED_JWT
++		if (verify(&t[i], 1) != JWT_VRFY_OK) {
++			printf("%s\tcursed rejects it\n", t[i].label);
++			continue;
++		}
++		cv  = BENCH(its, bench_sink += verify(&t[i], 1));
++		cc  = conv_verify_ns(&t[i], 1, its);
++		{
++			void *ck = t[i].pk ? jwt_cursed_pkey_new(t[i].pk) : NULL;
++
++			if (t[i].alg[0] == 'H')
++				ccr = BENCH(its, bench_sink += jwt_cursed_hs256(t[i].key, strlen(t[i].key), t[i].tok, mlen, sig, slen));
++			else if (ck)
++				ccr = BENCH(its, bench_sink += jwt_cursed_pk_verify(ck, t[i].alg[0] == 'E', t[i].tok, mlen, sig, slen));
++			jwt_cursed_pkey_free(ck);
++		}
++#endif
++		tk  = BENCH(its * 10, { struct jwt_item x[3]; bench_sink += jwt_tokenize(&tb, x, 3); });
++		b64 = BENCH(its * 10, bench_sink += base64urldec(it[2].start, it[2].length, (char *)sig, sizeof(sig)));
++		scr = BENCH(its, bench_sink += stock_crypto(&t[i], sig, slen, mlen));
++		qa  = conv_ns("jwt_header_query", &t[i], "$.alg", 0, its * 10);
++		qe  = conv_ns("jwt_payload_query", &t[i], "$.exp", 1, its * 10);
++		qi  = conv_ns("jwt_payload_query", &t[i], "$.iss", 0, its * 10);
++		bp  = BENCH(its * 10, bench_sink += base64urldec(it[1].start, it[1].length, pbuf, sizeof(pbuf)));
++		printf("%s\t%s\t%zu\t%.0f\t%.0f\t%.0f\t%.0f\t%.1f\t%.1f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\n",
++		       t[i].label, t[i].alg, t[i].len, sv, cv, sc, cc, tk, b64, scr, ccr, qa, qe, qi, bp);
++	}
++	return 0;
++}
++
++/* stock and cursed jwt_verify must return the same status for every input */
++static int jwt_diff(int argc, char **argv)
++{
++	struct tok *t;
++	int n, muts = argc > 2 ? atoi(argv[2]) : 200, verbose = argc > 3 && *argv[3] == 'v';
++	long checks = 0, bad = 0, ok_both = 0;
++	static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.=+/ ";
++
++	if (argc < 2 || (n = load_tokens(argv[1], &t)) <= 0) {
++		fprintf(stderr, "usage: -U jwt-diff <tokens.txt> [mutants per token]\n");
++		return 1;
++	}
++#ifndef USE_CURSED_JWT
++	fprintf(stderr, "jwt-diff: built without USE_CURSED_JWT\n");
++	return 1;
++#endif
++	for (int i = 0; i < n; i++) {
++		char *orig = t[i].tok;
++		size_t olen = t[i].len;
++		char *m = malloc(olen + 8);
++
++		for (int k = -1; k < muts; k++) {
++			struct tok mt = t[i];
++			enum jwt_vrfy_status a, b;
++
++			memcpy(m, orig, olen);
++			mt.tok = m;
++			mt.len = olen;
++			if (k >= 0) {
++				size_t pos = rnd() % olen;
++
++				switch (rnd() % 4) {
++				case 0: m[pos] = alphabet[rnd() % (sizeof(alphabet) - 1)]; break;  /* substitute */
++				case 1: mt.len = pos; break;                                        /* truncate */
++				case 2: m[pos] ^= 1 << (rnd() % 8); break;                          /* bit flip */
++				case 3: m[olen - 1 - (rnd() % 3)] = alphabet[rnd() % 64]; break;    /* signature tail */
++				}
++			}
++			a = verify(&mt, 0);
++			b = verify(&mt, 1);
++			if (k < 0 && verbose)
++				printf("%-28s stock %2d cursed %2d\n", t[i].label, a, b);
++			checks++;
++			ok_both += (a == JWT_VRFY_OK && b == JWT_VRFY_OK);
++			if (a != b) {
++				if (bad++ < 20)
++					printf("MISMATCH %s mutant %d: stock %d cursed %d: %.*s\n", t[i].label, k, a, b, (int)mt.len, m);
++			}
++		}
++		free(m);
++	}
++#ifdef USE_CURSED_JWT
++	/* base64url: the fast decoder with its fallback vs base64urldec() alone */
++	{
++		static const char b64set[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
++		static char in[1200], o1[4096], o2[4096];
++		long bchecks = 0, bbad = 0, bok = 0;
++
++		for (int k = 0; k < muts * 500; k++) {
++			size_t n = rnd() % (k & 1 ? 1100 : 70);
++			int r1, r2;
++
++			for (size_t j = 0; j < n; j++)
++				in[j] = b64set[rnd() % 64];
++			if (n && rnd() % 4 == 0)   /* a stray byte: '=', '+', '/', '.', NUL, high, any */
++				in[rnd() % n] = (rnd() & 1) ? "=+/.\0\x80 "[rnd() % 7] : (char)rnd();
++			jwt_cursed_enabled = 1;
++			r1 = jwt_b64dec(in, n, o1, sizeof(o1));
++			r2 = base64urldec(in, n, o2, sizeof(o2));
++			bchecks++;
++			bok += r2 >= 0;
++			if (r1 != r2 || (r1 > 0 && memcmp(o1, o2, r1) != 0)) {
++				if (bbad++ < 10)
++					printf("B64 MISMATCH n=%zu: fast %d stock %d: %.*s\n", n, r1, r2, (int)n, in);
++			}
++		}
++		printf("b64-diff: %ld checks, %ld decoded, %ld mismatches\n", bchecks, bok, bbad);
++		bad += bbad;
++	}
++#endif
++	printf("jwt-diff: %ld checks, %ld accepted by both, %ld mismatches\n", checks, ok_both, bad);
++	return bad != 0;
++}
++
++REGISTER_UNITTEST("jwt-bench", jwt_bench);
++REGISTER_UNITTEST("jwt-diff", jwt_diff);
++#endif /* USE_OPENSSL */
+--- a/src/sample.c
++++ b/src/sample.c
+@@ -51,6 +51,7 @@
+ #include <haproxy/vars.h>
+ #include <haproxy/xxhash.h>
+ #include <haproxy/jwt.h>
++#include <haproxy/jwt_cursed.h>
+ 
+ /* sample type names */
+ const char *smp_to_type[SMP_TYPES] = {
+@@ -4969,8 +4970,8 @@
+ 	if (!decoded_header)
+ 		goto end;
+ 
+-	ret = base64urldec(items[member].start, items[member].length,
+-	                   decoded_header->area, decoded_header->size);
++	ret = jwt_b64dec(items[member].start, items[member].length,
++	                 decoded_header->area, decoded_header->size);
+ 	if (ret == -1)
+ 		goto end;
+ 

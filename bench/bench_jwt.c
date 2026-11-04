@@ -70,9 +70,12 @@ static const hengine_t all_hengines[] = {
 #if defined(__aarch64__)
     { "sha2-1stream", jwt_hmac_sha2_1, JWT_CPU_SHA2 },
     { "sha2-2stream", jwt_hmac_sha2_2, JWT_CPU_SHA2 },
-    { "sha2-4stream", jwt_hmac_sha2_4, JWT_CPU_SHA2 },
+    { "sha2-4stream", jwt_hmac_sha2, JWT_CPU_SHA2 },
 #endif
 #if defined(__x86_64__)
+    { "shani-1stream", jwt_hmac_shani_1, JWT_CPU_SHANI },
+    { "shani-2stream", jwt_hmac_shani_2, JWT_CPU_SHANI },
+    { "shani-4stream", jwt_hmac_shani_4, JWT_CPU_SHANI },
     { "avx2-8lane", jwt_hmac_avx2, JWT_CPU_AVX2 },
     { "avx2-2x8lane", jwt_hmac_avx2x2, JWT_CPU_AVX2 },
     { "avx512vl-8lane", jwt_hmac_avx512, JWT_CPU_AVX512VL },
@@ -210,9 +213,6 @@ int main(int argc, char **argv) {
         v = TIMEIT(1, int pn = jwt_b64url_decode(pb, toks[i] + pl0, mlen[i] - pl0);
                    sink += payload_check(pb, pn, &jn, res));
         printf("  payload b64 + JSON, strict       %6.1f\n", v);
-        v = TIMEIT(1, int pn = jwt_b64url_decode(pb, toks[i] + pl0, mlen[i] - pl0);
-                   sink += payload_fast(pb, pn, &jn, res));
-        printf("  payload b64 + JSON, simdjson     %6.1f\n", v);
     }
     return 0;
 }
