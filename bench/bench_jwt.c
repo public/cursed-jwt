@@ -211,9 +211,6 @@ int main(int argc, char **argv) {
         v = TIMEIT(1, int pn = jwt_b64url_decode(pb, toks[i] + pl0, mlen[i] - pl0);
                    sink += payload_check(pb, pn, &jn, res));
         printf("  payload b64 + JSON, strict       %6.1f\n", v);
-        v = TIMEIT(1, int pn = jwt_b64url_decode(pb, toks[i] + pl0, mlen[i] - pl0);
-                   sink += payload_fast(pb, pn, &jn, res));
-        printf("  payload b64 + JSON, simdjson     %6.1f\n", v);
     }
     return 0;
 }

@@ -1,5 +1,5 @@
 # build outputs
-/build/
+build/
 *.o
 *.a
 *.so
@@ -25,3 +25,4 @@ crash-*
 leak-*
 timeout-*
 oom-*
+/contrib/haproxy/build/

@@ -1,5 +1,5 @@
 /* e2e.c — end-to-end jwt_verify_batch ns/token for the shoot-out, plus where the time goes.
- * Unity build: includes src/jwt.c.  Build twice: default (strict JSON) and -DJWT_FAST_JSON (simdjson-style).
+ * Unity build: includes src/jwt.c.  Built twice: default (shape-matched JSON) and -DJWT_NO_SHAPE_JSON (strict only).
  *   ./e2e tokens.json */
 #include "jwt.c"
 
@@ -61,13 +61,7 @@ int main(int argc, char **argv) {
     forged[tlen[0] - 2] = forged[tlen[0] - 2] == 'A' ? 'B' : 'A';
     const char *fp = forged;
     jwt_verify_batch(&k, 1, &fp, &tlen[0], now, res);
-#if defined(JWT_FAST_JSON)
-    const char *label = "cursed-jwt, simdjson-style JSON";
-#elif defined(JWT_LANE_JSON) && !defined(JWT_NO_SHAPE_JSON)
-    const char *label = "cursed-jwt, lanes + shape";
-#elif defined(JWT_LANE_JSON)
-    const char *label = "cursed-jwt, lanes + strict";
-#elif !defined(JWT_NO_SHAPE_JSON)
+#if !defined(JWT_NO_SHAPE_JSON)
     const char *label = "cursed-jwt, shape JSON (default)";
 #else
     const char *label = "cursed-jwt, strict JSON";
@@ -92,11 +86,9 @@ int main(int argc, char **argv) {
     jnow_init(&jn, now);
     int pl0 = 37;
     printf(
-        "pieces: sig b64 %.1f | payload b64 %.1f | +fast JSON %.1f | +strict JSON %.1f | +shape JSON %.1f | HMAC 8-batch %.1f ns/token\n",
+        "pieces: sig b64 %.1f | payload b64 %.1f | +strict JSON %.1f | +shape JSON %.1f | HMAC 8-batch %.1f ns/token\n",
         BEST(1, sink += jwt_b64url_decode(out, toks[i] + tlen[i] - 43, 43)),
         BEST(1, sink += jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0)),
-        BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
-             sink += payload_fast(out, pn, &jn, res)),
         BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
              sink += payload_check(out, pn, &jn, res)),
         BEST(1, int pn = jwt_b64url_decode(out, toks[i] + pl0, tlen[i] - 44 - pl0);
@@ -108,46 +100,5 @@ int main(int argc, char **argv) {
             BEST(8, for (int j = 0; j < 8; j++) m[j] = (const uint8_t *)toks[i + j], l[j] = tlen[i + j] - 44;
                  jwt_hmac_fn *h = hmac_default(); h(&k, 8, m, l, mac); sink += mac[0][0]);
         }));
-#ifdef JWT_HAVE_LANES
-    /* JSON only, on pre-decoded hot payloads: per-token cost by batch size */
-    {
-        enum { NP = 1024 };
-        static uint8_t dp[NP][320];
-        static const uint8_t *dpp[NP];
-        static int dn[NP];
-        for (int i = 0; i < NP; i++)
-            dn[i] = jwt_b64url_decode(dp[i], toks[i] + pl0, tlen[i] - 44 - pl0), dpp[i] = dp[i];
-        printf("JSON only ns/token, batch:         ");
-        for (int b = 0; b < 7; b++) printf("%7d", BS[b]);
-        const char *nm[3] = { "strict", "shape", "lanes" };
-        for (int kind = 0; kind < 3; kind++) {
-            printf("\n  %-32s", nm[kind]);
-            for (int b = 0; b < 7; b++) {
-                int B = BS[b] > JL ? JL : BS[b];
-                double best = 1e30;
-                for (int rep = 0; rep < 7; rep++) {
-                    double t0 = now_ns();
-                    long done = 0;
-                    for (int it = 0; it < 20; it++)
-                        for (int i = 0; i + B <= NP; i += B, done += B) {
-                            if (kind == 0)
-                                for (int j = 0; j < B; j++) sink += payload_check(dp[i + j], dn[i + j], &jn, res);
-                            else if (kind == 1)
-                                for (int j = 0; j < B; j++) sink += payload_shape(dp[i + j], dn[i + j], &jn, res);
-                            else {
-                                jlane_t o[JL];
-                                json_lanes(B, dpp + i, dn + i, o);
-                                for (int j = 0; j < B; j++) sink += json_lane_claims(dp[i + j], &o[j], &jn, res);
-                            }
-                        }
-                    double v = (now_ns() - t0) / done;
-                    if (v < best) best = v;
-                }
-                printf("%7.1f", best);
-            }
-        }
-        printf("\n");
-    }
-#endif
     return 0;
 }

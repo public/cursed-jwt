@@ -1,0 +1,12 @@
+# nginx module config: ./configure --add-dynamic-module=<this dir>  (or --add-module for a static build)
+# Run `make` here first: it builds build/libcursedjwt_nginx.a.  CURSED_JWT (the cursed-jwt tree, for include/) and
+# CURSED_JWT_LIB (the archive) default to this checkout.
+CURSED_JWT=${CURSED_JWT:-$ngx_addon_dir/../..}
+CURSED_JWT_LIB=${CURSED_JWT_LIB:-$ngx_addon_dir/build/libcursedjwt_nginx.a}
+ngx_addon_name=ngx_http_cursed_jwt_module
+ngx_module_type=HTTP
+ngx_module_name=ngx_http_cursed_jwt_module
+ngx_module_incs="$CURSED_JWT/include"
+ngx_module_srcs="$ngx_addon_dir/ngx_http_cursed_jwt_module.c"
+ngx_module_libs="$CURSED_JWT_LIB -lcrypto"
+. auto/module

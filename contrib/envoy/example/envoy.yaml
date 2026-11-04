@@ -1,0 +1,51 @@
+# A minimal Envoy v1.40 config with cjwt_authn in front of an upstream.  Run with libcjwt_authn.so in a directory
+# named by ENVOY_DYNAMIC_MODULES_SEARCH_PATH, e.g.
+#   ENVOY_DYNAMIC_MODULES_SEARCH_PATH=$PWD/build/x86_64 envoy -c example/envoy.yaml
+# Replace the issuer, audiences and JWKS with your identity provider's (the JWKS is inline: no fetching).
+static_resources:
+  listeners:
+    - name: main
+      address: { socket_address: { address: 0.0.0.0, port_value: 10000 } }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: main
+                route_config:
+                  virtual_hosts:
+                    - name: all
+                      domains: ["*"]
+                      routes: [{ match: { prefix: "/" }, route: { cluster: app } }]
+                http_filters:
+                  - name: envoy.filters.http.dynamic_modules
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+                      dynamic_module_config: { name: cjwt_authn }
+                      filter_name: cjwt
+                      filter_config:
+                        "@type": type.googleapis.com/google.protobuf.Struct
+                        value:
+                          issuer: https://auth.example.com/
+                          audiences: [https://api.example.com]
+                          forward_payload_header: x-jwt-payload
+                          clock_skew_seconds: 60
+                          jwks:
+                            keys:
+                              - kty: EC
+                                crv: P-256
+                                kid: es-2026-10
+                                alg: ES256
+                                x: f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU
+                                y: x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: app
+      type: STRICT_DNS
+      load_assignment:
+        cluster_name: app
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: 127.0.0.1, port_value: 8080 } } }
