@@ -9,7 +9,9 @@
 use core::arch::x86_64::*;
 
 use super::{CpuFeatures, Engine, Midstates};
-use crate::sha256::{self, drive, drive_x2, Group, Kernel, Plan, Simd, SHA_IV, X2};
+use crate::sha256::{
+    self, drive, drive_x2, Group, Kernel, Plan, Simd, K256, SHA_IV, X2, ZERO_BLOCK,
+};
 
 pub(crate) fn detect() -> u32 {
     #[cfg(cjwt_ossl)]
@@ -43,10 +45,20 @@ pub(crate) fn detect() -> u32 {
     if has!("bmi2", "adx") {
         f |= CpuFeatures::BMI2_ADX;
     }
-    if has!("sha") {
+    if has!("sha", "sse4.1", "ssse3") {
         f |= CpuFeatures::SHANI;
+        // every Zen has SHA-NI, and there 4 interleaved streams beat every vector engine at every batch size
+        // (the C library's measurements on Zen 2, 3 and 4); Intel's SHA-NI parts keep the vector engines
+        if is_amd() {
+            f |= CpuFeatures::FAST_SHANI;
+        }
     }
     f
+}
+
+fn is_amd() -> bool {
+    let v = __cpuid(0);
+    v.ebx == 0x6874_7541 && v.edx == 0x6974_6e65 && v.ecx == 0x444d_4163 // "AuthenticAMD"
 }
 
 /// AMD Zen 4 (family 19h) and later run 512-bit integer work without a frequency-licence drop.
@@ -70,6 +82,7 @@ pub(crate) fn available(e: Engine, f: CpuFeatures) -> bool {
         Engine::Avx512 | Engine::Avx512x2 | Engine::Zmm => {
             f.has(CpuFeatures::AVX2 | CpuFeatures::AVX512VL)
         }
+        Engine::ShaNi | Engine::ShaNix1 | Engine::ShaNix2 => f.has(CpuFeatures::SHANI),
         _ => false,
     }
 }
@@ -596,6 +609,12 @@ pub(crate) fn hmac(e: Engine, k: &Midstates, msgs: &[&[u8]], out: &mut [[u32; 8]
             drive_x2::<KAvx512x2, KAvx512, MIN_LANES>(KAvx512x2(()), KAvx512(()), k, msgs, out)
         }
         Engine::Zmm => drive_x2::<KZmm, KAvx512, MIN_LANES>(KZmm(()), KAvx512(()), k, msgs, out),
+        // SAFETY: `available` checked the SHA extensions, SSE4.1 and SSSE3, which the drivers enable.
+        Engine::ShaNi => unsafe { ni_drive::<4, false>(k, msgs, out) },
+        // SAFETY: as above.
+        Engine::ShaNix2 => unsafe { ni_drive::<2, false>(k, msgs, out) },
+        // SAFETY: as above.
+        Engine::ShaNix1 => unsafe { ni_drive::<1, false>(k, msgs, out) },
         _ => return false,
     }
     true
@@ -614,9 +633,198 @@ pub(crate) fn sha256(e: Engine, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
         Engine::Avx512 | Engine::Avx512x2 | Engine::Zmm => {
             drive::<KAvx512, 8, true, MIN_LANES>(KAvx512(()), &SHA_IV, msgs, out)
         }
+        // SAFETY: as in `hmac`.
+        Engine::ShaNi | Engine::ShaNix1 | Engine::ShaNix2 => unsafe {
+            ni_drive::<4, true>(&SHA_IV, msgs, out)
+        },
         _ => return false,
     }
     true
+}
+
+// ---- SHA-NI: S independent streams interleaved for latency hiding (the ARM SHA2 engine's layout) ----
+// The state lives as ABEF / CDGH, the order sha256rnds2 wants; ni_ld / ni_st convert from and to h0..h7.
+
+#[inline(always)]
+fn ni_ld(h: &[u32; 8]) -> (__m128i, __m128i) {
+    let (c, _) = h.as_chunks::<4>();
+    // SAFETY: each _mm_loadu_si128 reads 16 bytes, exactly one referenced [u32; 4]; the rest are register-only
+    // SSE4.1 / SSSE3 shuffles, and this is only reached from the SHA-NI functions, which enable them.
+    unsafe {
+        let t = _mm_shuffle_epi32::<0xB1>(_mm_loadu_si128(c[0].as_ptr().cast())); // CDAB
+        let u = _mm_shuffle_epi32::<0x1B>(_mm_loadu_si128(c[1].as_ptr().cast())); // EFGH
+        (_mm_alignr_epi8::<8>(t, u), _mm_blend_epi16::<0xF0>(u, t))
+    }
+}
+
+#[inline(always)]
+fn ni_st(abef: __m128i, cdgh: __m128i, h: &mut [u32; 8]) {
+    let (c, _) = h.as_chunks_mut::<4>();
+    let (lo, hi) = c.split_at_mut(1);
+    // SAFETY: each _mm_storeu_si128 writes 16 bytes, exactly one referenced [u32; 4]; the rest as in `ni_ld`.
+    unsafe {
+        let t = _mm_shuffle_epi32::<0x1B>(abef); // FEBA
+        let u = _mm_shuffle_epi32::<0xB1>(cdgh); // DCHG
+        _mm_storeu_si128(lo[0].as_mut_ptr().cast(), _mm_blend_epi16::<0xF0>(t, u)); // DCBA
+        _mm_storeu_si128(hi[0].as_mut_ptr().cast(), _mm_alignr_epi8::<8>(u, t));
+        // HGFE
+    }
+}
+
+#[inline(always)]
+fn ni_k4(r: usize) -> __m128i {
+    let (k, _) = K256.as_chunks::<4>();
+    // SAFETY: _mm_loadu_si128 reads 16 bytes, the referenced [u32; 4].
+    unsafe { _mm_loadu_si128(k[r & 15].as_ptr().cast()) }
+}
+
+/// 64 rounds on S streams; m[s] holds stream s's 16 message words.  Unrolled by a macro and inlined into
+/// `ni_lanes`, its only caller, so the message words stay in registers.
+#[inline(always)]
+fn ni_compress<const S: usize>(
+    st0: &mut [__m128i; S],
+    st1: &mut [__m128i; S],
+    m: &mut [[__m128i; 4]; S],
+) {
+    let (a0, a1) = (*st0, *st1);
+    macro_rules! quad {
+        ($r:expr, $sched:expr) => {{
+            let kr = ni_k4($r);
+            for s in 0..S {
+                // SAFETY: register-only SHA / SSE intrinsics; only called from `ni_lanes`, which enables
+                // sha, sse4.1 and ssse3 and runs after the CPU check.
+                unsafe {
+                    let wk = _mm_add_epi32(m[s][$r & 3], kr);
+                    st1[s] = _mm_sha256rnds2_epu32(st1[s], st0[s], wk);
+                    st0[s] = _mm_sha256rnds2_epu32(st0[s], st1[s], _mm_shuffle_epi32::<0x0E>(wk));
+                    if $sched {
+                        // W[4(r+4)..] from the last four groups: msg1, + W[t-7] (alignr), msg2
+                        let w = _mm_sha256msg1_epu32(m[s][$r & 3], m[s][($r + 1) & 3]);
+                        let w = _mm_add_epi32(w, _mm_alignr_epi8::<4>(m[s][($r + 3) & 3], m[s][($r + 2) & 3]));
+                        m[s][$r & 3] = _mm_sha256msg2_epu32(w, m[s][($r + 3) & 3]);
+                    }
+                }
+            }
+        }};
+    }
+    quad!(0, true);
+    quad!(1, true);
+    quad!(2, true);
+    quad!(3, true);
+    quad!(4, true);
+    quad!(5, true);
+    quad!(6, true);
+    quad!(7, true);
+    quad!(8, true);
+    quad!(9, true);
+    quad!(10, true);
+    quad!(11, true);
+    quad!(12, false);
+    quad!(13, false);
+    quad!(14, false);
+    quad!(15, false);
+    for s in 0..S {
+        // SAFETY: register-only SSE2 adds.
+        unsafe {
+            st0[s] = _mm_add_epi32(st0[s], a0[s]);
+            st1[s] = _mm_add_epi32(st1[s], a1[s]);
+        }
+    }
+}
+
+/// S plans with the same block count; RAW: plain SHA-256 (no outer hash).
+#[inline]
+#[target_feature(enable = "sha,sse4.1,ssse3")]
+fn ni_lanes<const S: usize, const RAW: bool>(
+    k: &Midstates,
+    p: [&Plan<'_>; S],
+    out: &mut [[u32; 8]; S],
+) {
+    let bswap = _mm_set_epi64x(0x0c0d_0e0f_0809_0a0b, 0x0405_0607_0001_0203);
+    let (ih0, ih1) = ni_ld(&k.ih);
+    let mut st0 = [ih0; S];
+    let mut st1 = [ih1; S];
+    let mut tails = [[0u8; 128]; S];
+    for s in 0..S {
+        p[s].tail(&mut tails[s]);
+    }
+    let full = p.map(|q| q.m.as_chunks::<64>().0);
+    let mut m = [[ih0; 4]; S];
+    for b in 0..p[0].nb as usize {
+        for s in 0..S {
+            let blk = match full[s].get(b) {
+                Some(x) => x,
+                None => tails[s]
+                    .as_chunks::<64>()
+                    .0
+                    .get(b - full[s].len())
+                    .unwrap_or(&ZERO_BLOCK),
+            };
+            let (c, _) = blk.as_chunks::<16>();
+            // SAFETY: each _mm_loadu_si128 reads 16 bytes, exactly one referenced [u8; 16] (a 64-byte block
+            // has four); the shuffle is SSSE3, which this function enables.
+            let ld = |j: usize| unsafe {
+                _mm_shuffle_epi8(_mm_loadu_si128(c[j].as_ptr().cast()), bswap)
+            };
+            m[s] = [ld(0), ld(1), ld(2), ld(3)];
+        }
+        ni_compress::<S>(&mut st0, &mut st1, &mut m);
+    }
+    if !RAW {
+        let (oh0, oh1) = ni_ld(&k.oh);
+        for s in 0..S {
+            let mut d = [0u32; 8];
+            ni_st(st0[s], st1[s], &mut d);
+            let (lo, hi) = ni_ld_plain(&d);
+            m[s] = [
+                lo,
+                hi,
+                _mm_set_epi32(0, 0, 0, 0x8000_0000u32 as i32),
+                _mm_set_epi32((64 + 32) * 8, 0, 0, 0),
+            ];
+            st0[s] = oh0;
+            st1[s] = oh1;
+        }
+        ni_compress::<S>(&mut st0, &mut st1, &mut m);
+    }
+    for s in 0..S {
+        ni_st(st0[s], st1[s], &mut out[s]);
+    }
+}
+
+/// h0..h3 and h4..h7 as message words (the inner digest is the outer hash's W0..W7).
+#[inline(always)]
+fn ni_ld_plain(d: &[u32; 8]) -> (__m128i, __m128i) {
+    let (c, _) = d.as_chunks::<4>();
+    // SAFETY: each _mm_loadu_si128 reads 16 bytes, exactly one referenced [u32; 4].
+    unsafe {
+        (
+            _mm_loadu_si128(c[0].as_ptr().cast()),
+            _mm_loadu_si128(c[1].as_ptr().cast()),
+        )
+    }
+}
+
+/// The SHA-NI engine's token: exists only after the CPU check (made in `hmac` / `sha256`).
+#[derive(Clone, Copy)]
+struct KNi(());
+
+impl sha256::Streams for KNi {
+    #[inline(always)]
+    fn run<const S: usize, const RAW: bool>(
+        self,
+        k: &Midstates,
+        p: [&Plan<'_>; S],
+        out: &mut [[u32; 8]; S],
+    ) {
+        // SAFETY: a KNi exists only after the CPU was checked for SHA, SSE4.1 and SSSE3.
+        unsafe { ni_lanes::<S, RAW>(k, p, out) }
+    }
+}
+
+#[target_feature(enable = "sha,sse4.1,ssse3")]
+fn ni_drive<const S: usize, const RAW: bool>(k: &Midstates, msgs: &[&[u8]], mac: &mut [[u32; 8]]) {
+    sha256::drive_streams::<KNi, S, RAW>(KNi(()), k, msgs, mac)
 }
 
 // ---- base64url: 32 chars -> 24 bytes per step (Mula/Lemire packing; base64url via range compares) ----

@@ -641,3 +641,93 @@ pub(crate) fn drive_x2<K16: Kernel<16>, K8: Kernel<8>, const MIN8: usize>(
         }
     }
 }
+
+/// An instruction-set SHA-256 engine (ARMv8 SHA2, x86 SHA-NI) that hashes `S` messages with the same block count
+/// in interleaved streams.  Implemented by zero-sized tokens that exist only once the CPU has been checked.
+#[cfg_attr(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    allow(dead_code)
+)]
+pub(crate) trait Streams: Copy {
+    fn run<const S: usize, const RAW: bool>(
+        self,
+        k: &Midstates,
+        p: [&Plan<'_>; S],
+        out: &mut [[u32; 8]; S],
+    );
+}
+
+/// The stream engines' driver: plans sorted by block count, groups of up to `S` (1, 2 or 4) that share a block
+/// count, each with a constant stream count so the engine fully specialises.
+#[inline(always)]
+#[cfg_attr(
+    not(any(target_arch = "x86_64", target_arch = "aarch64")),
+    allow(dead_code)
+)]
+pub(crate) fn drive_streams<E: Streams, const S: usize, const RAW: bool>(
+    e: E,
+    k: &Midstates,
+    msgs: &[&[u8]],
+    mac: &mut [[u32; 8]],
+) {
+    let off = if RAW { 0 } else { 64 };
+    if let ([m], [o]) = (msgs, &mut *mac) {
+        let mut w = [[0u32; 8]; 1];
+        e.run::<1, RAW>(k, [&Plan::new(m, off)], &mut w);
+        *o = w[0];
+        return;
+    }
+    for (mc, oc) in msgs.chunks(CH).zip(mac.chunks_mut(CH)) {
+        let mut plans = [Plan::EMPTY; CH];
+        for (p, m) in plans.iter_mut().zip(mc) {
+            *p = Plan::new(m, off);
+        }
+        let plans = &plans[..mc.len()];
+        let mut idx = [0u8; CH];
+        sort_by_nb(plans, &mut idx);
+        let idx = &idx[..mc.len()];
+        let mut g = 0;
+        while g < idx.len() {
+            let mut s = S.min(idx.len() - g);
+            let nb0 = plans[idx[g] as usize].nb;
+            for i in 1..s {
+                if plans[idx[g + i] as usize].nb != nb0 {
+                    s = i;
+                    break;
+                }
+            }
+            let pl = |i: usize| &plans[idx[g + i] as usize];
+            let mut put = |i: usize, w: &[u32; 8]| {
+                if let Some(o) = oc.get_mut(idx[g + i] as usize) {
+                    *o = *w;
+                }
+            };
+            match s {
+                4 => {
+                    let mut o = [[0u32; 8]; 4];
+                    e.run::<4, RAW>(k, [pl(0), pl(1), pl(2), pl(3)], &mut o);
+                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
+                }
+                3 => {
+                    let mut o = [[0u32; 8]; 2];
+                    e.run::<2, RAW>(k, [pl(0), pl(1)], &mut o);
+                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
+                    let mut o = [[0u32; 8]; 1];
+                    e.run::<1, RAW>(k, [pl(2)], &mut o);
+                    put(2, &o[0]);
+                }
+                2 => {
+                    let mut o = [[0u32; 8]; 2];
+                    e.run::<2, RAW>(k, [pl(0), pl(1)], &mut o);
+                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
+                }
+                _ => {
+                    let mut o = [[0u32; 8]; 1];
+                    e.run::<1, RAW>(k, [pl(0)], &mut o);
+                    put(0, &o[0]);
+                }
+            }
+            g += s;
+        }
+    }
+}

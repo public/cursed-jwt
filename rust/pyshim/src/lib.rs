@@ -74,6 +74,9 @@ pub extern "C" fn jt_engine_name(i: c_int) -> *const c_char {
         c"avx512vl",
         c"avx512x2",
         c"zmm",
+        c"shani",
+        c"shanix1",
+        c"shanix2",
     ];
     match engines().get(i as usize) {
         Some(None) => names[0].as_ptr(),

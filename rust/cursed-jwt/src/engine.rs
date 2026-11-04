@@ -29,6 +29,8 @@ impl CpuFeatures {
     pub const SHA512: u32 = 64;
     /// x86-64: 512-bit vectors cost no clock speed (AMD Zen 4 / 5), so the 16-lane zmm engine is the default.
     pub const FAST_ZMM: u32 = 128;
+    /// x86-64: SHA-NI that beats the vector engines (AMD Zen), so the 4-stream SHA-NI engine is the default.
+    pub const FAST_SHANI: u32 = 256;
     const DETECTED: u32 = 1 << 31;
 
     /// The features of this CPU, detected once.  With the `std` feature, the environment variable
@@ -111,11 +113,17 @@ pub enum Engine {
     Avx512x2,
     /// x86-64 AVX-512 on 512-bit registers, 16 lanes (the default only where zmm costs no clock speed).
     Zmm,
+    /// x86-64 SHA extensions, 4 interleaved streams (the default on AMD Zen).
+    ShaNi,
+    /// x86-64 SHA extensions, one stream at a time.
+    ShaNix1,
+    /// x86-64 SHA extensions, 2 interleaved streams.
+    ShaNix2,
 }
 
 impl Engine {
     /// Every engine, available or not.
-    pub const ALL: [Engine; 10] = [
+    pub const ALL: [Engine; 13] = [
         Engine::Scalar,
         Engine::Neon,
         Engine::Sha2,
@@ -126,6 +134,9 @@ impl Engine {
         Engine::Avx512,
         Engine::Avx512x2,
         Engine::Zmm,
+        Engine::ShaNi,
+        Engine::ShaNix1,
+        Engine::ShaNix2,
     ];
 
     /// Whether this CPU (and this build's target) can run the engine.
@@ -133,19 +144,22 @@ impl Engine {
         arch::available(self, CpuFeatures::get())
     }
 
-    /// The engine [`crate::Hs256Key::verify_batch`] uses: AVX-512VL (or zmm on AMD Zen 4/5), then AVX2, then
-    /// scalar on x86-64; SHA2 instructions, then NEON on AArch64.
+    /// The engine [`crate::Hs256Key::verify_batch`] uses: SHA-NI on AMD, then AVX-512VL (or zmm on AMD Zen 4/5),
+    /// then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.
     pub fn best() -> Engine {
         let f = CpuFeatures::get();
         let order = [
             Engine::Sha2,
+            Engine::ShaNi,
             Engine::Zmm,
             Engine::Avx512,
             Engine::Avx2,
             Engine::Neon,
         ];
         for e in order {
-            if e == Engine::Zmm && !f.has(CpuFeatures::FAST_ZMM) {
+            if (e == Engine::Zmm && !f.has(CpuFeatures::FAST_ZMM))
+                || (e == Engine::ShaNi && !f.has(CpuFeatures::FAST_SHANI))
+            {
                 continue;
             }
             if arch::available(e, f) {
@@ -168,6 +182,9 @@ impl Engine {
             Engine::Avx512 => "avx512vl",
             Engine::Avx512x2 => "avx512x2",
             Engine::Zmm => "zmm",
+            Engine::ShaNi => "shani",
+            Engine::ShaNix1 => "shanix1",
+            Engine::ShaNix2 => "shanix2",
         }
     }
 

@@ -6,7 +6,7 @@
 use core::arch::aarch64::*;
 
 use super::{CpuFeatures, Engine, Midstates};
-use crate::sha256::{self, Plan, Simd, CH, K256, SHA_IV, ZERO_BLOCK};
+use crate::sha256::{self, Plan, Simd, K256, SHA_IV, ZERO_BLOCK};
 
 pub(crate) fn detect() -> u32 {
     let mut f = 0;
@@ -321,70 +321,27 @@ fn ld4(x: &[u32]) -> uint32x4_t {
     unsafe { vld1q_u32(a.as_ptr()) }
 }
 
-/// The SHA2 driver: plans sorted by block count, groups of up to S that share a block count.
+/// The SHA2 engine's token: exists only after the CPU check for the SHA2 instructions (made in `hmac` / `sha256`).
+#[derive(Clone, Copy)]
+struct KCe(());
+
+impl sha256::Streams for KCe {
+    #[inline(always)]
+    fn run<const S: usize, const RAW: bool>(
+        self,
+        k: &Midstates,
+        p: [&Plan<'_>; S],
+        out: &mut [[u32; 8]; S],
+    ) {
+        // SAFETY: a KCe exists only after the CPU was checked for the SHA2 instructions.
+        unsafe { ce_lanes::<S, RAW>(k, p, out) }
+    }
+}
+
+/// The SHA2 driver, compiled with the instructions enabled so the per-group calls stay cheap.
 #[target_feature(enable = "sha2")]
 fn ce_drive<const S: usize, const RAW: bool>(k: &Midstates, msgs: &[&[u8]], mac: &mut [[u32; 8]]) {
-    let off = if RAW { 0 } else { 64 };
-    if let ([m], [o]) = (msgs, &mut *mac) {
-        let mut w = [[0u32; 8]; 1];
-        ce_lanes::<1, RAW>(k, [&Plan::new(m, off)], &mut w);
-        *o = w[0];
-        return;
-    }
-    for (mc, oc) in msgs.chunks(CH).zip(mac.chunks_mut(CH)) {
-        let mut plans = [Plan::EMPTY; CH];
-        for (p, m) in plans.iter_mut().zip(mc) {
-            *p = Plan::new(m, off);
-        }
-        let plans = &plans[..mc.len()];
-        let mut idx = [0u8; CH];
-        sha256::sort_by_nb(plans, &mut idx);
-        let idx = &idx[..mc.len()];
-        let mut g = 0;
-        while g < idx.len() {
-            let mut s = S.min(idx.len() - g);
-            let nb0 = plans[idx[g] as usize].nb;
-            for i in 1..s {
-                if plans[idx[g + i] as usize].nb != nb0 {
-                    s = i;
-                    break;
-                }
-            }
-            let pl = |i: usize| &plans[idx[g + i] as usize];
-            let mut put = |i: usize, w: &[u32; 8]| {
-                if let Some(o) = oc.get_mut(idx[g + i] as usize) {
-                    *o = *w;
-                }
-            };
-            // a constant stream count per call, so ce_lanes fully specialises
-            match s {
-                4 => {
-                    let mut o = [[0u32; 8]; 4];
-                    ce_lanes::<4, RAW>(k, [pl(0), pl(1), pl(2), pl(3)], &mut o);
-                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
-                }
-                3 => {
-                    let mut o = [[0u32; 8]; 2];
-                    ce_lanes::<2, RAW>(k, [pl(0), pl(1)], &mut o);
-                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
-                    let mut o = [[0u32; 8]; 1];
-                    ce_lanes::<1, RAW>(k, [pl(2)], &mut o);
-                    put(2, &o[0]);
-                }
-                2 => {
-                    let mut o = [[0u32; 8]; 2];
-                    ce_lanes::<2, RAW>(k, [pl(0), pl(1)], &mut o);
-                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
-                }
-                _ => {
-                    let mut o = [[0u32; 8]; 1];
-                    ce_lanes::<1, RAW>(k, [pl(0)], &mut o);
-                    put(0, &o[0]);
-                }
-            }
-            g += s;
-        }
-    }
+    sha256::drive_streams::<KCe, S, RAW>(KCe(()), k, msgs, mac)
 }
 
 pub(crate) fn hmac(e: Engine, k: &Midstates, msgs: &[&[u8]], out: &mut [[u32; 8]]) -> bool {
