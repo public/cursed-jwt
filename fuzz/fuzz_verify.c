@@ -6,7 +6,7 @@
  * Oracles (any mismatch aborts):
  *   - every engine, on the whole batch and on each token alone, gives identical results (status, uid, username,
  *     escape flag);
- *   - the shape matcher and the simdjson-style fast path agree with the strict parser whenever they answer;
+ *   - the shape matcher agrees with the strict parser whenever it answers;
  *   - on JWT_OK: uid >= 1, username_len <= JWT_USERNAME_MAX, ubuf NUL-terminated at username_len;
  *   - ASan / UBSan find nothing.
  * Build: make fuzz (clang with -fsanitize=fuzzer); without libFuzzer, fuzz/replay.c runs a corpus through it. */
@@ -79,19 +79,14 @@ static void json_oracle(const char *t, int L, const jnow_t *jn) {
     int pn = jwt_b64url_decode(pb, d1 + 1, pl);
     if (pn < 0) return;
     memset(pb + pn, 0, 64); /* the slack the real call sites have */
-    jwt_result_t rs, rp, rf;
-    memset(&rs, 0, sizeof rs), memset(&rp, 0, sizeof rp), memset(&rf, 0, sizeof rf);
-    rs.username = rs.ubuf, rp.username = rp.ubuf, rf.username = rf.ubuf;
+    jwt_result_t rs, rp;
+    memset(&rs, 0, sizeof rs), memset(&rp, 0, sizeof rp);
+    rs.username = rs.ubuf, rp.username = rp.ubuf;
     rs.status = (uint8_t)payload_check(pb, pn, jn, &rs);
     int sp = payload_shape(pb, pn, jn, &rp);
     if (sp >= 0) {
         rp.status = (uint8_t)sp;
         FZ_ASSERT(same(&rp, &rs), "shape %d vs strict %d on %.*s", sp, rs.status, pn, (const char *)pb);
-    }
-    int sf = payload_fast(pb, pn, jn, &rf);
-    if (sf >= 0) {
-        rf.status = (uint8_t)sf;
-        FZ_ASSERT(same(&rf, &rs), "fast %d vs strict %d on %.*s", sf, rs.status, pn, (const char *)pb);
     }
 }
 

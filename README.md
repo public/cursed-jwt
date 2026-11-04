@@ -183,8 +183,8 @@ key's algorithm; the rest is identical.
     and falls back to the strict parser (131 ns) for anything else;
   - SWAR integer parsing;
   - `exp`/`nbf` are compared with `now` by digit count, then bytewise, with no number conversion.
-- **Identical results either way.** The shape matcher and the opt-in simdjson-style path both defer to the strict
-  parser on anything unusual. The tests fuzz each against it.
+- **Identical results either way.** The shape matcher defers to the strict parser on anything unusual. The tests
+  fuzz it against the strict parser.
 - **RS256 / ES256** don't batch like HMAC: SIMD across tokens would need AVX-512 IFMA. Instead:
   - ES256 precomputes comb tables for the public key at key setup, so a verify is two fixed-base multiplications.
   - RS256 can check a whole batch with one exponentiation ("screening"), which is opt-in because of a caveat.
@@ -236,8 +236,6 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 |---|---|
 | `-DJWT_INPUT_PADDED` | every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads |
 | `-DJWT_NO_SHAPE_JSON` | strict parser only |
-| `-DJWT_FAST_JSON` | the simdjson-style path (3–4% slower on a Xeon) |
-| `-DJWT_LANE_JSON` | lane-parallel JSON, which only pays at batch ≥ 32 |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `src/fiat/`) |
 | `-DJWT_S2N` | s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
@@ -355,7 +353,7 @@ Two generators look for cases nobody wrote down.
 
 | harness | oracle |
 |---|---|
-| `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher and the simdjson-style path agree with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
+| `fuzz_verify` | every engine, on the whole batch and on each token alone, gives identical results; the shape matcher agrees with the strict parser; JWT_OK results are well-formed. A config bit re-signs tokens with OpenSSL, so inputs reach the JSON and claims code |
 | `fuzz_b64` | SIMD and scalar base64url decoders agree with an RFC 4648 reference written in the harness |
 | `fuzz_pk` | mutated real ES256/RS256/EdDSA signatures (byte flips; the other valid s and r or s at 0/1/n−1/n/n+1 for ES256; S + L and R's sign bit for EdDSA) get OpenSSL's verdict, alone and among valid fillers in a batch; built as portable C, with screening and with libcrypto BN |
 
@@ -519,5 +517,5 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 MIT, see [LICENSE](LICENSE).
 - The one vendored file, `src/sha256_x86_64_ossl.S`, is OpenSSL's, under Apache-2.0
   ([licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)).
-- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques (simdjson,
-  cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).
+- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques
+  (cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).
