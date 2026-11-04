@@ -77,7 +77,6 @@ int main(void) {
         { "scalar", jwt_hmac_scalar, 0 },
         { "avx2 ymm x8", jwt_hmac_avx2, 0 },
         { "avx512vl ymm x8 (default)", jwt_hmac_avx512, 0 },
-        { "avx512vl 2x ymm x16", jwt_hmac_avx512x2, 0 },
         { "zmm x16", jwt_hmac_zmm, 0 },
         { "zmm x16, then 200us scalar", jwt_hmac_zmm, 200 },
         { "zmm x16, then 500us scalar", jwt_hmac_zmm, 500 },

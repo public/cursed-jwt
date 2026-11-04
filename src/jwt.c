@@ -505,10 +505,6 @@ JWT_BEGIN_AVX512
 #undef VCH
 #undef VMAJ
 #undef VSEL
-JWT_END_TARGET
-JWT_BEGIN_AVX2
-#endif
-
 #undef MB_LANES
 #undef V
 #undef VSET1
@@ -520,144 +516,15 @@ JWT_BEGIN_AVX2
 #undef MB_STORE8
 #undef MB_MIN_LANES
 
-/* ---- 16 lanes as two interleaved ymm groups ----
- * One 8-lane compress is latency-bound on Skylake-SP (llvm-mca: ~820 cycles vs ~585 of port
- * pressure), so give the scheduler two independent dependency chains.  With AVX-512VL there are
- * 32 ymm registers to hold both; with plain AVX2 (16 registers) it spills. */
-typedef struct {
-    __m256i a, b;
-} v2_t;
-#define V2OP1(name, expr)                                                                                              \
-    JWT_INLINE v2_t name(v2_t x) {                                                                                     \
-        v2_t r;                                                                                                        \
-        r.a = expr(x.a), r.b = expr(x.b);                                                                              \
-        return r;                                                                                                      \
-    }
-#define V2OP2(name, expr)                                                                                              \
-    JWT_INLINE v2_t name(v2_t x, v2_t y) {                                                                             \
-        v2_t r;                                                                                                        \
-        r.a = expr(x.a, y.a), r.b = expr(x.b, y.b);                                                                    \
-        return r;                                                                                                      \
-    }
-#define V2OP3(name, expr)                                                                                              \
-    JWT_INLINE v2_t name(v2_t x, v2_t y, v2_t z) {                                                                     \
-        v2_t r;                                                                                                        \
-        r.a = expr(x.a, y.a, z.a), r.b = expr(x.b, y.b, z.b);                                                          \
-        return r;                                                                                                      \
-    }
-JWT_INLINE v2_t v2_set1(uint32_t x) {
-    v2_t r;
-    r.a = r.b = _mm256_set1_epi32((int)x);
-    return r;
-}
-#define A2_ADD(x, y) _mm256_add_epi32(x, y)
-#define A2_XOR(x, y) _mm256_xor_si256(x, y)
-V2OP2(v2_add, A2_ADD)
-V2OP2(v2_xor, A2_XOR)
-#define MB_LANES   16
-#define V          v2_t
-#define VSET1(x)   v2_set1(x)
-#define VADD(a, b) v2_add(a, b)
-#define VXOR(a, b) v2_xor(a, b)
-#define VSHR(x, n) ((v2_t){ _mm256_srli_epi32((x).a, n), _mm256_srli_epi32((x).b, n) })
-#define VMASK(arr)                                                                                                     \
-    ((v2_t){ _mm256_loadu_si256((const __m256i *)(arr)), _mm256_loadu_si256((const __m256i *)(arr) + 1) })
-#define MB_LOAD16(ptr, w)                                                                                              \
-    do {                                                                                                               \
-        __m256i r_[8], o_[16], bs_ = AVX_BSWAP32;                                                                      \
-        for (int g_ = 0; g_ < 2; g_++) {                                                                               \
-            for (int h_ = 0; h_ < 2; h_++) {                                                                           \
-                for (int l_ = 0; l_ < 8; l_++)                                                                         \
-                    r_[l_] =                                                                                           \
-                        _mm256_shuffle_epi8(_mm256_loadu_si256((const __m256i *)((ptr)[8 * g_ + l_] + 32 * h_)), bs_); \
-                avx2_tr8(r_, o_ + 8 * h_);                                                                             \
-            }                                                                                                          \
-            for (int i_ = 0; i_ < 16; i_++) {                                                                          \
-                if (g_) (w)[i_].b = o_[i_];                                                                            \
-                else (w)[i_].a = o_[i_];                                                                               \
-            }                                                                                                          \
-        }                                                                                                              \
-    } while (0)
-#define MB_STORE8(s, out)                                                                                              \
-    do {                                                                                                               \
-        __m256i i_[8], o_[8];                                                                                          \
-        for (int g_ = 0; g_ < 2; g_++) {                                                                               \
-            for (int j_ = 0; j_ < 8; j_++) i_[j_] = g_ ? (s)[j_].b : (s)[j_].a;                                        \
-            avx2_tr8(i_, o_);                                                                                          \
-            for (int l_ = 0; l_ < 8; l_++) _mm256_storeu_si256((__m256i *)(out)[8 * g_ + l_], o_[l_]);                 \
-        }                                                                                                              \
-    } while (0)
-#ifndef JWT_AVX2X_MIN_LANES
-#define JWT_AVX2X_MIN_LANES 9 /* <= 8 live lanes: a single 8-lane group is cheaper */
-#endif
-#define MB_MIN_LANES 1 /* the driver below routes small groups itself */
-#define MB_NO_DRIVER
-
-#define A2_ROR(x, n)     _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
-#define A2_XOR3(x, y, z) _mm256_xor_si256(_mm256_xor_si256(x, y), z)
-#define A2_CH(e, f, g)   _mm256_xor_si256(g, _mm256_and_si256(e, _mm256_xor_si256(f, g)))
-#define A2_MAJ(a, b, c)  _mm256_xor_si256(b, _mm256_and_si256(_mm256_xor_si256(a, b), _mm256_xor_si256(b, c)))
-#define A2_SEL(m, x, y)  _mm256_blendv_epi8(y, x, m)
-V2OP3(v2_xor3_avx2, A2_XOR3)
-V2OP3(v2_ch_avx2, A2_CH)
-V2OP3(v2_maj_avx2, A2_MAJ)
-V2OP3(v2_sel_avx2, A2_SEL)
-#define MB(name)       name##_avx2x2
-#define VROR(x, n)     ((v2_t){ A2_ROR((x).a, n), A2_ROR((x).b, n) })
-#define VXOR3(a, b, c) v2_xor3_avx2(a, b, c)
-#define VCH(e, f, g)   v2_ch_avx2(e, f, g)
-#define VMAJ(a, b, c)  v2_maj_avx2(a, b, c)
-#define VSEL(m, x, y)  v2_sel_avx2(m, x, y)
-#include "jwt_mb.inc"
-#undef MB
-#undef VROR
-#undef VXOR3
-#undef VCH
-#undef VMAJ
-#undef VSEL
-
-#if 1 /* AVX-512VL, compiled in its own target region */
-JWT_END_TARGET
-JWT_BEGIN_AVX512
-#define T2_XOR3(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_XOR3)
-#define T2_CH(x, y, z)   _mm256_ternarylogic_epi32(x, y, z, JWT_TL_CH)
-#define T2_MAJ(x, y, z)  _mm256_ternarylogic_epi32(x, y, z, JWT_TL_MAJ)
-V2OP3(v2_xor3_512, T2_XOR3)
-V2OP3(v2_ch_512, T2_CH)
-V2OP3(v2_maj_512, T2_MAJ)
-#define MB(name)       name##_avx512x2
-#define VROR(x, n)     ((v2_t){ _mm256_ror_epi32((x).a, n), _mm256_ror_epi32((x).b, n) })
-#define VXOR3(a, b, c) v2_xor3_512(a, b, c)
-#define VCH(e, f, g)   v2_ch_512(e, f, g)
-#define VMAJ(a, b, c)  v2_maj_512(a, b, c)
-#define VSEL(m, x, y)  v2_ch_512(m, x, y)
-#include "jwt_mb.inc"
-#undef MB
-#undef VROR
-#undef VXOR3
-#undef VCH
-#undef VMAJ
-#undef VSEL
+/* driver for the zmm engine: full 16-groups go to zmm, smaller ones to the 8-lane engine, or one at a time below 2.
+ * It stays out of the AVX-512 region, calls both engines through pointers and is never inlined: merged into one
+ * function with the zmm code, a batch of 8 ran 19% slower on a Xeon Platinum 8260 (512-bit frequency licence). */
 JWT_END_TARGET
 JWT_BEGIN_AVX2
-#endif
-#undef MB_NO_DRIVER
-#undef MB_LANES
-#undef V
-#undef VSET1
-#undef VADD
-#undef VXOR
-#undef VSHR
-#undef VMASK
-#undef MB_LOAD16
-#undef MB_STORE8
-#undef MB_MIN_LANES
-
-/* driver for the 16-lane flavours: full 16-groups go 2x8 interleaved, the rest to the 8-lane engine */
 typedef void lanes_fn(const jwt_key_t *, int, const hplan_t *const *, uint32_t (*)[8]);
-static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                     uint32_t (*mac)[8]) {
-    enum { CH = 64 };
+__attribute__((noinline)) static void zmm_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n,
+                                                const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    enum { CH = 64, ZMM_MIN = 9 }; /* <= 8 live lanes: a single 8-lane group is cheaper */
     hplan_t plan[CH];
     const hplan_t *pp[CH];
     uint32_t tmp[16][8];
@@ -672,7 +539,7 @@ static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, con
         }
         for (int g = 0; g < m;) {
             int nl = m - g;
-            if (nl >= JWT_AVX2X_MIN_LANES) {
+            if (nl >= ZMM_MIN) {
                 if (nl > 16) nl = 16;
                 l16(k, nl, &pp[g], tmp);
             } else {
@@ -688,15 +555,8 @@ static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, con
         }
     }
 }
-void jwt_hmac_avx2x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    x2_drive(lanes_avx2x2, lanes_avx2, k, n, msg, len, mac);
-}
-#if 1 /* AVX-512VL, compiled in its own target region */
 JWT_END_TARGET
 JWT_BEGIN_AVX512
-void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    x2_drive(lanes_avx512x2, lanes_avx512, k, n, msg, len, mac);
-}
 
 /* ---- zmm, 16 lanes: NOT the default.  Fewest cycles per lane, but heavy 512-bit integer work can
  * drop the core's frequency licence for everything that runs after it; bench/licence_probe.c measures
@@ -757,7 +617,7 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 #undef MB_STORE8
 #undef MB_MIN_LANES
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    x2_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
+    zmm_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
 JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 #endif
