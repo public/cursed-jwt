@@ -310,7 +310,7 @@ impl<'a> Plan<'a> {
         let rem = self.m.get(full..).unwrap_or(&[]);
         let nt = (self.nb - self.nf) as usize;
         let bits = (self.off as u64 + self.m.len() as u64) * 8;
-        t[..rem.len()].copy_from_slice(rem);
+        crate::copy_lt64(t, rem); // rem < 64
         t[rem.len()] = 0x80;
         t[nt * 64 - 8..nt * 64].copy_from_slice(&bits.to_be_bytes());
     }

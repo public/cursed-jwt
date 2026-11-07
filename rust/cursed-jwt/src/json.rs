@@ -285,7 +285,15 @@ impl Now {
 fn jnum_cmp(s: &[u8], isint: bool, now: &Now) -> core::cmp::Ordering {
     use core::cmp::Ordering;
     if isint && now.len != 0 && s.first() != Some(&b'-') {
-        return s.len().cmp(&now.len).then_with(|| s.cmp(&now.s[..now.len]));
+        // (an explicit loop: the slice compare is a libc memcmp call)
+        return s.len().cmp(&now.len).then_with(|| {
+            for (a, b) in s.iter().zip(&now.s[..now.len]) {
+                if a != b {
+                    return a.cmp(b);
+                }
+            }
+            Ordering::Equal
+        });
     }
     if isint {
         return jint(s).cmp(&now.t);
@@ -648,30 +656,40 @@ fn jstrspan(b: &[u8], i: usize, max: usize) -> usize {
     max
 }
 
+/// `s[p..p + N] == lit`, as one OR of byte differences over a fixed length (LLVM inlines and vectorises it;
+/// a slice compare is a memcmp call).
+#[inline(always)]
+pub(crate) fn lit_at<const N: usize>(s: &[u8], p: usize, lit: &[u8; N]) -> bool {
+    match s.get(p..).and_then(|x| x.first_chunk::<N>()) {
+        Some(x) => x.iter().zip(lit).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0,
+        None => false,
+    }
+}
+
 /// The shape matcher: exactly `{"sub":"<digits>","username":"<plain ASCII>","iat":<int>,"exp":<int>}` with no
 /// whitespace and no leading zeros; `None` for anything else (the strict parser then decides).
 #[inline(always)]
 pub(crate) fn payload_shape(pl: &[u8], now: &Now, r: &mut Claims) -> Option<Status> {
-    const SUB: &[u8] = b"{\"sub\":\"";
-    const USER: &[u8] = b"\",\"username\":\"";
-    const IAT: &[u8] = b"\",\"iat\":";
-    const EXP: &[u8] = b",\"exp\":";
+    const SUB: &[u8; 8] = b"{\"sub\":\"";
+    const USER: &[u8; 14] = b"\",\"username\":\"";
+    const IAT: &[u8; 8] = b"\",\"iat\":";
+    const EXP: &[u8; 7] = b",\"exp\":";
     let n = pl.len();
-    if n < 44 || !pl.starts_with(SUB) {
+    if n < 44 || !lit_at(pl, 0, SUB) {
         return None;
     }
     let mut p = SUB.len();
     let sub = p;
     let subl = jdigits(pl, p, 24);
     p += subl;
-    if subl == 0 || subl > 20 || pl.get(p..p + USER.len()) != Some(USER) {
+    if subl == 0 || subl > 20 || !lit_at(pl, p, USER) {
         return None;
     }
     p += USER.len();
     let user = p;
     let ul = jstrspan(pl, p, n - p);
     p += ul;
-    if ul > USERNAME_MAX || pl.get(p..p + IAT.len()) != Some(IAT) {
+    if ul > USERNAME_MAX || !lit_at(pl, p, IAT) {
         return None;
     }
     p += IAT.len();
@@ -680,7 +698,7 @@ pub(crate) fn payload_shape(pl: &[u8], now: &Now, r: &mut Claims) -> Option<Stat
         return None;
     }
     p += il;
-    if pl.get(p..p + EXP.len()) != Some(EXP) {
+    if !lit_at(pl, p, EXP) {
         return None;
     }
     p += EXP.len();

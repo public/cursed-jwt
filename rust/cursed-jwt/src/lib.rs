@@ -50,6 +50,29 @@ mod json;
 mod pk;
 mod sha256;
 
+/// `d[..n] = s[..n]` for n < 64 (n = `s.len()`), as fixed-size pieces chosen by the bits of n: inline moves,
+/// where a variable-length copy_from_slice is a libc memcpy call (per message on the hot paths).
+#[inline(always)]
+pub(crate) fn copy_lt64(d: &mut [u8], s: &[u8]) {
+    debug_assert!(s.len() < 64);
+    let mut o = 0;
+    macro_rules! piece {
+        ($n:literal) => {
+            if s.len() & $n != 0 {
+                d[o..o + $n].copy_from_slice(&s[o..o + $n]);
+                o += $n;
+            }
+        };
+    }
+    piece!(32);
+    piece!(16);
+    piece!(8);
+    piece!(4);
+    piece!(2);
+    piece!(1);
+    debug_assert_eq!(o, s.len());
+}
+
 pub use engine::{CpuFeatures, Engine};
 pub use hs256::Hs256Key;
 #[cfg(feature = "pk")]

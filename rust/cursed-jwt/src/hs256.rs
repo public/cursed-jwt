@@ -86,7 +86,7 @@ pub(crate) fn split_header(
 ) -> Option<(usize, usize)> {
     if t.len() > 36 + 2 + sig_chars && t.len() <= TOKEN_MAX {
         let d2 = t.len() - 1 - sig_chars;
-        if t[36] == b'.' && t[d2] == b'.' && t.first_chunk::<36>() == Some(canon) {
+        if t[36] == b'.' && t[d2] == b'.' && crate::json::lit_at(t, 0, canon) {
             return Some((36, d2));
         }
     }

@@ -912,14 +912,13 @@ fn b64_avx2(dst: &mut [u8], src: &[u8]) -> Option<usize> {
     if q != 0 {
         // whole quanta of the tail: one more step over an 'A'-padded copy
         let mut buf = [b'A'; 32];
-        buf[..q].copy_from_slice(&rest[..q]);
+        crate::copy_lt64(&mut buf, &rest[..q]);
         let (x, e) = b64_32(&buf);
         bad = _mm256_or_si256(bad, e);
         let mut t = [0u8; 32];
         // SAFETY: _mm256_storeu_si256 writes 32 bytes, exactly the local array.
         unsafe { _mm256_storeu_si256(t.as_mut_ptr().cast(), x) };
-        dst.get_mut(o..o + q / 4 * 3)?
-            .copy_from_slice(&t[..q / 4 * 3]);
+        crate::copy_lt64(dst.get_mut(o..o + q / 4 * 3)?, &t[..q / 4 * 3]);
         o += q / 4 * 3;
     }
     if _mm256_testz_si256(bad, bad) == 0 {
