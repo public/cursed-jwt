@@ -41,10 +41,18 @@ fn mac(c: &mut (u64, u64, u64), x: u64, y: u64) {
     c.2 = c.2.wrapping_add((s >> 64) as u64);
 }
 
+/// The Montgomery products' scratch, zeroed once per verify (as plain locals they were zeroed at MAXL = 64
+/// limbs in every one of a verify's 18 products: 2.5 KB of memset each, where C leaves them uninitialised).
+/// Every word of `m` and `t` a product reads, it wrote first, so nothing carries over between products.
+struct Mw {
+    m: [u64; MAXL],
+    t: [u64; MAXL],
+    d: [u64; MAXL],
+}
+
 /// r = t - n if that does not borrow past `top`, else t.
 #[inline(always)]
-fn fin(r: &mut [u64], t: &[u64], top: u64, n: &[u64]) {
-    let mut d = [0u64; MAXL];
+fn fin(r: &mut [u64], t: &[u64], top: u64, n: &[u64], d: &mut [u64; MAXL]) {
     let mut bw = 0u64;
     for j in 0..t.len() {
         let z = (t[j] as u128).wrapping_sub(n[j] as u128 + bw as u128);
@@ -58,16 +66,15 @@ fn fin(r: &mut [u64], t: &[u64], top: u64, n: &[u64]) {
 #[inline(always)]
 fn col(c: &mut (u64, u64, u64), i: usize, m: &mut [u64], t: &mut [u64], n: &[u64], n0: u64) {
     let nl = n.len();
-    // (zipped slices, not indices: the bounds are checked once per column, not once per product)
     if i < nl {
-        for (x, y) in m[..i].iter().zip(n[1..=i].iter().rev()) {
-            mac(c, *x, *y);
+        for j in 0..i {
+            mac(c, m[j], n[i - j]);
         }
         m[i] = c.0.wrapping_mul(n0);
         mac(c, m[i], n[0]);
     } else {
-        for (x, y) in m[i - nl + 1..nl].iter().zip(n[i - nl + 1..nl].iter().rev()) {
-            mac(c, *x, *y);
+        for j in i - nl + 1..nl {
+            mac(c, m[j], n[i - j]);
         }
         t[i - nl] = c.0;
     }
@@ -76,34 +83,35 @@ fn col(c: &mut (u64, u64, u64), i: usize, m: &mut [u64], t: &mut [u64], n: &[u64
 
 /// r = a b R^-1 mod n for a, b < n.
 #[inline(always)]
-fn mont_mul(r: &mut [u64], a: &[u64], b: &[u64], n: &[u64], n0: u64) {
+fn mont_mul(r: &mut [u64], a: &[u64], b: &[u64], n: &[u64], n0: u64, w: &mut Mw) {
     let nl = n.len();
-    let (mut m, mut t) = ([0u64; MAXL], [0u64; MAXL]);
+    let Mw { m, t, d } = w;
     let mut c = (0u64, 0u64, 0u64);
     for i in 0..2 * nl - 1 {
         let (lo, hi) = if i < nl { (0, i) } else { (i - nl + 1, nl - 1) };
-        for (x, y) in a[lo..=hi].iter().zip(b[i - hi..=i - lo].iter().rev()) {
-            mac(&mut c, *x, *y);
+        for j in lo..=hi {
+            mac(&mut c, a[j], b[i - j]);
         }
         col(&mut c, i, &mut m[..nl], &mut t[..nl], n, n0);
     }
     t[nl - 1] = c.0;
-    fin(r, &t[..nl], c.1, n);
+    fin(r, &t[..nl], c.1, n, d);
 }
 
 /// r = a^2 R^-1 mod n for a < n.
 #[inline(always)]
-fn mont_sqr(r: &mut [u64], a: &[u64], n: &[u64], n0: u64) {
+fn mont_sqr(r: &mut [u64], a: &[u64], n: &[u64], n0: u64, w: &mut Mw) {
     let nl = n.len();
-    let (mut m, mut t) = ([0u64; MAXL], [0u64; MAXL]);
+    let Mw { m, t, d } = w;
     let mut c = (0u64, 0u64, 0u64);
     for i in 0..2 * nl - 1 {
         let lo = if i < nl { 0 } else { i - nl + 1 };
         // the sum of a_j a_(i-j) for j < i - j, then doubled
         let mut q = (0u64, 0u64, 0u64);
-        let hx = i.div_ceil(2).max(lo); // j < i - j  <=>  j < ceil(i / 2)
-        for (x, y) in a[lo..hx].iter().zip(a[i + 1 - hx..=i - lo].iter().rev()) {
-            mac(&mut q, *x, *y);
+        let mut j = lo;
+        while j < i - j {
+            mac(&mut q, a[j], a[i - j]);
+            j += 1;
         }
         q = (q.0 << 1, q.1 << 1 | q.0 >> 63, q.2 << 1 | q.1 >> 63);
         if i & 1 == 0 {
@@ -117,19 +125,19 @@ fn mont_sqr(r: &mut [u64], a: &[u64], n: &[u64], n0: u64) {
         col(&mut c, i, &mut m[..nl], &mut t[..nl], n, n0);
     }
     t[nl - 1] = c.0;
-    fin(r, &t[..nl], c.1, n);
+    fin(r, &t[..nl], c.1, n, d);
 }
 
 /// x = s^e R mod n from sR (Montgomery domain); left-to-right binary.
 #[inline(always)]
-fn pow(x: &mut [u64], sr: &[u64], e: u64, n: &[u64], n0: u64) {
+fn pow(x: &mut [u64], sr: &[u64], e: u64, n: &[u64], n0: u64, w: &mut Mw) {
     x.copy_from_slice(sr);
     let mut t = [0u64; MAXL];
     let t = &mut t[..n.len()];
     for b in (0..63 - e.leading_zeros()).rev() {
-        mont_sqr(t, x, n, n0);
+        mont_sqr(t, x, n, n0, w);
         if e >> b & 1 != 0 {
-            mont_mul(x, t, sr, n, n0);
+            mont_mul(x, t, sr, n, n0, w);
         } else {
             x.copy_from_slice(t);
         }
@@ -144,10 +152,15 @@ fn check_n(k: &Rs256Key, nl: usize, s: &[u64], em: &[u64]) -> bool {
     let mut x = [0u64; MAXL];
     let mut one = [0u64; MAXL];
     one[0] = 1;
-    mont_mul(&mut sr[..nl], s, &k.r2[..nl], n, k.n0);
-    pow(&mut x[..nl], &sr[..nl], k.e, n, k.n0);
+    let mut w = Mw {
+        m: [0; MAXL],
+        t: [0; MAXL],
+        d: [0; MAXL],
+    };
+    mont_mul(&mut sr[..nl], s, &k.r2[..nl], n, k.n0, &mut w);
+    pow(&mut x[..nl], &sr[..nl], k.e, n, k.n0, &mut w);
     let mut y = [0u64; MAXL];
-    mont_mul(&mut y[..nl], &x[..nl], &one[..nl], n, k.n0);
+    mont_mul(&mut y[..nl], &x[..nl], &one[..nl], n, k.n0, &mut w);
     y[..nl].iter().zip(em).fold(0, |d, (a, b)| d | (a ^ b)) == 0
 }
 
