@@ -386,6 +386,7 @@ static void ed_neg4(uint64_t o[12], const uint64_t q[12]) {
         o[8 + j] = z ? (uint64_t)d : 0, bw = (uint64_t)(d >> 64) & 1;
     }
 }
+#include "jwt_ed25519_r43x6.inc"
 #endif
 
 /* ---- key setup and batch verification ---- */
@@ -418,6 +419,7 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
 #ifdef JWT_ED_S2N
     void (*pepadd)(uint64_t *, const uint64_t *, const uint64_t *) =
         s2n_ok() ? edwards25519_pepadd : edwards25519_pepadd_alt;
+    const int r43 = ed_r43_ok();
 #endif
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH, c = 0, at[CH];
@@ -435,6 +437,11 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
             ed_recode(ds, s), ed_recode(dk, kk);
             ed_p3 *P = &R[c];
 #ifdef JWT_ED_S2N
+            if (r43) {
+                ed_comb_r43(k, ds, dk, P);
+                at[c++] = t;
+                continue;
+            }
             uint64_t P4[16] = { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 }, nq[12]; /* the identity */
             for (int j = 0; j < ED_NW; j++) {
                 if (ds[j] > 0) pepadd(P4, P4, k->tb[j][ds[j] - 1]);

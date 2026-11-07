@@ -217,7 +217,8 @@ int main(int argc, char **argv) {
 #endif
 #endif
 #ifdef JWT_ED_S2N
-    printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
+    if (ed_r43_ok()) printf(", EdDSA additions: Firedancer r43x6 (AVX-512 IFMA)");
+    else printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
 #endif
     printf("\n");
     test_arith();
