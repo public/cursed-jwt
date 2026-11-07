@@ -196,10 +196,30 @@ RSAZ := -DJWT_RSAZ $(B)/rsaz-4k-avx512.S
 $(B)/rsaz-4k-avx512.S: scripts/fetch-ossl-rsaz.sh
 	./scripts/fetch-ossl-rsaz.sh
 $(eval $(call PK_BACKEND,_rsaz,$(RSAZ) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S))
+# -DJWT_RSAZ8 (with -DJWT_RSAZ): groups of 8 RS256-2048 tokens through crypto_mb's 8-lane IFMA exponentiation
+# (scripts/fetch-crypto-mb-rsa.sh, Apache-2.0: three files built on their own into build/libcmbrsa.a).
+CMBRSA_SRC := sources/ippcp/crypto_mb/src/rsa/ifma_exp52x40_65537_mb8.c \
+  sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_amm52x40_mb8.c \
+  sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_ams52x40_diagonal_mb8.c
+$(B)/libcmbrsa.a: scripts/fetch-crypto-mb-rsa.sh src/cmb_rsa/cmb_rsa_glue.c src/cmb_rsa/internal/rsa/ifma_rsa_arith.h | $(B)
+	./scripts/fetch-crypto-mb-rsa.sh
+	mkdir -p $(B)/cmbrsa
+	for f in $(CMBRSA_SRC); do $(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq \
+	  -Isrc/cmb_rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include -c third_party/crypto-mb-rsa/$$f \
+	  -o $(B)/cmbrsa/$$(basename $$f .c).o || exit 1; done
+	$(CC) -O2 -c src/cmb_rsa/cmb_rsa_glue.c -o $(B)/cmbrsa/cmb_rsa_glue.o
+	rm -f $@ && ar rcs $@ $(B)/cmbrsa/*.o
+RSAZ8 := -DJWT_RSAZ8 $(B)/libcmbrsa.a
+$(eval $(call PK_BACKEND,_rsaz8,$(RSAZ) $(RSAZ8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a))
+$(B)/test_rsaz8: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(RSAZ8) $(FAST) -o $@
 $(B)/test_rsaz: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(FAST) -o $@
 test-rsaz: $(B)/test_rsaz
 	./$(B)/test_rsaz 8 200
+pk-test-rsaz8: $(B)/test_rsaz8 $(B)/test_pk_rsaz8 $(B)/pk_vectors.txt
+	./$(B)/test_rsaz8 2 20
+	./$(B)/test_pk_rsaz8 $(B)/pk_vectors.txt
 pk-test-rsaz: $(B)/test_rsaz $(B)/test_pk_rsaz $(B)/test_pk_rsaz_screen $(B)/pk_vectors.txt
 	./$(B)/test_rsaz 2 20
 	./$(B)/test_pk_rsaz $(B)/pk_vectors.txt
@@ -249,4 +269,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-rsaz pk-test-rsaz pk-bench-rsaz mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean

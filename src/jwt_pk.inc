@@ -63,6 +63,12 @@ typedef struct {
     uint64_t n52[80] __attribute__((aligned(32)));  /* n in radix 2^52, twice (the two-way kernel's [2][40] layout) */
     uint64_t rr52[80] __attribute__((aligned(32))); /* R'^2 mod n, R' = 2^2080, in radix 2^52, twice */
     uint64_t k02[2];                                /* n0 twice, for the two-way kernel */
+#ifdef JWT_RSAZ8
+    /* the same for crypto_mb's 8-lane kernels, one copy per lane: [digit][lane]; k0 there is -n^-1 mod 2^52 */
+    uint64_t n52x8[40][8] __attribute__((aligned(64))), rr52x8[40][8] __attribute__((aligned(64)));
+    uint64_t k0x8[8] __attribute__((aligned(64)));
+    int ifma8; /* ifma, e = 65537, and zmm costs no clock speed (FAST_ZMM: AMD Zen 4 / 5) */
+#endif
 #endif
 } rsa_key_t;
 
@@ -673,6 +679,12 @@ static void rsa_ifma_init(rsa_key_t *k) {
     to52(k->n52, k->n), to52(k->rr52, x);
     memcpy(k->n52 + 40, k->n52, 40 * sizeof(uint64_t)), memcpy(k->rr52 + 40, k->rr52, 40 * sizeof(uint64_t));
     k->k02[0] = k->k02[1] = k->n0;
+#ifdef JWT_RSAZ8
+    for (int d = 0; d < 40; d++)
+        for (int l = 0; l < 8; l++) k->n52x8[d][l] = k->n52[d], k->rr52x8[d][l] = k->rr52[d];
+    for (int l = 0; l < 8; l++) k->k0x8[l] = k->n0 & ((1ull << 52) - 1);
+    k->ifma8 = k->e == 65537 && (jwt_cpu() & JWT_CPU_FAST_ZMM) != 0;
+#endif
 }
 /* y = s^e mod n (radix 2^52, < n) -> accept iff it equals em */
 static int rsa_fin52(const rsa_key_t *k, const uint64_t y[40], const uint64_t *em) {
@@ -706,6 +718,29 @@ static int rsa_one_ifma(const rsa_key_t *k, const uint64_t *s, const uint64_t *e
     ossl_rsaz_amm52x40_x1_ifma256(y, y, one, k->n52, k->n0); /* out of the Montgomery domain */
     return rsa_fin52(k, y, em);
 }
+#ifdef JWT_RSAZ8
+/* -DJWT_RSAZ8: crypto_mb's 8-lane public-exponent exponentiation (Intel cryptography-primitives, Apache-2.0,
+ * scripts/fetch-crypto-mb-rsa.sh): 8 tokens, one per 64-bit lane of the zmm registers, s^65537 by 16 squarings
+ * (AMS52x40_diagonal_mb8) and 1 multiplication, then out of the Montgomery domain.  The per-key n, R'^2 = 2^4160
+ * mod n and k0 are ours (above), so nothing is recomputed per call. */
+void EXP52x40_pub65537_mb8(uint64_t out[][8], const uint64_t base[][8], const uint64_t modulus[][8],
+                           const uint64_t toMont[][8], const uint64_t k0[8], uint64_t work_buffer[][8]);
+static void rsa_eight_ifma(const rsa_key_t *k, uint64_t (*s)[RSA_MAXL], uint64_t (*em)[RSA_MAXL], const int *at,
+                           uint8_t *ok) {
+    uint64_t b[40][8] __attribute__((aligned(64))), o[40][8] __attribute__((aligned(64)));
+    uint64_t w[80][8] __attribute__((aligned(64))), t[40];
+    for (int l = 0; l < 8; l++) {
+        to52(t, s[l]);
+        for (int d = 0; d < 40; d++) b[d][l] = t[d];
+    }
+    EXP52x40_pub65537_mb8(o, (const uint64_t(*)[8])b, (const uint64_t(*)[8])k->n52x8, (const uint64_t(*)[8])k->rr52x8,
+                          k->k0x8, w);
+    for (int l = 0; l < 8; l++) {
+        for (int d = 0; d < 40; d++) t[d] = o[d][l];
+        ok[at[l]] = (uint8_t)rsa_fin52(k, t, em[l]);
+    }
+}
+#endif
 /* two tokens under one key, side by side in the two-way kernel: ok[0], ok[1] for (s0, em0), (s1, em1) */
 static void rsa_two_ifma(const rsa_key_t *k, const uint64_t *s0, const uint64_t *s1, const uint64_t *em0,
                          const uint64_t *em1, uint8_t *ok0, uint8_t *ok1) {
@@ -743,7 +778,14 @@ jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size
     while (nlen && !*n) n++, nlen--;
     while (elen && !*e) e++, elen--;
     if (nlen < 256 || nlen > 512 || !(n[nlen - 1] & 1) || !elen || elen > 8 || !(e[elen - 1] & 1)) return NULL;
+#ifdef JWT_RSAZ8
+    /* crypto_mb's kernels load the per-lane modulus with aligned 64-byte moves; calloc only promises 16 */
+    jwt_pkey_t *pk = NULL;
+    if (posix_memalign((void **)&pk, 64, sizeof *pk)) return NULL;
+    memset(pk, 0, sizeof *pk);
+#else
     jwt_pkey_t *pk = calloc(1, sizeof *pk);
+#endif
     if (!pk) return NULL;
     rsa_key_t *k = &pk->rsa;
     k->k = (int)nlen, k->nl = (int)((nlen + 7) / 8);
@@ -958,6 +1000,10 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
         if (k->ifma) {
 #endif
             int i = 0;
+#ifdef JWT_RSAZ8
+            if (k->ifma8) /* crypto_mb's kernel has e = 65537 built in, and runs on zmm */
+                for (; i + 8 <= c; i += 8) rsa_eight_ifma(k, s + i, em + i, at + i, ok);
+#endif
             for (; i + 1 < c; i += 2) rsa_two_ifma(k, s[i], s[i + 1], em[i], em[i + 1], &ok[at[i]], &ok[at[i + 1]]);
             if (i < c) ok[at[i]] = (uint8_t)rsa_one_ifma(k, s[i], em[i]);
             continue;

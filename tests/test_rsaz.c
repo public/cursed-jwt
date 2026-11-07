@@ -16,6 +16,10 @@
 static int fails, cases;
 static uint64_t prev_s[32], prev_em[32]; /* the previous case under the same key, for the two-way kernel */
 static int have_prev;
+#ifdef JWT_RSAZ8
+static uint64_t ring_s[8][RSA_MAXL], ring_em[8][RSA_MAXL]; /* the last 8 cases under the same key */
+static int ring_n;
+#endif
 static void limbs_of(uint64_t *o, const BIGNUM *b) {
     memset(o, 0, 32 * 8);
     BN_bn2lebinpad(b, (unsigned char *)o, 256);
@@ -55,6 +59,26 @@ static void check(const rsa_key_t *k, mont_ops_t mo, const BIGNUM *bn, const BIG
         if (!o0 || !o1) fails++, fprintf(stderr, "FAIL two-way, same token: %s\n", what);
     }
     memcpy(prev_s, sl, sizeof prev_s), memcpy(prev_em, em, sizeof prev_em), have_prev = 1;
+#ifdef JWT_RSAZ8
+    memset(ring_s[ring_n % 8], 0, sizeof ring_s[0]), memset(ring_em[ring_n % 8], 0, sizeof ring_em[0]);
+    memcpy(ring_s[ring_n % 8], sl, sizeof sl), memcpy(ring_em[ring_n % 8], em, sizeof em), ring_n++;
+    if (ring_n >= 8 && k->ifma8) { /* eight-lane: all eight accepted; then one bad lane, rejected alone */
+        int at8[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+        uint8_t o8[8];
+        cases++;
+        rsa_eight_ifma(k, ring_s, ring_em, at8, o8);
+        for (int l = 0; l < 8; l++)
+            if (!o8[l]) fails++, fprintf(stderr, "FAIL eight-lane accept lane %d: %s\n", l, what);
+        int bad_l = ring_n % 8;
+        ring_em[bad_l][bad_l * 3] ^= 1ull << (7 * bad_l);
+        cases++;
+        rsa_eight_ifma(k, ring_s, ring_em, at8, o8);
+        for (int l = 0; l < 8; l++)
+            if (o8[l] != (l != bad_l))
+                fails++, fprintf(stderr, "FAIL eight-lane, bad lane %d, lane %d: %s\n", bad_l, l, what);
+        ring_em[bad_l][bad_l * 3] ^= 1ull << (7 * bad_l);
+    }
+#endif
     static const int bits[] = { 0, 1, 51, 52, 63, 64, 1023, 2027, 2028, 2047 };
     for (unsigned i = 0; i < sizeof bits / sizeof *bits; i++) {
         uint64_t bad[32];
@@ -83,6 +107,17 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
     }
     const rsa_key_t *k = &pk->rsa;
     have_prev = 0;
+#ifdef JWT_RSAZ8
+    if (((uintptr_t)k->n52x8 | (uintptr_t)k->rr52x8 | (uintptr_t)k->k0x8) & 63) {
+        fails++, fprintf(stderr, "FAIL key %s: eight-lane constants not 64-byte aligned\n", name);
+        jwt_pkey_free(pk);
+        return;
+    }
+#endif
+#ifdef JWT_RSAZ8
+    ring_n = 0;
+    if (!k->ifma8) printf("  (eight-lane path inactive for %s: needs e = 65537 and FAST_ZMM)\n", name);
+#endif
     if (!k->ifma) {
         fails++;
         fprintf(stderr, "FAIL key %s did not take the IFMA path\n", name);
