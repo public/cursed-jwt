@@ -23,7 +23,7 @@ use crate::{Error, Verdict};
 
 pub(crate) mod ed25519;
 mod p256;
-mod rsa;
+pub(crate) mod rsa;
 
 pub use ed25519::Ed25519Key;
 pub use p256::Es256Key;

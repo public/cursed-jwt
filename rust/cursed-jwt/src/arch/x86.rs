@@ -982,3 +982,51 @@ pub(crate) fn ed25519_combs(
     );
     true
 }
+
+// ---- RS256: s^e mod n compiled for BMI2 ----
+// The safe generic code of `pk::rsa`, with the limb count a constant in each copy; mulx removes the rax/rdx
+// moves of mul in the product-scanning loops.
+
+#[cfg(feature = "pk")]
+use crate::pk::rsa::{self as rsa, Rs256Key};
+
+#[cfg(feature = "pk")]
+macro_rules! rsa_bmi2 {
+    ($name:ident, $nl:expr) => {
+        #[target_feature(enable = "bmi2")]
+        #[inline(never)]
+        fn $name(k: &Rs256Key, s: &[u64], em: &[u64]) -> bool {
+            rsa::check_n(k, $nl, s, em)
+        }
+    };
+}
+#[cfg(feature = "pk")]
+rsa_bmi2!(rsa_check_32, 32);
+#[cfg(feature = "pk")]
+rsa_bmi2!(rsa_check_48, 48);
+#[cfg(feature = "pk")]
+rsa_bmi2!(rsa_check_64, 64);
+
+#[cfg(feature = "pk")]
+#[target_feature(enable = "bmi2")]
+#[inline(never)]
+fn rsa_check_any(k: &Rs256Key, s: &[u64], em: &[u64]) -> bool {
+    rsa::check_n(k, s.len(), s, em)
+}
+
+/// `pk::rsa::check_n` for `s.len()` limbs through a BMI2 copy; None (nothing done) on a CPU without BMI2.
+#[cfg(feature = "pk")]
+pub(crate) fn rsa_check(k: &Rs256Key, s: &[u64], em: &[u64]) -> Option<bool> {
+    if !CpuFeatures::get().has(CpuFeatures::BMI2) {
+        return None;
+    }
+    // SAFETY: the check above found BMI2, the feature these functions enable.
+    Some(unsafe {
+        match s.len() {
+            32 => rsa_check_32(k, s, em),
+            48 => rsa_check_48(k, s, em),
+            64 => rsa_check_64(k, s, em),
+            _ => rsa_check_any(k, s, em),
+        }
+    })
+}

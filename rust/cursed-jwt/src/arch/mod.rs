@@ -20,7 +20,14 @@ mod x86;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::{available, b64_decode, detect, hmac, sha256};
 #[cfg(all(target_arch = "x86_64", feature = "pk"))]
-pub(crate) use x86::ed25519_combs;
+pub(crate) use x86::{ed25519_combs, rsa_check};
+
+/// No BMI2 build of the RSA check on this architecture: the caller runs the portable one.
+#[cfg(all(not(target_arch = "x86_64"), feature = "pk"))]
+#[inline(always)]
+pub(crate) fn rsa_check(_k: &crate::pk::rsa::Rs256Key, _s: &[u64], _em: &[u64]) -> Option<bool> {
+    None
+}
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86::{available, b64_decode, detect, hmac, sha256};
 
