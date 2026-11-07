@@ -1,0 +1,82 @@
+name: rust
+on:
+  push:
+    branches: [main]
+    paths: ["rust/**", "src/**", "include/**", "tests/**", "scripts/fetch-vectors.sh", "Makefile", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["rust/**", "src/**", "include/**", "tests/**", "scripts/fetch-vectors.sh", "Makefile", ".github/workflows/rust.yml"]
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal -c clippy,rustfmt && rustup default stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: rust-${{ matrix.os }}-${{ hashFiles('rust/Cargo.lock') }}
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy -p cursed-jwt --lib --no-default-features
+      # no_std: the library alone builds without std or alloc
+      - run: cargo build -p cursed-jwt --no-default-features
+      # the C suite's external vectors (RFC 4231, NIST CAVP, Wycheproof, RFC 7515/8032/8037, pyca/cryptography)
+      - run: make -C .. build/tokens.json build/hmac_vectors.txt build/pk_vectors.txt
+      - run: cargo test --release --workspace
+        env:
+          CURSED_JWT_REQUIRE_VECTORS: 1
+      # which engines this runner exercised (x64 runners are often AMD EPYC: SHA-NI is the default there)
+      - run: cargo test --release -p cursed-jwt --test hs256 crafted -- --nocapture 2>&1 | grep -E "engines|test result"
+      - run: cargo test --release -p cursed-jwt --no-default-features --features std
+      # with every SIMD engine masked off: the scalar fallbacks under the default dispatch
+      - run: cargo test --release -p cursed-jwt
+        env:
+          JWT_CPU_MASK: "0"
+      # the independent Python model of the claim rules (Hypothesis), through a C-ABI shim of the Rust port
+      - run: |
+          cargo build --release -p cursed-jwt-pyshim
+          make -C .. build/pyenv-hyp
+          cd .. && $(cat build/pyenv-hyp) -I tests/test_hypothesis.py rust/target/release/libcursed_jwt_pyshim.so 200
+      # the AVX-512 ymm engines must not touch a zmm register (frequency-licence drop on Intel)
+      - if: runner.arch == 'X64'
+        run: |
+          cargo rustc -p cursed-jwt --release --lib -- --emit asm -C codegen-units=1
+          python3 scripts/zmmcheck.py "$(ls -t target/release/deps/cursed_jwt-*.s | head -1)"
+
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: rust/fuzz
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install nightly --profile minimal && rustup default nightly
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-fuzz
+            rust/fuzz/target
+          key: fuzz-${{ hashFiles('rust/Cargo.lock', 'rust/fuzz/Cargo.toml') }}
+      - run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
+      - run: |
+          for t in $(cargo fuzz list); do
+            cargo fuzz run "$t" -- -max_total_time=30 -max_len=4096
+          done

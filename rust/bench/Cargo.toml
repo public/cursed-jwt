@@ -1,0 +1,31 @@
+[package]
+name = "cursed-jwt-bench"
+version = "0.0.0"
+description = "criterion benchmarks: the Rust port, the C library (same process) and candidate crates"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cursed-jwt = { path = "../cursed-jwt" }
+cjwt-sys = { path = "../cjwt-sys" }
+hmac = "0.12"
+sha2 = "0.10"
+ed25519-dalek = "2"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hs256"
+harness = false
+
+[[bench]]
+name = "pk"
+harness = false
+
+[dev-dependencies]
+# candidate crates for the public-key arithmetic, measured against the ports of the C designs
+p256 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"

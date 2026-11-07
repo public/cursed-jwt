@@ -1,0 +1,47 @@
+[package]
+name = "cursed-jwt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cursed-jwt = { path = "../cursed-jwt" }
+cjwt-sys = { path = "../cjwt-sys" }
+hmac = "0.12"
+sha2 = "0.10"
+p256 = { version = "0.13", features = ["ecdsa"] }
+ed25519-dalek = "2"
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"
+
+# its own workspace (cargo-fuzz builds with nightly and sanitizer flags)
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "verify"
+path = "fuzz_targets/verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "b64"
+path = "fuzz_targets/b64.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pk"
+path = "fuzz_targets/pk.rs"
+test = false
+doc = false
+bench = false

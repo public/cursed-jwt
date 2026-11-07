@@ -26,3 +26,9 @@ leak-*
 timeout-*
 oom-*
 /contrib/haproxy/build/
+# Rust (rust/): build output and cargo-fuzz state
+/rust/target/
+/rust/fuzz/target/
+/rust/fuzz/corpus/
+/rust/fuzz/artifacts/
+/rust/fuzz/coverage/
