@@ -60,8 +60,9 @@ typedef struct {
 #endif
 #ifdef JWT_RSAZ
     int ifma;                                       /* RSA-2048 on an AVX-512 IFMA CPU: the 52-bit-digit path */
-    uint64_t n52[40] __attribute__((aligned(32)));  /* n in radix 2^52 */
-    uint64_t rr52[40] __attribute__((aligned(32))); /* R'^2 mod n, R' = 2^2080, in radix 2^52 */
+    uint64_t n52[80] __attribute__((aligned(32)));  /* n in radix 2^52, twice (the two-way kernel's [2][40] layout) */
+    uint64_t rr52[80] __attribute__((aligned(32))); /* R'^2 mod n, R' = 2^2080, in radix 2^52, twice */
+    uint64_t k02[2];                                /* n0 twice, for the two-way kernel */
 #endif
 } rsa_key_t;
 
@@ -641,6 +642,10 @@ static void rsa_dbl(uint64_t *x, const rsa_key_t *k) {
  * y < n (Gueron 2012), and one conditional subtraction below makes that unconditional. k0 is n0 (-n^-1 mod 2^64). */
 static int rsa_lt_n(const uint64_t *s, const rsa_key_t *k);
 void ossl_rsaz_amm52x40_x1_ifma256(uint64_t *res, const uint64_t *a, const uint64_t *b, const uint64_t *m, uint64_t k0);
+/* the same multiplication on two independent [2][40] operand pairs in one pass (rsaz-4k-avx512.pl's x2): one
+ * multiplication's per-digit dependency chain is the bound, so a second one in the same loop is nearly free */
+void ossl_rsaz_amm52x40_x2_ifma256(uint64_t *res, const uint64_t *a, const uint64_t *b, const uint64_t *m,
+                                   const uint64_t k0[2]);
 static int ifma_ok(void) { return (jwt_cpu() & JWT_CPU_IFMA) != 0; }
 #define M52 ((1ull << 52) - 1)
 static void to52(uint64_t o[40], const uint64_t in[32]) { /* 2048 bits, radix 2^64 -> radix 2^52 */
@@ -666,19 +671,12 @@ static void rsa_ifma_init(rsa_key_t *k) {
     memcpy(x, k->r2, 32 * sizeof(uint64_t));    /* 2^4096 mod n */
     for (int i = 0; i < 64; i++) rsa_dbl(x, k); /* 2^4160 = R'^2 mod n */
     to52(k->n52, k->n), to52(k->rr52, x);
+    memcpy(k->n52 + 40, k->n52, 40 * sizeof(uint64_t)), memcpy(k->rr52 + 40, k->rr52, 40 * sizeof(uint64_t));
+    k->k02[0] = k->k02[1] = k->n0;
 }
-static int rsa_one_ifma(const rsa_key_t *k, const uint64_t *s, const uint64_t *em) {
-    uint64_t s52[40] __attribute__((aligned(32))), x[40] __attribute__((aligned(32))),
-        y[40] __attribute__((aligned(32)));
-    uint64_t one[40] __attribute__((aligned(32))) = { 1 }, r[32];
-    to52(s52, s);
-    ossl_rsaz_amm52x40_x1_ifma256(x, s52, k->rr52, k->n52, k->n0); /* s R' */
-    memcpy(y, x, sizeof y);
-    for (int b = 62 - __builtin_clzll(k->e); b >= 0; b--) {
-        ossl_rsaz_amm52x40_x1_ifma256(y, y, y, k->n52, k->n0);
-        if (k->e >> b & 1) ossl_rsaz_amm52x40_x1_ifma256(y, y, x, k->n52, k->n0);
-    }
-    ossl_rsaz_amm52x40_x1_ifma256(y, y, one, k->n52, k->n0); /* out of the Montgomery domain */
+/* y = s^e mod n (radix 2^52, < n) -> accept iff it equals em */
+static int rsa_fin52(const rsa_key_t *k, const uint64_t y[40], const uint64_t *em) {
+    uint64_t r[32];
     for (int i = 0; i < 40; i++)
         if (y[i] >> 52) return 0;            /* not normalised: cannot happen; reject rather than trust it */
     if (y[39] >> (2048 - 39 * 52)) return 0; /* >= 2^2048 > n: cannot happen after AMM(y, 1) */
@@ -693,6 +691,37 @@ static int rsa_one_ifma(const rsa_key_t *k, const uint64_t *s, const uint64_t *e
     uint64_t d = 0;
     for (int j = 0; j < 32; j++) d |= r[j] ^ em[j];
     return d == 0;
+}
+static int rsa_one_ifma(const rsa_key_t *k, const uint64_t *s, const uint64_t *em) {
+    uint64_t s52[40] __attribute__((aligned(32))), x[40] __attribute__((aligned(32))),
+        y[40] __attribute__((aligned(32)));
+    uint64_t one[40] __attribute__((aligned(32))) = { 1 };
+    to52(s52, s);
+    ossl_rsaz_amm52x40_x1_ifma256(x, s52, k->rr52, k->n52, k->n0); /* s R' */
+    memcpy(y, x, sizeof y);
+    for (int b = 62 - __builtin_clzll(k->e); b >= 0; b--) {
+        ossl_rsaz_amm52x40_x1_ifma256(y, y, y, k->n52, k->n0);
+        if (k->e >> b & 1) ossl_rsaz_amm52x40_x1_ifma256(y, y, x, k->n52, k->n0);
+    }
+    ossl_rsaz_amm52x40_x1_ifma256(y, y, one, k->n52, k->n0); /* out of the Montgomery domain */
+    return rsa_fin52(k, y, em);
+}
+/* two tokens under one key, side by side in the two-way kernel: ok[0], ok[1] for (s0, em0), (s1, em1) */
+static void rsa_two_ifma(const rsa_key_t *k, const uint64_t *s0, const uint64_t *s1, const uint64_t *em0,
+                         const uint64_t *em1, uint8_t *ok0, uint8_t *ok1) {
+    uint64_t s52[80] __attribute__((aligned(32))), x[80] __attribute__((aligned(32))),
+        y[80] __attribute__((aligned(32)));
+    uint64_t one[80] __attribute__((aligned(32))) = { 1 };
+    one[40] = 1;
+    to52(s52, s0), to52(s52 + 40, s1);
+    ossl_rsaz_amm52x40_x2_ifma256(x, s52, k->rr52, k->n52, k->k02);
+    memcpy(y, x, sizeof y);
+    for (int b = 62 - __builtin_clzll(k->e); b >= 0; b--) {
+        ossl_rsaz_amm52x40_x2_ifma256(y, y, y, k->n52, k->k02);
+        if (k->e >> b & 1) ossl_rsaz_amm52x40_x2_ifma256(y, y, x, k->n52, k->k02);
+    }
+    ossl_rsaz_amm52x40_x2_ifma256(y, y, one, k->n52, k->k02);
+    *ok0 = (uint8_t)rsa_fin52(k, y, em0), *ok1 = (uint8_t)rsa_fin52(k, y + 40, em1);
 }
 #undef M52
 #endif
@@ -922,13 +951,15 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             at[c++] = t;
         }
 #ifdef JWT_RSAZ
-        /* one token at a time on IFMA; a screened batch (c >= 2) still goes to the screening below */
+        /* on IFMA: two tokens per call, the odd one alone; a screened batch (c >= 2) still goes to the screening */
 #ifdef JWT_RSA_SCREEN
         if (k->ifma && c < 2) {
 #else
         if (k->ifma) {
 #endif
-            for (int i = 0; i < c; i++) ok[at[i]] = (uint8_t)rsa_one_ifma(k, s[i], em[i]);
+            int i = 0;
+            for (; i + 1 < c; i += 2) rsa_two_ifma(k, s[i], s[i + 1], em[i], em[i + 1], &ok[at[i]], &ok[at[i + 1]]);
+            if (i < c) ok[at[i]] = (uint8_t)rsa_one_ifma(k, s[i], em[i]);
             continue;
         }
 #endif

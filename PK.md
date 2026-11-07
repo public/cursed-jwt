@@ -223,8 +223,13 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - Results: 29,744 / 29,744 test_rsaz cases and every PK-suite check (49,356–49,386, depending on the engines
     the CPU has) on real Genoa and Turin. Without IFMA hardware it also
     passes under Intel SDE (`sde64 -icx`).
-- **Next.** The two-way `ossl_rsaz_amm52x40_x2_ifma256` could take two tokens per call for batches. RSA-3072 and
-  -4096 have their own kernels (`amm52x30`, `amm52x40` x2) in the same family.
+- **Batches: two tokens per call.** A batch's tokens go through the two-way `ossl_rsaz_amm52x40_x2_ifma256` in
+  pairs, the odd one through x1. Full verify at batch 2–16 is 5–10% faster than one at a time:
+  - Genoa: 6.26 → 5.67 µs at batch 16;
+  - Turin: 5.54 → 5.26 µs;
+  - batch 1 unchanged.
+  The gain is smaller than the dependency-chain argument suggested, so the per-digit chain is not the whole cost.
+- **Next.** RSA-3072 and -4096 have their own kernels (`amm52x30`, `amm52x40` x2) in the same family.
 
 ## Comparison: algorithm × implementation × ns/token × licence
 

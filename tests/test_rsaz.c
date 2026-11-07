@@ -1,6 +1,8 @@
 /* test_rsaz: the -DJWT_RSAZ RSA-2048 path against OpenSSL's BN_mod_exp (an independent implementation).
  * For each key and signature value s < n, em = s^e mod n from libcrypto must be accepted by rsa_one_ifma, and em with
- * any one of several single bits flipped must be rejected; the s2n / C path (rsa_one) must agree on every case.
+ * any one of several single bits flipped must be rejected; the s2n / C path (rsa_one) must agree on every case. The
+ * two-way path (rsa_two_ifma) runs each case beside the previous one: both accepted, and a bad em on either side
+ * rejected on that side only.
  * Keys: fresh RSA-2048 keys with e = 65537, 3 and a random odd 32-bit e, plus moduli at both ends of the 2048-bit
  * range. s: 0, 1, 2, n-1, n-2, 2^2047, 2^2048 - n reduced, all-ones below n, and random values.
  * Built as a unity build so the static functions are reachable: cc -DJWT_RSAZ [-DJWT_S2N ...] tests/test_rsaz.c
@@ -12,6 +14,8 @@
 #include <openssl/rand.h>
 
 static int fails, cases;
+static uint64_t prev_s[32], prev_em[32]; /* the previous case under the same key, for the two-way kernel */
+static int have_prev;
 static void limbs_of(uint64_t *o, const BIGNUM *b) {
     memset(o, 0, 32 * 8);
     BN_bn2lebinpad(b, (unsigned char *)o, 256);
@@ -32,6 +36,25 @@ static void check(const rsa_key_t *k, mont_ops_t mo, const BIGNUM *bn, const BIG
         fails++;
         fprintf(stderr, "FAIL reference path disagrees: %s\n", what);
     }
+    if (have_prev) { /* two-way: this case beside the previous one; each side must be judged on its own */
+        uint8_t o0 = 0, o1 = 0;
+        uint64_t bad[32];
+        cases++;
+        rsa_two_ifma(k, sl, prev_s, em, prev_em, &o0, &o1);
+        if (!o0 || !o1) fails++, fprintf(stderr, "FAIL two-way accept (%d %d): %s\n", o0, o1, what);
+        memcpy(bad, em, sizeof bad), bad[5] ^= 1ull << 17;
+        cases++;
+        rsa_two_ifma(k, sl, prev_s, bad, prev_em, &o0, &o1);
+        if (o0 || !o1) fails++, fprintf(stderr, "FAIL two-way, bad left (%d %d): %s\n", o0, o1, what);
+        memcpy(bad, prev_em, sizeof bad), bad[31] ^= 1ull << 40;
+        cases++;
+        rsa_two_ifma(k, sl, prev_s, em, bad, &o0, &o1);
+        if (!o0 || o1) fails++, fprintf(stderr, "FAIL two-way, bad right (%d %d): %s\n", o0, o1, what);
+        cases++;
+        rsa_two_ifma(k, sl, sl, em, em, &o0, &o1); /* the same token on both sides */
+        if (!o0 || !o1) fails++, fprintf(stderr, "FAIL two-way, same token: %s\n", what);
+    }
+    memcpy(prev_s, sl, sizeof prev_s), memcpy(prev_em, em, sizeof prev_em), have_prev = 1;
     static const int bits[] = { 0, 1, 51, 52, 63, 64, 1023, 2027, 2028, 2047 };
     for (unsigned i = 0; i < sizeof bits / sizeof *bits; i++) {
         uint64_t bad[32];
@@ -59,6 +82,7 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
         return;
     }
     const rsa_key_t *k = &pk->rsa;
+    have_prev = 0;
     if (!k->ifma) {
         fails++;
         fprintf(stderr, "FAIL key %s did not take the IFMA path\n", name);
