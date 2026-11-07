@@ -450,6 +450,10 @@ static inline wwl_t ed_r43_from4(const uint64_t v[4]) {
     const long m43 = (1L << 43) - 1;
     return _mm512_and_si512(_mm512_or_si512(lo, hi), _mm512_setr_epi64(m43, m43, m43, m43, m43, m43, 0, 0));
 }
+/* tests: ed_r43_from4's 8 lanes as longs, from code built without AVX-512 */
+FD_FN_UNUSED static void ed_r43_from4_store(long out[8], const uint64_t v[4]) {
+    _mm512_storeu_si512((void *)out, ed_r43_from4(v));
+}
 /* 6 non-negative limbs < 2^44 (radix 2^43) -> the canonical element mod p, little-endian bytes */
 static void ed_r43_canon(uint8_t out[32], const long l[8]) {
     uint64_t w[5] = { 0, 0, 0, 0, 0 };
