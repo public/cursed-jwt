@@ -38,6 +38,11 @@ cursed-jwt credits these projects for techniques and data:
   `scripts/fetch-s2n-bignum.sh` at a pinned commit and never committed.
 - **OpenSSL libcrypto** (Apache-2.0): with `-DJWT_OPENSSL`, the RS256/ES256 code calls `BN_mod_exp_mont` /
   `BN_mod_mul_montgomery` for RSA. That makes libcrypto a link dependency of that build, not just of the tests.
+- **OpenSSL's AVX-512 IFMA RSA multiply** (https://github.com/openssl/openssl, Apache-2.0, Copyright The OpenSSL
+  Project Authors and Intel Corporation): with `-DJWT_RSAZ`, RSA-2048 verification on CPUs with AVX-512 IFMA calls
+  `ossl_rsaz_amm52x40_x1_ifma256`, generated from `crypto/bn/asm/rsaz-4k-avx512.pl` by OpenSSL's own
+  `x86_64-xlate.pl`. Both are fetched by `scripts/fetch-ossl-rsaz.sh` at a pinned commit and never committed; the
+  generated `build/rsaz-4k-avx512.S` is linked into that build.
 - **RSA batch screening** (`-DJWT_RSA_SCREEN`) is Bellare, Garay and Rabin's "screening", from *Fast Batch
   Verification for Modular Exponentiation and Digital Signatures* (EUROCRYPT 1998).
 
@@ -54,6 +59,7 @@ Test and benchmark dependencies (not distributed): **OpenSSL** libcrypto (Apache
 | `scripts/fetch-vectors.sh` | Wycheproof `ecdsa_secp256r1_sha256_p1363_test.json`, `rsa_signature_{2048,3072,4096}_sha256_test.json` (same commit) | Apache-2.0 | RS256/ES256 test vectors |
 | `scripts/fetch-vectors.sh` | NIST CAVP `186-4ecdsatestvectors.zip` (SigVer), `186-3rsatestvectors.zip` (SigVer15) | US government work, public domain | RS256/ES256 test vectors |
 | `scripts/fetch-s2n-bignum.sh` | s2n-bignum P-256 and RSA-2048 kernels, arm and x86 (https://github.com/awslabs/s2n-bignum @ `3306729`) | MIT-0 (also Apache-2.0, ISC) | the `-DJWT_S2N` build |
+| `scripts/fetch-ossl-rsaz.sh` | OpenSSL `rsaz-4k-avx512.pl`, `x86_64-xlate.pl`, `LICENSE.txt` (https://github.com/openssl/openssl @ `openssl-4.1.0`, `2f4e3a5`) | Apache-2.0 | the `-DJWT_RSAZ` build |
 | `scripts/fetch-fiat.sh` | fiat-crypto `p256_64.c`, `p256_scalar_64.c` (https://github.com/mit-plv/fiat-crypto @ `1e721c6`) | MIT (also Apache-2.0, BSD-1-Clause) | the `-DJWT_PK` build |
 | `scripts/fetch-compare.sh` | jwt-cpp (https://github.com/Thalhammer/jwt-cpp @ `1e9b135`), bundles picojson | MIT, picojson BSD-2 | comparison benchmark |
 | `scripts/fetch-compare.sh` | golang-jwt v5 (https://github.com/golang-jwt/jwt @ `9a618ef`) | MIT | comparison benchmark |
