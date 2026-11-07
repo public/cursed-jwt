@@ -39,22 +39,67 @@ struct Niels {
     xy2d: Fe,
 }
 
+/// fiat's loose bounds: a sum or difference of tight elements, not yet carried.  Only `mul` and `sqr` accept it
+/// (fiat's `carry_mul` / `carry_square` take loose inputs), so an add or sub that feeds a multiplication skips
+/// the carry; the types keep a loose element out of `add` / `sub`, whose inputs must be tight.
+#[derive(Clone, Copy)]
+struct Lo([u64; 5]);
+
+/// A multiplication input: a loose element, or a tight one (tight bounds lie inside loose ones; fiat's `relax`).
+trait MulIn {
+    fn lo(&self) -> f::fiat_25519_loose_field_element;
+}
+impl MulIn for Fe {
+    #[inline(always)]
+    fn lo(&self) -> f::fiat_25519_loose_field_element {
+        let mut o = f::fiat_25519_loose_field_element([0; 5]);
+        f::fiat_25519_relax(&mut o, &f::fiat_25519_tight_field_element(*self));
+        o
+    }
+}
+impl MulIn for Lo {
+    #[inline(always)]
+    fn lo(&self) -> f::fiat_25519_loose_field_element {
+        f::fiat_25519_loose_field_element(self.0)
+    }
+}
+
 #[inline(always)]
-fn mul(a: &Fe, b: &Fe) -> Fe {
+fn mul(a: &impl MulIn, b: &impl MulIn) -> Fe {
     let mut o = f::fiat_25519_tight_field_element([0; 5]);
-    f::fiat_25519_carry_mul(
-        &mut o,
-        &f::fiat_25519_loose_field_element(*a),
-        &f::fiat_25519_loose_field_element(*b),
-    );
+    f::fiat_25519_carry_mul(&mut o, &a.lo(), &b.lo());
     o.0
 }
 
 #[inline(always)]
-fn sqr(a: &Fe) -> Fe {
+fn sqr(a: &impl MulIn) -> Fe {
     let mut o = f::fiat_25519_tight_field_element([0; 5]);
-    f::fiat_25519_carry_square(&mut o, &f::fiat_25519_loose_field_element(*a));
+    f::fiat_25519_carry_square(&mut o, &a.lo());
     o.0
+}
+
+/// a + b, uncarried (for a multiplication input)
+#[inline(always)]
+fn addl(a: &Fe, b: &Fe) -> Lo {
+    let mut l = f::fiat_25519_loose_field_element([0; 5]);
+    f::fiat_25519_add(
+        &mut l,
+        &f::fiat_25519_tight_field_element(*a),
+        &f::fiat_25519_tight_field_element(*b),
+    );
+    Lo(l.0)
+}
+
+/// a - b, uncarried (for a multiplication input)
+#[inline(always)]
+fn subl(a: &Fe, b: &Fe) -> Lo {
+    let mut l = f::fiat_25519_loose_field_element([0; 5]);
+    f::fiat_25519_sub(
+        &mut l,
+        &f::fiat_25519_tight_field_element(*a),
+        &f::fiat_25519_tight_field_element(*b),
+    );
+    Lo(l.0)
 }
 
 #[inline(always)]
@@ -66,24 +111,12 @@ fn carry(l: f::fiat_25519_loose_field_element) -> Fe {
 
 #[inline(always)]
 fn add(a: &Fe, b: &Fe) -> Fe {
-    let mut l = f::fiat_25519_loose_field_element([0; 5]);
-    f::fiat_25519_add(
-        &mut l,
-        &f::fiat_25519_tight_field_element(*a),
-        &f::fiat_25519_tight_field_element(*b),
-    );
-    carry(l)
+    carry(f::fiat_25519_loose_field_element(addl(a, b).0))
 }
 
 #[inline(always)]
 fn sub(a: &Fe, b: &Fe) -> Fe {
-    let mut l = f::fiat_25519_loose_field_element([0; 5]);
-    f::fiat_25519_sub(
-        &mut l,
-        &f::fiat_25519_tight_field_element(*a),
-        &f::fiat_25519_tight_field_element(*b),
-    );
-    carry(l)
+    carry(f::fiat_25519_loose_field_element(subl(a, b).0))
 }
 
 #[inline(always)]
@@ -224,14 +257,14 @@ fn decode(s: &[u8; 32], c: &Consts) -> Option<P3> {
     })
 }
 
-/// P += Q (Niels), ref10's ge_madd: 8M
+/// P += Q (Niels), ref10's ge_madd: 8M.  Only 2Z is carried: every other sum feeds a multiplication.
 #[inline(always)]
 fn madd(p: &mut P3, q: &Niels) {
-    let a = mul(&sub(&p.y, &p.x), &q.ymx);
-    let b = mul(&add(&p.y, &p.x), &q.ypx);
+    let a = mul(&subl(&p.y, &p.x), &q.ymx);
+    let b = mul(&addl(&p.y, &p.x), &q.ypx);
     let c = mul(&p.t, &q.xy2d);
     let d = add(&p.z, &p.z);
-    let (e, f, g, h) = (sub(&b, &a), sub(&d, &c), add(&d, &c), add(&b, &a));
+    let (e, f, g, h) = (subl(&b, &a), subl(&d, &c), addl(&d, &c), addl(&b, &a));
     *p = P3 {
         x: mul(&e, &f),
         y: mul(&g, &h),
@@ -243,11 +276,11 @@ fn madd(p: &mut P3, q: &Niels) {
 /// P += -Q (Niels): swap y+x and y-x, negate 2dxy
 #[inline(always)]
 fn msub(p: &mut P3, q: &Niels) {
-    let a = mul(&sub(&p.y, &p.x), &q.ypx);
-    let b = mul(&add(&p.y, &p.x), &q.ymx);
+    let a = mul(&subl(&p.y, &p.x), &q.ypx);
+    let b = mul(&addl(&p.y, &p.x), &q.ymx);
     let c = mul(&p.t, &q.xy2d);
     let d = add(&p.z, &p.z);
-    let (e, f, g, h) = (sub(&b, &a), add(&d, &c), sub(&d, &c), add(&b, &a));
+    let (e, f, g, h) = (subl(&b, &a), addl(&d, &c), subl(&d, &c), addl(&b, &a));
     *p = P3 {
         x: mul(&e, &f),
         y: mul(&g, &h),
@@ -258,12 +291,12 @@ fn msub(p: &mut P3, q: &Niels) {
 
 /// P + Q, both extended (add-2008-hwcd-3, a = -1): table building only.
 fn add_p3(p: &P3, q: &P3, c: &Consts) -> P3 {
-    let a = mul(&sub(&p.y, &p.x), &sub(&q.y, &q.x));
-    let b = mul(&add(&p.y, &p.x), &add(&q.y, &q.x));
+    let a = mul(&subl(&p.y, &p.x), &subl(&q.y, &q.x));
+    let b = mul(&addl(&p.y, &p.x), &addl(&q.y, &q.x));
     let cc = mul(&mul(&p.t, &q.t), &c.d2);
     let d = mul(&p.z, &q.z);
     let d = add(&d, &d);
-    let (e, f, g, h) = (sub(&b, &a), sub(&d, &cc), add(&d, &cc), add(&b, &a));
+    let (e, f, g, h) = (subl(&b, &a), subl(&d, &cc), addl(&d, &cc), addl(&b, &a));
     P3 {
         x: mul(&e, &f),
         y: mul(&g, &h),

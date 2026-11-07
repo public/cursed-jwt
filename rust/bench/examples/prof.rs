@@ -1,5 +1,6 @@
-//! A loop to profile under perf: `prof rust|c|rust-hmac|c-hmac BATCH SECONDS` verifies (or only HMACs) the
-//! benchmark's 16 tokens in batches of BATCH for SECONDS and prints ns per token.
+//! A loop to profile under perf: `prof rust|c|rust-hmac|c-hmac|ed-rust|ed-c BATCH SECONDS` verifies (or only
+//! HMACs) BATCH tokens per call for SECONDS and prints ns per token.  `xN` for SECONDS makes exactly N calls
+//! instead (deterministic, for instruction counts under callgrind: diff two runs with different N).
 use cursed_jwt::{Engine, Error, Hs256Key, Verdict};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -26,7 +27,9 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mode = a.get(1).map(String::as_str).unwrap_or("rust");
     let n: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(8);
-    let secs: f64 = a.get(3).and_then(|v| v.parse().ok()).unwrap_or(3.0);
+    let arg3 = a.get(3).map(String::as_str).unwrap_or("3");
+    let calls: Option<u64> = arg3.strip_prefix('x').and_then(|v| v.parse().ok());
+    let secs: f64 = arg3.parse().unwrap_or(3.0);
     let head = b64u(br#"{"alg":"HS256","typ":"JWT"}"#);
     let toks: Vec<Vec<u8>> = (1..=n)
         .map(|i| {
@@ -50,6 +53,17 @@ fn main() {
     let mut cout = cjwt_sys::results(n);
     let mut tags = vec![[0u8; 32]; n];
     let e = Engine::best();
+    let (mp, ml): (Vec<*const u8>, Vec<i32>) = (
+        msgs.iter().map(|m| m.as_ptr()).collect(),
+        msgs.iter().map(|m| m.len() as i32).collect(),
+    );
+    let mut cmac = vec![[0u32; 8]; n];
+    let cdef = cjwt_sys::engine();
+    let chmac = cjwt_sys::hmac_engines()
+        .into_iter()
+        .find(|(name, _)| *name == cdef)
+        .map(|(_, f)| f)
+        .unwrap_or(cjwt_sys::jwt_hmac_scalar);
     // EdDSA: one key, n tokens signed by ed25519-dalek
     let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
     let edk = cursed_jwt::Ed25519Key::new(&sk.verifying_key().to_bytes()).unwrap();
@@ -67,19 +81,28 @@ fn main() {
         .collect();
     let (ep, el) = cjwt_sys::token_ptrs(&etoks);
     let reps = if mode.starts_with("ed") { 10 } else { 1000 };
+    let mut call = || match mode {
+        "ed-rust" => edk.verify_batch(black_box(&etoks), 1_800_000_000, &mut out),
+        "ed-c" => edc.verify_raw(black_box(&ep), &el, 1_800_000_000, &mut cout),
+        "c" => ck.verify_raw(black_box(&p), &l, 1_800_000_000, &mut cout),
+        "rust-hmac" => k.hmac_batch(e, black_box(&msgs), &mut tags),
+        "c-hmac" => ck.hmac_raw(chmac, black_box(&mp), &ml, &mut cmac),
+        _ => k.verify_batch(black_box(&toks), 1_800_000_000, &mut out),
+    };
     let start = Instant::now();
     let mut iters = 0u64;
-    while start.elapsed() < Duration::from_secs_f64(secs) {
-        for _ in 0..reps {
-            match mode {
-                "ed-rust" => edk.verify_batch(black_box(&etoks), 1_800_000_000, &mut out),
-                "ed-c" => edc.verify_raw(black_box(&ep), &el, 1_800_000_000, &mut cout),
-                "c" => ck.verify_raw(black_box(&p), &l, 1_800_000_000, &mut cout),
-                "rust-hmac" => k.hmac_batch(e, black_box(&msgs), &mut tags),
-                _ => k.verify_batch(black_box(&toks), 1_800_000_000, &mut out),
-            }
+    if let Some(c) = calls {
+        for _ in 0..c {
+            call();
         }
-        iters += reps;
+        iters = c;
+    } else {
+        while start.elapsed() < Duration::from_secs_f64(secs) {
+            for _ in 0..reps {
+                call();
+            }
+            iters += reps;
+        }
     }
     let ns = start.elapsed().as_nanos() as f64 / (iters as f64 * n as f64);
     println!("{mode} batch {n} engine {}: {ns:.1} ns/token", e.name());

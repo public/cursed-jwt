@@ -262,6 +262,27 @@ extern "C" {
         len: *const c_int,
         mac: *mut [u32; 8],
     );
+    pub fn jwt_hmac_shani_1(
+        k: *const jwt_key_t,
+        n: c_int,
+        msg: *const *const u8,
+        len: *const c_int,
+        mac: *mut [u32; 8],
+    );
+    pub fn jwt_hmac_shani_2(
+        k: *const jwt_key_t,
+        n: c_int,
+        msg: *const *const u8,
+        len: *const c_int,
+        mac: *mut [u32; 8],
+    );
+    pub fn jwt_hmac_shani_4(
+        k: *const jwt_key_t,
+        n: c_int,
+        msg: *const *const u8,
+        len: *const c_int,
+        mac: *mut [u32; 8],
+    );
 }
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 extern "C" {
@@ -297,6 +318,11 @@ pub fn hmac_engines() -> Vec<(&'static str, hmac_fn)> {
             v.push(("avx512vl", jwt_hmac_avx512));
             v.push(("avx512x2", jwt_hmac_avx512x2));
             v.push(("zmm", jwt_hmac_zmm));
+        }
+        if f & 8 != 0 {
+            v.push(("shani", jwt_hmac_shani_4));
+            v.push(("shanix1", jwt_hmac_shani_1));
+            v.push(("shanix2", jwt_hmac_shani_2));
         }
     }
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
