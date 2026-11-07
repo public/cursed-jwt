@@ -151,9 +151,14 @@ impl Claims {
         self.escape
     }
 
+    #[inline(always)]
     fn set_username(&mut self, u: &[u8], escape: bool) {
         let n = u.len().min(USERNAME_MAX);
-        self.buf[..n].copy_from_slice(&u[..n]);
+        if n < 64 {
+            copy_lt64(&mut self.buf, &u[..n]); // inline: the usual short name skips a memcpy call
+        } else {
+            self.buf[..n].copy_from_slice(&u[..n]);
+        }
         self.len = n as u16;
         self.escape = escape;
     }
