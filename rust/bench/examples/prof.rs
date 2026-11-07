@@ -1,4 +1,4 @@
-//! A loop to profile under perf: `prof rust|c|rust-hmac|c-hmac|ed-rust|ed-c BATCH SECONDS` verifies (or only
+//! A loop to profile under perf: `prof rust|c|rust-hmac|c-hmac|ed-rust|ed-c|rs-rust|rs-c BATCH SECONDS` verifies (or only
 //! HMACs) BATCH tokens per call for SECONDS and prints ns per token.  `xN` for SECONDS makes exactly N calls
 //! instead (deterministic, for instruction counts under callgrind: diff two runs with different N).
 use cursed_jwt::{Engine, Error, Hs256Key, Verdict};
@@ -80,10 +80,52 @@ fn main() {
         })
         .collect();
     let (ep, el) = cjwt_sys::token_ptrs(&etoks);
-    let reps = if mode.starts_with("ed") { 10 } else { 1000 };
+    // RS256: one 2048-bit key (seeded), n tokens signed by the rsa crate; only built for the rs modes
+    let (rsk, rsc, rtoks) = if mode.starts_with("rs") {
+        use rand::SeedableRng;
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+        use rsa::traits::PublicKeyParts;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let pk = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pubk = pk.to_public_key();
+        let (rn, re) = (pubk.n().to_bytes_be(), pubk.e().to_bytes_be());
+        let skey = SigningKey::<sha2::Sha256>::new(pk);
+        let rhead = b64u(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let rtoks: Vec<Vec<u8>> = (1..=n)
+            .map(|i| {
+                let pl = format!(
+                    r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#
+                );
+                let msg = format!("{rhead}.{}", b64u(pl.as_bytes()));
+                format!("{msg}.{}", b64u(&skey.sign(msg.as_bytes()).to_vec())).into_bytes()
+            })
+            .collect();
+        (
+            Some(cursed_jwt::Rs256Key::new(&rn, &re).unwrap()),
+            Some(cjwt_sys::PKey::rs256(&rn, &re).unwrap()),
+            rtoks,
+        )
+    } else {
+        (None, None, Vec::new())
+    };
+    let (rp, rl) = cjwt_sys::token_ptrs(&rtoks);
+    let reps = if mode.starts_with("ed") || mode.starts_with("rs") {
+        10
+    } else {
+        1000
+    };
     let mut call = || match mode {
         "ed-rust" => edk.verify_batch(black_box(&etoks), 1_800_000_000, &mut out),
         "ed-c" => edc.verify_raw(black_box(&ep), &el, 1_800_000_000, &mut cout),
+        "rs-rust" => rsk
+            .as_ref()
+            .unwrap()
+            .verify_batch(black_box(&rtoks), 1_800_000_000, &mut out),
+        "rs-c" => rsc
+            .as_ref()
+            .unwrap()
+            .verify_raw(black_box(&rp), &rl, 1_800_000_000, &mut cout),
         "c" => ck.verify_raw(black_box(&p), &l, 1_800_000_000, &mut cout),
         "rust-hmac" => k.hmac_batch(e, black_box(&msgs), &mut tags),
         "c-hmac" => ck.hmac_raw(chmac, black_box(&mp), &ml, &mut cmac),

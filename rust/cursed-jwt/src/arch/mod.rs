@@ -19,8 +19,23 @@ mod x86;
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::{available, b64_decode, detect, hmac, sha256};
+#[cfg(all(target_arch = "x86_64", feature = "pk"))]
+pub(crate) use x86::ed25519_combs;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86::{available, b64_decode, detect, hmac, sha256};
+
+/// No BMI2 build of the EdDSA additions on this architecture: the caller runs the portable one.
+#[cfg(all(not(target_arch = "x86_64"), feature = "pk"))]
+#[inline(always)]
+pub(crate) fn ed25519_combs(
+    _p: &mut crate::pk::ed25519::P3,
+    _tb: &[[crate::pk::ed25519::Niels; crate::pk::ed25519::H]],
+    _ta: &[[crate::pk::ed25519::Niels; crate::pk::ed25519::H]],
+    _ds: &[i8; crate::pk::ed25519::NW],
+    _dk: &[i8; crate::pk::ed25519::NW],
+) -> bool {
+    false
+}
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod portable {

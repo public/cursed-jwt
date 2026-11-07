@@ -58,15 +58,16 @@ fn fin(r: &mut [u64], t: &[u64], top: u64, n: &[u64]) {
 #[inline(always)]
 fn col(c: &mut (u64, u64, u64), i: usize, m: &mut [u64], t: &mut [u64], n: &[u64], n0: u64) {
     let nl = n.len();
+    // (zipped slices, not indices: the bounds are checked once per column, not once per product)
     if i < nl {
-        for j in 0..i {
-            mac(c, m[j], n[i - j]);
+        for (x, y) in m[..i].iter().zip(n[1..=i].iter().rev()) {
+            mac(c, *x, *y);
         }
         m[i] = c.0.wrapping_mul(n0);
         mac(c, m[i], n[0]);
     } else {
-        for j in i - nl + 1..nl {
-            mac(c, m[j], n[i - j]);
+        for (x, y) in m[i - nl + 1..nl].iter().zip(n[i - nl + 1..nl].iter().rev()) {
+            mac(c, *x, *y);
         }
         t[i - nl] = c.0;
     }
@@ -81,8 +82,8 @@ fn mont_mul(r: &mut [u64], a: &[u64], b: &[u64], n: &[u64], n0: u64) {
     let mut c = (0u64, 0u64, 0u64);
     for i in 0..2 * nl - 1 {
         let (lo, hi) = if i < nl { (0, i) } else { (i - nl + 1, nl - 1) };
-        for j in lo..=hi {
-            mac(&mut c, a[j], b[i - j]);
+        for (x, y) in a[lo..=hi].iter().zip(b[i - hi..=i - lo].iter().rev()) {
+            mac(&mut c, *x, *y);
         }
         col(&mut c, i, &mut m[..nl], &mut t[..nl], n, n0);
     }
@@ -100,10 +101,9 @@ fn mont_sqr(r: &mut [u64], a: &[u64], n: &[u64], n0: u64) {
         let lo = if i < nl { 0 } else { i - nl + 1 };
         // the sum of a_j a_(i-j) for j < i - j, then doubled
         let mut q = (0u64, 0u64, 0u64);
-        let mut j = lo;
-        while j < i - j {
-            mac(&mut q, a[j], a[i - j]);
-            j += 1;
+        let hx = i.div_ceil(2).max(lo); // j < i - j  <=>  j < ceil(i / 2)
+        for (x, y) in a[lo..hx].iter().zip(a[i + 1 - hx..=i - lo].iter().rev()) {
+            mac(&mut q, *x, *y);
         }
         q = (q.0 << 1, q.1 << 1 | q.0 >> 63, q.2 << 1 | q.1 >> 63);
         if i & 1 == 0 {

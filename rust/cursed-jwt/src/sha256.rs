@@ -649,6 +649,8 @@ pub(crate) fn drive_x2<K16: Kernel<16>, K8: Kernel<8>, const MIN8: usize>(
     allow(dead_code)
 )]
 pub(crate) trait Streams: Copy {
+    /// Three plans left over run as one 3-stream group instead of 2 + 1 (the 1-stream group is latency-bound).
+    const THREE: bool = false;
     fn run<const S: usize, const RAW: bool>(
         self,
         k: &Midstates,
@@ -696,6 +698,10 @@ pub(crate) fn drive_streams<E: Streams, const S: usize, const RAW: bool>(
                     break;
                 }
             }
+            // five left with one block count: 3 + 2, not 4 + a latency-bound single stream
+            if E::THREE && s == 4 && idx.len() - g == 5 && plans[idx[g + 4] as usize].nb == nb0 {
+                s = 3;
+            }
             let pl = |i: usize| &plans[idx[g + i] as usize];
             let mut put = |i: usize, w: &[u32; 8]| {
                 if let Some(o) = oc.get_mut(idx[g + i] as usize) {
@@ -706,6 +712,11 @@ pub(crate) fn drive_streams<E: Streams, const S: usize, const RAW: bool>(
                 4 => {
                     let mut o = [[0u32; 8]; 4];
                     e.run::<4, RAW>(k, [pl(0), pl(1), pl(2), pl(3)], &mut o);
+                    o.iter().enumerate().for_each(|(i, w)| put(i, w));
+                }
+                3 if E::THREE => {
+                    let mut o = [[0u32; 8]; 3];
+                    e.run::<3, RAW>(k, [pl(0), pl(1), pl(2)], &mut o);
                     o.iter().enumerate().for_each(|(i, w)| put(i, w));
                 }
                 3 => {

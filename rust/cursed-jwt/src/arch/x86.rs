@@ -45,6 +45,9 @@ pub(crate) fn detect() -> u32 {
     if has!("bmi2", "adx") {
         f |= CpuFeatures::BMI2_ADX;
     }
+    if has!("bmi2") {
+        f |= CpuFeatures::BMI2;
+    }
     if has!("sha", "sse4.1", "ssse3") {
         f |= CpuFeatures::SHANI;
         // every Zen has SHA-NI, and there 4 interleaved streams beat every vector engine at every batch size
@@ -810,6 +813,7 @@ fn ni_ld_plain(d: &[u32; 8]) -> (__m128i, __m128i) {
 struct KNi(());
 
 impl sha256::Streams for KNi {
+    const THREE: bool = true;
     #[inline(always)]
     fn run<const S: usize, const RAW: bool>(
         self,
@@ -931,4 +935,51 @@ pub(crate) fn b64_decode(dst: &mut [u8], src: &[u8]) -> Option<Option<usize>> {
     }
     // SAFETY: the CPU has AVX2 (checked just above).
     Some(unsafe { b64_avx2(dst, src) })
+}
+
+// ---- EdDSA: the comb additions compiled for BMI2 ----
+// The field arithmetic is the safe generic code of `pk::ed25519`; inside this region LLVM multiplies with mulx,
+// whose free destination registers remove most of the moves and spills that mul's rax/rdx pinning causes.
+
+#[cfg(feature = "pk")]
+use crate::pk::ed25519::{self as ed, Niels, P3};
+
+#[cfg(feature = "pk")]
+#[target_feature(enable = "bmi2")]
+#[inline(never)]
+fn ed_madd_bmi2(p: &mut P3, q: &Niels) {
+    ed::madd_impl(p, q)
+}
+
+#[cfg(feature = "pk")]
+#[target_feature(enable = "bmi2")]
+#[inline(never)]
+fn ed_msub_bmi2(p: &mut P3, q: &Niels) {
+    ed::msub_impl(p, q)
+}
+
+/// `pk::ed25519::combs` through the BMI2 madd / msub; false (nothing done) on a CPU without BMI2.
+#[cfg(feature = "pk")]
+pub(crate) fn ed25519_combs(
+    p: &mut P3,
+    tb: &[[Niels; ed::H]],
+    ta: &[[Niels; ed::H]],
+    ds: &[i8; ed::NW],
+    dk: &[i8; ed::NW],
+) -> bool {
+    if !CpuFeatures::get().has(CpuFeatures::BMI2) {
+        return false;
+    }
+    ed::combs(
+        p,
+        tb,
+        ta,
+        ds,
+        dk,
+        // SAFETY: the check above found BMI2, the feature these two functions enable.
+        |p, q| unsafe { ed_madd_bmi2(p, q) },
+        // SAFETY: as above.
+        |p, q| unsafe { ed_msub_bmi2(p, q) },
+    );
+    true
 }

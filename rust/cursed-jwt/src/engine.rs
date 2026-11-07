@@ -31,6 +31,8 @@ impl CpuFeatures {
     pub const FAST_ZMM: u32 = 128;
     /// x86-64: SHA-NI that beats the vector engines (AMD Zen), so the 4-stream SHA-NI engine is the default.
     pub const FAST_SHANI: u32 = 256;
+    /// x86-64: BMI2 (mulx; the EdDSA field arithmetic uses it).
+    pub const BMI2: u32 = 512;
     const DETECTED: u32 = 1 << 31;
 
     /// The features of this CPU, detected once.  With the `std` feature, the environment variable

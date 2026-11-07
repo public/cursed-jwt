@@ -17,14 +17,14 @@ use super::{PkAlg, CHUNK};
 
 /// Comb window: 37 rows of 64 points per base point, 284 KB each.
 const W: usize = 7;
-const NW: usize = 254_usize.div_ceil(W);
-const H: usize = 1 << (W - 1);
+pub(crate) const NW: usize = 254_usize.div_ceil(W);
+pub(crate) const H: usize = 1 << (W - 1);
 
 /// fiat's unsaturated 5 x 51-bit limbs, carried ("tight").
 type Fe = [u64; 5];
 
 #[derive(Clone, Copy)]
-struct P3 {
+pub(crate) struct P3 {
     x: Fe,
     y: Fe,
     z: Fe,
@@ -33,7 +33,7 @@ struct P3 {
 
 /// y + x, y - x, 2 d x y of an affine point.
 #[derive(Clone, Copy, Default)]
-struct Niels {
+pub(crate) struct Niels {
     ypx: Fe,
     ymx: Fe,
     xy2d: Fe,
@@ -66,9 +66,37 @@ impl MulIn for Lo {
 
 #[inline(always)]
 fn mul(a: &impl MulIn, b: &impl MulIn) -> Fe {
-    let mut o = f::fiat_25519_tight_field_element([0; 5]);
-    f::fiat_25519_carry_mul(&mut o, &a.lo(), &b.lo());
-    o.0
+    mul_cols(&a.lo().0, &b.lo().0)
+}
+
+/// fiat's `carry_mul`, with its 25 products, its x19 folds and its carry chain unchanged, but summed column by
+/// column, each column carried before the next is formed.  fiat's Rust output forms all 25 u128 products first,
+/// and LLVM keeps that order: ~50 live registers, so ed25519 `madd` spilled 334 times (gcc schedules fiat's C
+/// output to 48).  The bounds make every sum exact (loose limbs < 1.5 * 2^52, so a column is < 2^112), so the
+/// result is fiat's bit for bit; `mul_matches_fiat` checks it on edge and random inputs.
+#[inline(always)]
+fn mul_cols(a: &[u64; 5], b: &[u64; 5]) -> Fe {
+    const M: u64 = 0x7_ffff_ffff_ffff;
+    let m = |x: u64, y: u64| (x as u128) * (y as u128);
+    let (b1, b2, b3, b4) = (b[1] * 19, b[2] * 19, b[3] * 19, b[4] * 19);
+    let c0 = m(a[0], b[0]) + m(a[1], b4) + m(a[2], b3) + m(a[3], b2) + m(a[4], b1);
+    let (r0, k) = ((c0 as u64) & M, (c0 >> 51) as u64);
+    let c1 = (k as u128) + m(a[0], b[1]) + m(a[1], b[0]) + m(a[2], b4) + m(a[3], b3) + m(a[4], b2);
+    let (r1, k) = ((c1 as u64) & M, (c1 >> 51) as u64);
+    let c2 =
+        (k as u128) + m(a[0], b[2]) + m(a[1], b[1]) + m(a[2], b[0]) + m(a[3], b4) + m(a[4], b3);
+    let (r2, k) = ((c2 as u64) & M, (c2 >> 51) as u64);
+    let c3 =
+        (k as u128) + m(a[0], b[3]) + m(a[1], b[2]) + m(a[2], b[1]) + m(a[3], b[0]) + m(a[4], b4);
+    let (r3, k) = ((c3 as u64) & M, (c3 >> 51) as u64);
+    let c4 =
+        (k as u128) + m(a[0], b[4]) + m(a[1], b[3]) + m(a[2], b[2]) + m(a[3], b[1]) + m(a[4], b[0]);
+    let (r4, k) = ((c4 as u64) & M, (c4 >> 51) as u64);
+    let t = r0 + k * 19;
+    let (r0, k) = (t & M, t >> 51);
+    let t = r1 + k;
+    let (r1, k) = (t & M, t >> 51);
+    [r0, r1, r2 + k, r3, r4]
 }
 
 #[inline(always)]
@@ -258,8 +286,9 @@ fn decode(s: &[u8; 32], c: &Consts) -> Option<P3> {
 }
 
 /// P += Q (Niels), ref10's ge_madd: 8M.  Only 2Z is carried: every other sum feeds a multiplication.
+/// Inlined only into [`madd`] and into arch's BMI2 copy (one body each).
 #[inline(always)]
-fn madd(p: &mut P3, q: &Niels) {
+pub(crate) fn madd_impl(p: &mut P3, q: &Niels) {
     let a = mul(&subl(&p.y, &p.x), &q.ymx);
     let b = mul(&addl(&p.y, &p.x), &q.ypx);
     let c = mul(&p.t, &q.xy2d);
@@ -275,7 +304,7 @@ fn madd(p: &mut P3, q: &Niels) {
 
 /// P += -Q (Niels): swap y+x and y-x, negate 2dxy
 #[inline(always)]
-fn msub(p: &mut P3, q: &Niels) {
+pub(crate) fn msub_impl(p: &mut P3, q: &Niels) {
     let a = mul(&subl(&p.y, &p.x), &q.ypx);
     let b = mul(&addl(&p.y, &p.x), &q.ymx);
     let c = mul(&p.t, &q.xy2d);
@@ -287,6 +316,43 @@ fn msub(p: &mut P3, q: &Niels) {
         t: mul(&e, &h),
         z: mul(&f, &g),
     };
+}
+
+/// The baseline-ISA madd / msub, out of line as in C: the verify loop calls them on two tables, and four
+/// inlined copies (~36 KB) overflow L1i and the op cache.
+#[inline(never)]
+fn madd(p: &mut P3, q: &Niels) {
+    madd_impl(p, q)
+}
+
+#[inline(never)]
+fn msub(p: &mut P3, q: &Niels) {
+    msub_impl(p, q)
+}
+
+/// p += [s] B + [k] (-A) from the signed digits, through the given madd / msub.
+#[inline(always)]
+pub(crate) fn combs(
+    p: &mut P3,
+    tb: &[[Niels; H]],
+    ta: &[[Niels; H]],
+    ds: &[i8; NW],
+    dk: &[i8; NW],
+    madd: impl Fn(&mut P3, &Niels),
+    msub: impl Fn(&mut P3, &Niels),
+) {
+    for j in 0..NW {
+        match ds[j] {
+            d if d > 0 => madd(p, &tb[j][(d - 1) as usize]),
+            d if d < 0 => msub(p, &tb[j][(-d - 1) as usize]),
+            _ => {}
+        }
+        match dk[j] {
+            d if d > 0 => madd(p, &ta[j][(d - 1) as usize]),
+            d if d < 0 => msub(p, &ta[j][(-d - 1) as usize]),
+            _ => {}
+        }
+    }
 }
 
 /// P + Q, both extended (add-2008-hwcd-3, a = -1): table building only.
@@ -547,17 +613,9 @@ impl PkAlg for Ed25519Key {
             let (ds, dk) = (recode(&le_limbs(sb)), recode(&reduce512(&h)));
             // the identity: the additions are complete
             let p = &mut rp[c];
-            for j in 0..NW {
-                match ds[j] {
-                    d if d > 0 => madd(p, &self.tb[j][(d - 1) as usize]),
-                    d if d < 0 => msub(p, &self.tb[j][(-d - 1) as usize]),
-                    _ => {}
-                }
-                match dk[j] {
-                    d if d > 0 => madd(p, &self.ta[j][(d - 1) as usize]),
-                    d if d < 0 => msub(p, &self.ta[j][(-d - 1) as usize]),
-                    _ => {}
-                }
+            // BMI2 (mulx frees mul's rax/rdx pinning: 17% fewer instructions per madd) when the CPU has it
+            if !crate::arch::ed25519_combs(p, &self.tb, &self.ta, &ds, &dk) {
+                combs(p, &self.tb, &self.ta, &ds, &dk, madd, msub);
             }
             at[c] = i;
             c += 1;
@@ -583,6 +641,44 @@ impl PkAlg for Ed25519Key {
             let mut enc = to_bytes(&mul(&rp[i].y, &zi));
             enc[31] |= (to_bytes(&mul(&rp[i].x, &zi))[0] & 1) << 7;
             ok[at[i]] = sig[at[i]].get(..32) == Some(&enc[..]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The column-order multiplication against fiat-crypto's verified `carry_mul`, on the loose-bound edges
+    /// (0, 1, 2^51 - 1, 2^51, the bound 0x18000000000000) and on random loose inputs.
+    #[test]
+    fn mul_matches_fiat() {
+        const LOOSE: u64 = 0x18_0000_0000_0000;
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let edge = [0, 1, (1 << 51) - 1, 1 << 51, LOOSE - 1, LOOSE];
+        for i in 0..200_000 {
+            let mut a = [0u64; 5];
+            let mut b = [0u64; 5];
+            for j in 0..5 {
+                (a[j], b[j]) = match i % 4 {
+                    0 => (edge[rnd() as usize % 6], edge[rnd() as usize % 6]),
+                    1 => (LOOSE, LOOSE),
+                    _ => (rnd() % (LOOSE + 1), rnd() % (LOOSE + 1)),
+                };
+            }
+            let mut o = f::fiat_25519_tight_field_element([0; 5]);
+            f::fiat_25519_carry_mul(
+                &mut o,
+                &f::fiat_25519_loose_field_element(a),
+                &f::fiat_25519_loose_field_element(b),
+            );
+            assert_eq!(mul_cols(&a, &b), o.0, "{a:x?} {b:x?}");
         }
     }
 }

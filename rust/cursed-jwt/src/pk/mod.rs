@@ -21,7 +21,7 @@ use crate::hs256::{claims_one, split_header, Scratch};
 use crate::json::Now;
 use crate::{Error, Verdict};
 
-mod ed25519;
+pub(crate) mod ed25519;
 mod p256;
 mod rsa;
 
