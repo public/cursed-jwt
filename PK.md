@@ -144,6 +144,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 |---|---|---|---|
 | P-256 field: portable C (fiat-crypto + P-256 `fe_mul`) | 9.0 µs ES256 | 21.6 µs | — |
 | P-256 field: s2n-bignum `bignum_montmul_p256` etc. | 9.2 µs (no gain) | **15.4 µs** | both (M5 harmless; Xeon −29%) |
+| P-256 field: s2n-bignum `bignum_montmul_p256_alt` / `_montsqr_p256_alt` (no BMI2/ADX needed) | n/a | x86-64 without BMI2/ADX | both, on such CPUs and VMs: see below |
 | RSA-2048: portable C (product scanning, `_addcarry_u64` on x86) | 13.3 µs | 34.4 µs | — |
 | RSA-2048: s2n-bignum `bignum_kmul_32_64` / `ksqr` + `emontredc_8n` | 13.2 µs | **16.4 µs** | Xeon |
 | RSA-2048: libcrypto `BN_mod_exp_mont` / `BN_mod_mul_montgomery` | **8.4 µs** | 20.4 µs | M5 |
@@ -156,7 +157,13 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **The choice is made at run time** from the CPU's features, so a build containing every backend runs on any
   machine:
   - `s2n_ok()`: on x86-64, s2n-bignum's kernels run only with BMI2 + ADX. The P-256 point arithmetic is compiled
-    twice (`src/jwt_pk_ec.inc`, with C and with s2n-bignum field operations), and one is picked per batch.
+    three times (`src/jwt_pk_ec.inc`: with C, with s2n-bignum's field operations, and on x86-64 with its ADX-free
+    `_alt` multiply / square), and one is picked per batch.
+  - Some VMs hide BMI2/ADX from the guest; Vultr's Genoa and Cascade Lake guests do. There the `_alt` kernels
+    replace fiat C. ES256 full verify (1 vCPU, gcc -O3, 7 interleaved rounds):
+    - Genoa: 30.2 → 21.2 µs at batch 1, 25.0 → 16.0 µs at batch 16.
+    - Cascade Lake: 41.8 → 26.5 µs, 33.9 → 18.4 µs.
+    - Turin, which exposes ADX: unchanged (±0.2%).
   - `rsa_use_ossl()` / `mont_for()`: RSA-2048 on x86-64 uses s2n-bignum when BMI2 + ADX are present, otherwise
     libcrypto (if built in), otherwise C. Larger moduli and ARM use libcrypto.
   - `cmb_ok()`: crypto_mb runs only with AVX-512 IFMA (below).

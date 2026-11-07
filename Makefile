@@ -160,6 +160,8 @@ fuzz:
 S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
 S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
              fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n
+# x86-64 only: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX
+S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt)
 S2N := -DJWT_S2N $(B)/libs2n.a
 $(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
 	./scripts/fetch-s2n-bignum.sh
@@ -192,6 +194,7 @@ $(eval $(call PK_BACKEND,_ifma,$(CMB) $(FAST),$(B)/libs2n.a third_party/crypto-m
 pk-test-s2n pk-test-fast pk-test-ifma: pk-test-%: $(B)/test_pk_% $(B)/test_pk_%_screen $(B)/pk_vectors.txt
 	./$(B)/test_pk_$* $(B)/pk_vectors.txt
 	./$(B)/test_pk_$*_screen $(B)/pk_vectors.txt
+	JWT_CPU_MASK=0xfffffffb ./$(B)/test_pk_$* $(B)/pk_vectors.txt   # BMI2/ADX masked: the ADX-free kernels (x86-64)
 pk-bench-s2n pk-bench-fast: pk-bench-%: $(B)/bench_pk_% $(B)/bench_pk_%_screen $(B)/pk_tokens.txt
 	./$(B)/bench_pk_$* $(B)/pk_tokens.txt
 	./$(B)/bench_pk_$*_screen $(B)/pk_tokens.txt
