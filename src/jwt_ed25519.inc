@@ -58,6 +58,10 @@ static void f_sub(fe25_t o, const fe25_t a, const fe25_t b) {
     fiat_25519_sub(t, a, b);
     fiat_25519_carry(o, t);
 }
+/* a + b and a - b of tight inputs, not carried: loose, so only for a multiplication input (fiat's carry_mul and
+ * carry_square take loose operands) */
+#define F_ADDL(o, a, b) fiat_25519_add(o, a, b)
+#define F_SUBL(o, a, b) fiat_25519_sub(o, a, b)
 static void f_neg(fe25_t o, const fe25_t a) {
     fe25_t t;
     fiat_25519_opp(t, a);
@@ -172,35 +176,36 @@ static int ed_decode(ed_p3 *P, const uint8_t s[32]) {
 }
 
 #ifndef JWT_ED_S2N /* (with s2n-bignum on x86-64, edwards25519_pepadd does these) */
-/* P += Q (Niels), ref10's ge_madd: 8M */
+/* P += Q (Niels), ref10's ge_madd: 7M.  Only 2Z is carried (it is an add / sub input); every other sum feeds a
+ * multiplication. */
 static void ed_madd(ed_p3 *P, const ed_niels *q) {
     fe25_t a, b, c, d, e, f, g, h;
-    f_sub(a, P->Y, P->X), F_MUL(a, a, q->ymx);
-    f_add(b, P->Y, P->X), F_MUL(b, b, q->ypx);
+    F_SUBL(a, P->Y, P->X), F_MUL(a, a, q->ymx);
+    F_ADDL(b, P->Y, P->X), F_MUL(b, b, q->ypx);
     F_MUL(c, P->T, q->xy2d);
     f_add(d, P->Z, P->Z);
-    f_sub(e, b, a), f_sub(f, d, c), f_add(g, d, c), f_add(h, b, a);
+    F_SUBL(e, b, a), F_SUBL(f, d, c), F_ADDL(g, d, c), F_ADDL(h, b, a);
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
 /* P += -Q (Niels): swap y+x / y-x, negate 2dxy */
 static void ed_msub(ed_p3 *P, const ed_niels *q) {
     fe25_t a, b, c, d, e, f, g, h;
-    f_sub(a, P->Y, P->X), F_MUL(a, a, q->ypx);
-    f_add(b, P->Y, P->X), F_MUL(b, b, q->ymx);
+    F_SUBL(a, P->Y, P->X), F_MUL(a, a, q->ypx);
+    F_ADDL(b, P->Y, P->X), F_MUL(b, b, q->ymx);
     F_MUL(c, P->T, q->xy2d);
     f_add(d, P->Z, P->Z);
-    f_sub(e, b, a), f_add(f, d, c), f_sub(g, d, c), f_add(h, b, a);
+    F_SUBL(e, b, a), F_ADDL(f, d, c), F_SUBL(g, d, c), F_ADDL(h, b, a);
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
 #endif
 /* P = P + Q, both extended (add-2008-hwcd-3, a = -1): table building only */
 static void ed_add(ed_p3 *P, const ed_p3 *Q) {
     fe25_t a, b, c, d, e, f, g, h, t;
-    f_sub(a, P->Y, P->X), f_sub(t, Q->Y, Q->X), F_MUL(a, a, t);
-    f_add(b, P->Y, P->X), f_add(t, Q->Y, Q->X), F_MUL(b, b, t);
+    F_SUBL(a, P->Y, P->X), F_SUBL(t, Q->Y, Q->X), F_MUL(a, a, t);
+    F_ADDL(b, P->Y, P->X), F_ADDL(t, Q->Y, Q->X), F_MUL(b, b, t);
     F_MUL(c, P->T, Q->T), F_MUL(c, c, ED_D2);
     F_MUL(d, P->Z, Q->Z), f_add(d, d, d);
-    f_sub(e, b, a), f_sub(f, d, c), f_add(g, d, c), f_add(h, b, a);
+    F_SUBL(e, b, a), F_SUBL(f, d, c), F_ADDL(g, d, c), F_ADDL(h, b, a);
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
 static void ed_dbl(ed_p3 *P) { /* dbl-2008-hwcd, a = -1 */
