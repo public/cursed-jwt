@@ -971,14 +971,13 @@ JWT_INLINE void ni_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint
                     s = i;
                     break;
                 }
+            /* five left with one block count: 3 + 2 streams, not 4 + a latency-bound single stream */
+            if (s == 4 && m - g == 5 && pp[g + 4]->nb == pp[g]->nb) s = 3;
             uint32_t *out[4];
             for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
             switch (s) { /* constant S per call so ni_hmac fully specialises */
                 case 4: ni_hmac(4, raw, k, pp + g, out); break;
-                case 3:
-                    ni_hmac(2, raw, k, pp + g, out);
-                    ni_hmac(1, raw, k, pp + g + 2, out + 2);
-                    break;
+                case 3: ni_hmac(3, raw, k, pp + g, out); break;
                 case 2: ni_hmac(2, raw, k, pp + g, out); break;
                 default: ni_hmac(1, raw, k, pp + g, out); break;
             }
