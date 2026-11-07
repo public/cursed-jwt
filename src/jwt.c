@@ -74,9 +74,9 @@ static unsigned jwt_cpu_bits;
 __attribute__((constructor)) static void jwt_cpu_init(void) {
     unsigned f = JWT_CPU_DETECTED;
 #if defined(JWT_X86)
-    unsigned a = 0, b = 0, c = 0, d = 0, ecx1 = 0, ebx7 = 0;
+    unsigned a = 0, b = 0, c = 0, d = 0, ecx1 = 0, ebx7 = 0, ecx7 = 0;
     if (__get_cpuid(1, &a, &b, &c, &d)) ecx1 = c;
-    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b, ecx7 = c;
     unsigned xcr0 = 0;
     if (ecx1 & (1u << 27)) { /* OSXSAVE: the OS manages the vector state that XCR0 lists */
         unsigned hi;
@@ -90,6 +90,7 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
     if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+    if ((f & JWT_CPU_AVX512VL) && (ecx7 & (1u << 1))) f |= JWT_CPU_VBMI;
     unsigned vb = 0, vc = 0, vd = 0, fam;
     __get_cpuid(0, &a, &vb, &vc, &vd);
     int amd = vb == 0x68747541 && vd == 0x69746e65 && vc == 0x444d4163; /* "AuthenticAMD" */
@@ -1133,10 +1134,58 @@ static int b64url_decode_avx2(uint8_t *dst, const char *src, int n) {
     return r < 0 ? -1 : o + r;
 }
 JWT_END_TARGET
+/* AVX-512 VBMI, 64 chars -> 48 bytes per step (the approach of Muła and Lemire, "Base64 encoding and decoding at
+ * almost the speed of a memory copy", SPE 2020; the packing as in simdutf's icelake kernel).  Used only on CPUs
+ * where 512-bit vectors cost no clock speed (FAST_ZMM, i.e. AMD Zen 4 / 5).
+ *  - every load is masked to the input, every store to the output: no slack is read or written;
+ *  - translation: one vpermi2b through b64u_tab's first 128 entries (invalid ones have bit 7 set), OR'd with the
+ *    input so a byte >= 0x80 is caught as well, tested under the load mask;
+ *  - the final partial quantum (2 or 3 chars) decodes to 3 bytes with the unused low bits in the bytes past the
+ *    output: they must be zero (the canonical-trailing-bits rule), checked by one masked test;
+ *  - n % 4 == 1 is never valid. */
+__attribute__((target("avx512f,avx512bw,avx512vl,avx512vbmi"))) static int b64url_decode_vbmi(uint8_t *dst,
+                                                                                              const char *src, int n) {
+    if ((n & 3) == 1) return -1;
+    const __m512i lo = _mm512_load_si512((const void *)b64u_tab), hi = _mm512_load_si512((const void *)(b64u_tab + 64));
+    const __m512i m1 = _mm512_set1_epi32(0x01400140), m2 = _mm512_set1_epi32(0x00011000);
+    /* output byte 3j + r = byte 2 - r of 32-bit lane j (a << 18 | b << 12 | c << 6 | d, little-endian) */
+    const __m512i pk = _mm512_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 60, 61, 62, 56, 57, 58, 52, 53,
+                                       54, 48, 49, 50, 44, 45, 46, 40, 41, 42, 36, 37, 38, 32, 33, 34, 28, 29, 30, 24,
+                                       25, 26, 20, 21, 22, 16, 17, 18, 12, 13, 14, 8, 9, 10, 4, 5, 6, 0, 1, 2);
+    const __m512i hb = _mm512_set1_epi8((char)0x80);
+    __mmask64 bad = 0;
+    int i = 0, o = 0;
+    for (; i + 64 <= n; i += 64, o += 48) {
+        __m512i v = _mm512_loadu_si512((const void *)(src + i));
+        __m512i t = _mm512_permutex2var_epi8(lo, v, hi);
+        bad |= _mm512_test_epi8_mask(_mm512_or_si512(t, v), hb);
+        __m512i x = _mm512_madd_epi16(_mm512_maddubs_epi16(t, m1), m2);
+        _mm512_mask_storeu_epi8(dst + o, (__mmask64)0xFFFFFFFFFFFFull, _mm512_permutexvar_epi8(pk, x));
+    }
+    int m = n - i;
+    if (m) {
+        __mmask64 k = ((__mmask64)1 << m) - 1;
+        __m512i v = _mm512_maskz_loadu_epi8(k, src + i);
+        __m512i t = _mm512_maskz_mov_epi8(k, _mm512_permutex2var_epi8(lo, v, hi)); /* lanes past the input: 0 */
+        bad |= _mm512_mask_test_epi8_mask(k, _mm512_or_si512(t, v), hb);
+        __m512i y = _mm512_permutexvar_epi8(pk, _mm512_madd_epi16(_mm512_maddubs_epi16(t, m1), m2));
+        int out = m / 4 * 3 + (m & 3 ? (m & 3) - 1 : 0), full = (m + 3) / 4 * 3;
+        __mmask64 spare = (((__mmask64)1 << full) - 1) & ~(((__mmask64)1 << out) - 1);
+        bad |= _mm512_mask_test_epi8_mask(spare, y, y); /* leftover bits of a partial quantum must be zero */
+        _mm512_mask_storeu_epi8(dst + o, ((__mmask64)1 << out) - 1, y);
+        o += out;
+    }
+    return bad ? -1 : o;
+}
 static int b64url_decode_resolve(uint8_t *dst, const char *src, int n);
 static int (*b64url_impl)(uint8_t *, const char *, int) = b64url_decode_resolve;
+static int b64u_pick_vbmi(void) {
+    return (jwt_cpu() & (JWT_CPU_VBMI | JWT_CPU_FAST_ZMM)) == (JWT_CPU_VBMI | JWT_CPU_FAST_ZMM);
+}
 static int b64url_decode_resolve(uint8_t *dst, const char *src, int n) {
-    int (*f)(uint8_t *, const char *, int) = jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2 : jwt_b64url_decode_scalar;
+    int (*f)(uint8_t *, const char *, int) = b64u_pick_vbmi()           ? b64url_decode_vbmi
+                                             : jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2
+                                                                        : jwt_b64url_decode_scalar;
     JWT_STORE_FN(b64url_impl, f);
     return f(dst, src, n);
 }
@@ -1853,7 +1902,9 @@ __attribute__((constructor)) static void jwt_resolve_all(void) {
     JWT_STORE_FN(hmac_impl, hmac_default());
     JWT_STORE_FN(sha256_impl, sha256_default());
 #if defined(JWT_X86)
-    JWT_STORE_FN(b64url_impl, jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2 : jwt_b64url_decode_scalar);
+    JWT_STORE_FN(b64url_impl, b64u_pick_vbmi()           ? b64url_decode_vbmi
+                              : jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2
+                                                         : jwt_b64url_decode_scalar);
 #endif
 }
 
