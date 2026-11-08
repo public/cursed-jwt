@@ -102,10 +102,17 @@ int main(int argc, char **argv) {
                 bad += check_engine("shani_1", jwt_hmac_shani_1, secret, slen);
                 bad += check_engine("shani_2", jwt_hmac_shani_2, secret, slen);
                 bad += check_engine("shani_4", jwt_hmac_shani_4, secret, slen);
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+                bad += check_engine("shani_4r", jwt_hmac_shani_4r, secret, slen);
+#endif
             }
             if (f & JWT_CPU_AVX512VL) {
                 bad += check_engine("avx512", jwt_hmac_avx512, secret, slen);
                 bad += check_engine("zmm", jwt_hmac_zmm, secret, slen);
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+                bad += check_engine("x16", jwt_hmac_x16, secret, slen);
+                if (f & JWT_CPU_SHANI) bad += check_engine("shani_x16", jwt_hmac_shani_x16, secret, slen);
+#endif
             }
 #endif
         }

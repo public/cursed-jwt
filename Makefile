@@ -29,14 +29,15 @@ UNAME_M := $(shell uname -m)
 # (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
 ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
-# ELF only), and SHA-NI batches the generated 3/4-stream kernels (src/sha256_shani_mb.S, -DJWT_SHANI_MB).
+# ELF only), SHA-NI batches the generated 3/4-stream kernels (src/sha256_shani_mb.S) and zmm batches the generated
+# 16-lane kernel (src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB.
 # `make OSSL_SHA=` builds without either.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
 ifeq ($(OSSL_SHA),1)
 SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB
-SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
@@ -61,6 +62,8 @@ $(B)/jwt.o: $(SRC) | $(B)
 $(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/sha256_shani_mb.o: src/sha256_shani_mb.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/sha256_x16_avx512.o: src/sha256_x16_avx512.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
@@ -118,7 +121,7 @@ $(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
 dudect: $(B)/dudect_hmac
 	./$(B)/dudect_hmac control x 1; ./$(B)/dudect_hmac aa ossl 1; ./$(B)/dudect_hmac aa avx2 16
-	for e in ossl avx2 avx512 zmm shani_4; do ./$(B)/dudect_hmac key $$e 16; done
+	for b in 3 16; do for e in ossl avx2 avx512 zmm x16 shani_4 shani_4r shani_x16; do ./$(B)/dudect_hmac key $$e $$b; done; done
 	./$(B)/dudect_hmac key ossl 1
 	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check

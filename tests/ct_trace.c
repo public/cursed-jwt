@@ -39,9 +39,12 @@ int main(int argc, char **argv) {
         { "ossl", jwt_hmac_ossl },
 #endif
 #if defined(__x86_64__)
-        { "avx2", jwt_hmac_avx2 },       { "avx2x2", jwt_hmac_avx2x2 },   { "shani_1", jwt_hmac_shani_1 },
-        { "shani_2", jwt_hmac_shani_2 }, { "shani_4", jwt_hmac_shani_4 }, { "avx512", jwt_hmac_avx512 },
+        { "avx2", jwt_hmac_avx2 },         { "avx2x2", jwt_hmac_avx2x2 },   { "shani_1", jwt_hmac_shani_1 },
+        { "shani_2", jwt_hmac_shani_2 },   { "shani_4", jwt_hmac_shani_4 }, { "avx512", jwt_hmac_avx512 },
         { "zmm", jwt_hmac_zmm },
+#endif
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+        { "shani_4r", jwt_hmac_shani_4r }, { "x16", jwt_hmac_x16 },         { "shani_x16", jwt_hmac_shani_x16 },
 #endif
     };
     jwt_hmac_fn *f = 0;

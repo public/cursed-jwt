@@ -4,7 +4,7 @@
 # differs, or if the leaky control's doesn't.
 set -eu
 SDE="$1" BIN="$2"
-ENGINES="${3:-scalar ossl avx2 avx2x2 shani_1 shani_2 shani_4 avx512 zmm}"
+ENGINES="${3:-scalar ossl avx2 avx2x2 shani_1 shani_2 shani_4 avx512 zmm shani_4r x16 shani_x16}"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 norm() { # control flow (instruction address + disassembly) and memory addresses; every data value dropped

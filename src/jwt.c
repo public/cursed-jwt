@@ -98,6 +98,13 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     /* AMD's AVX-512 parts (Zen 4 = family 19h, Zen 5 = 1Ah) run 512-bit integer work without the frequency-licence
      * drop Intel's do, so there the 16-lane zmm engine beats the 8-lane ymm one.  Intel always keeps the ymm engine. */
     if ((f & JWT_CPU_AVX512VL) && amd && fam >= 0x19) f |= JWT_CPU_FAST_ZMM;
+    /* Zen 5 server and desktop parts (family 1Ah, models 00h-1Fh Turin, 40h-4Fh Granite Ridge) execute 512-bit ops
+     * at full width, and SHA-NI there keeps only 2 sha256rnds2 in flight: groups of 11 or more messages run faster on
+     * the zmm engine (x16: 128 vs 197 ns per 570-byte HMAC on Turin at 16 lanes).  Zen 4 and the 256-bit-datapath
+     * Zen 5 mobile parts keep SHA-NI. */
+    unsigned model = ((a >> 4) & 0xF) | (((a >> 8) & 0xF) == 0xF ? ((a >> 16) & 0xF) << 4 : 0);
+    if ((f & JWT_CPU_FAST_ZMM) && fam == 0x1A && (model < 0x20 || (model >= 0x40 && model < 0x50)))
+        f |= JWT_CPU_FULL_ZMM;
     /* Every Zen has SHA-NI, and there 4 interleaved SHA-NI streams beat every vector engine at every batch size
      * (Zen 2, 3 and 4 measured).  Intel's SHA-NI parts have not been timed, so they keep the vector engines. */
     if ((f & JWT_CPU_SHANI) && amd) f |= JWT_CPU_FAST_SHANI;
@@ -759,6 +766,60 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+/* ---- zmm, 16 lanes, in assembly: src/sha256_x16_avx512.S (scripts/gen-sha256-x16.py), a GAS port of Intel
+ * ipsec-mb's sha256_x16_avx512 (BSD-3-Clause): the schedule in zmm16-31, the next block's rows loaded during rounds
+ * 48-63.  st[j] holds state word j of the 16 lanes; blk is nb * 16 block pointers, block-major; _rows takes one block
+ * already transposed (w[t] = word t of every lane). */
+void jwt_sha256_x16(uint32_t st[8][16], const uint8_t *const *blk, size_t nb);
+void jwt_sha256_x16_rows(uint32_t st[8][16], const uint32_t w[16][16]);
+static void lanes_x16(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint32_t (*mac)[8]) {
+    enum { CB = 16 }; /* blocks per kernel call */
+    uint32_t st[8][16] __attribute__((aligned(64))), w[16][16] __attribute__((aligned(64)));
+    const uint8_t *blk[CB * 16];
+    int nb[16], maxnb = 0, ragged = 0;
+    for (int l = 0; l < 16; l++) {
+        nb[l] = l < nl ? pl[l]->nb : 0;
+        if (nb[l] > maxnb) maxnb = nb[l];
+    }
+    for (int l = 0; l < nl; l++) ragged |= nb[l] != maxnb;
+    for (int i = 0; i < 8; i++) _mm512_store_si512(st[i], _mm512_set1_epi32((int)k->ih[i]));
+    if (!ragged) {
+        for (int b0 = 0; b0 < maxnb; b0 += CB) {
+            int c = maxnb - b0 < CB ? maxnb - b0 : CB;
+            for (int b = 0; b < c; b++)
+                for (int l = 0; l < 16; l++) blk[16 * b + l] = l < nl ? hplan_block(pl[l], b0 + b) : zero_block;
+            jwt_sha256_x16(st, blk, (size_t)c);
+        }
+    } else { /* block by block; lanes that ran out keep their state */
+        for (int b = 0; b < maxnb; b++) {
+            __m512i old[8];
+            __mmask16 live = 0;
+            for (int l = 0; l < 16; l++) {
+                int on = b < nb[l];
+                live |= (__mmask16)(on << l);
+                blk[l] = on ? hplan_block(pl[l], b) : zero_block;
+            }
+            for (int i = 0; i < 8; i++) old[i] = _mm512_load_si512(st[i]);
+            jwt_sha256_x16(st, blk, 1);
+            for (int i = 0; i < 8; i++)
+                _mm512_store_si512(st[i], _mm512_mask_blend_epi32(live, old[i], _mm512_load_si512(st[i])));
+        }
+    }
+    /* outer hash: one block = inner digest || 0x80 || zeros || bitlen(64 + 32), already in row form */
+    for (int i = 0; i < 8; i++) _mm512_store_si512(w[i], _mm512_load_si512(st[i]));
+    _mm512_store_si512(w[8], _mm512_set1_epi32((int)0x80000000u));
+    for (int i = 9; i < 15; i++) _mm512_store_si512(w[i], _mm512_setzero_si512());
+    _mm512_store_si512(w[15], _mm512_set1_epi32((64 + 32) * 8));
+    for (int i = 0; i < 8; i++) _mm512_store_si512(st[i], _mm512_set1_epi32((int)k->oh[i]));
+    jwt_sha256_x16_rows(st, (const uint32_t(*)[16])w);
+    for (int l = 0; l < nl; l++)
+        for (int j = 0; j < 8; j++) mac[l][j] = st[j][l];
+}
+void jwt_hmac_x16(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    x2_drive(lanes_x16, lanes_avx512, k, n, msg, len, mac);
+}
+#endif
 JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 #endif
 #endif /* AVX2 */
@@ -1080,6 +1141,21 @@ void jwt_hmac_shani_4r(const jwt_key_t *k, int n, const uint8_t *const *msg, con
      * second inlined copy of ni_hmac(2) here measured 1.5-4% slower at batch 2 on Zen 2/3, from code placement) */
     if (n <= 2) return jwt_hmac_shani_4(k, n, msg, len, mac);
     mb_drive(k, n, msg, len, mac);
+}
+/* JWT_CPU_FULL_ZMM (Zen 5): groups of JWT_X16_MIN..16 messages on the 16-lane x16 kernel, the rest on shani-4r.  A
+ * 16-lane group costs the same with fewer live lanes, and x16 at 16 lanes is 1.54x shani-4r on Turin, so it pays from
+ * 11 messages up. */
+#ifndef JWT_X16_MIN
+#define JWT_X16_MIN 11
+#endif
+void jwt_hmac_shani_x16(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    int done = 0;
+    while (n - done >= JWT_X16_MIN) {
+        int m = n - done < 16 ? n - done : 16;
+        jwt_hmac_x16(k, m, msg + done, len + done, mac + done);
+        done += m;
+    }
+    if (n > done) jwt_hmac_shani_4r(k, n - done, msg + done, len + done, mac + done);
 }
 #endif /* JWT_SHANI_MB */
 JWT_END_TARGET
@@ -1881,9 +1957,13 @@ static jwt_hmac_fn *hmac_default(void) {
 #endif
 #if defined(JWT_X86)
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
+    if ((f & JWT_CPU_FAST_SHANI) && (f & JWT_CPU_FULL_ZMM)) return jwt_hmac_shani_x16; /* Zen 5: x16 for >= 11 */
     if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4r; /* every Zen: 4 SHA-NI streams, hand-scheduled */
 #endif
     if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+    if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_x16; /* 16 lanes, asm; < 9 live -> ymm */
+#endif
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
     if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
@@ -1919,6 +1999,8 @@ const char *jwt_engine(void) {
     if (h == jwt_hmac_shani_4) return "shani";
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
     if (h == jwt_hmac_shani_4r) return "shani";
+    if (h == jwt_hmac_shani_x16) return "shani+zmm";
+    if (h == jwt_hmac_x16) return "zmm";
 #endif
     if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
