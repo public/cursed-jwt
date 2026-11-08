@@ -262,6 +262,29 @@ static void test_b64(void) {
     CHECK(jwt_b64url_decode(a, "QUI", 3) == 2, "QUI");
     CHECK(jwt_b64url_decode(a, "QUJ", 3) < 0, "non-canonical QUJ");
     CHECK(jwt_b64url_decode(a, "QQ==", 4) < 0, "padding");
+#if defined(JWT_X86)
+    /* The VBMI decoder is dispatched only on VBMI && FAST_ZMM (AMD Zen 4/5), so neither the loop above nor the
+     * fuzzer reaches it on Intel. Test it directly wherever VBMI exists, against the scalar decoder, over every
+     * length 0..1024 with adversarial content (needs >= 16 readable bytes past n, like the real decode buffers). */
+    if (jwt_cpu_features() & JWT_CPU_VBMI) {
+        static const char pool[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_+/= \t\n\x01\x80\xff";
+        uint8_t va[1200], vb[1200];
+        char vs[1200 + 16];
+        long bad = 0;
+        for (int n = 0; n <= 1024; n++) {
+            for (int t = 0; t < 8; t++) {
+                for (int i = 0; i < n; i++)
+                    vs[i] = (rnd() & 3) ? B64U[rnd() & 63] : pool[rnd() % (int)(sizeof pool - 1)];
+                memset(vs + n, 'A', 16); /* readable slack, as a token buffer has */
+                int rv = b64url_decode_vbmi(va, vs, n), rs = jwt_b64url_decode_scalar(vb, vs, n);
+                if (rv != rs || (rv >= 0 && memcmp(va, vb, rv))) bad++;
+            }
+        }
+        CHECK(bad == 0, "vbmi vs scalar: %ld mismatches over lengths 0..1024", bad);
+        printf("  vbmi decoder: checked directly vs scalar, lengths 0..1024\n");
+    }
+#endif
 }
 
 static void test_hmac_random(void) {
