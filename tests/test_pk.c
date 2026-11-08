@@ -159,6 +159,13 @@ static void test_arith(void) {
             fiat_p256_sub(y, a, b), bignum_sub_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
         }
 #endif
+#ifdef JWT_S2N_ALT
+        { /* the ADX-free kernels run on any x86-64 */
+            uint64_t z[4];
+            fiat_p256_mul(y, a, b), bignum_montmul_p256_alt(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_square(y, a), bignum_montsqr_p256_alt(z, a), bad += memcmp(z, y, 32) != 0;
+        }
+#endif
         rand_below(a, P256_N);
         if (fe_iszero(a)) continue;
         uint64_t am[4], im[4], one[4];
@@ -189,6 +196,9 @@ static void test_arith(void) {
         printf("  s2n-bignum (-DJWT_S2N): P-256 field ops and RSA-2048 mont mul/sqr cross-checked\n");
     }
 #endif
+#ifdef JWT_S2N_ALT
+    printf("  s2n-bignum P-256 _alt mul/sqr (ADX-free) cross-checked against fiat-crypto\n");
+#endif
     printf("  P-256 fe_mul/sqr/add/sub (selected and C) vs fiat-crypto, sc_inv: %d random + edge inputs\n", n);
 }
 
@@ -199,7 +209,12 @@ int main(int argc, char **argv) {
            cmb_ok() ? "ACTIVE" : "inactive, CPU lacks IFMA (fallback paths run)");
 #endif
 #ifdef JWT_S2N
+#ifdef JWT_S2N_ALT
+    printf(", s2n-bignum: %s",
+           s2n_ok() ? "active" : "P-256 on the ADX-free _alt kernels, RSA on the fallback (CPU lacks BMI2/ADX)");
+#else
     printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive, CPU lacks BMI2/ADX");
+#endif
 #endif
     printf("\n");
     test_arith();
