@@ -11,6 +11,8 @@
  *   b64                the dispatched base64url decoder on a 43-char signature: one fixed string (0) or random ones (1).
  *                      The token is a credential. In a tight loop the table stays in L1, so this shows branches, not
  *                      cache-line leaks; see test_ct.c's token map for those.
+ *   aa ENGINE BATCH    A/A negative control: both classes are copies of the same fixed key from two separate pools. It
+ *                      must say ok, or the harness itself is asymmetric.
  *   control            positive control: an early-exit 32-byte compare (deliberately leaky), mismatch at byte 0 (0) or
  *                      byte 31 (1). It must report LEAK, or the harness can't see what it claims to test.
  * Usage: dudect_hmac TEST [ENGINE] [BATCH] [N]; N measurements per test (default 1,000,000). */
@@ -46,7 +48,8 @@ static int cmp_u64(const void *x, const void *y) {
 /* the operation under test: class c, sample i */
 static jwt_hmac_fn *eng;
 static int batch;
-static jwt_key_t kfix, krand[256];
+static jwt_key_t kfix, krand[256], kfixpool[256], kfixpool2[256]; /* equal-sized pools: both classes touch the same
+                                                                     amount of memory (dudect's rule) */
 static uint8_t msgs[32][600];
 static const uint8_t *mp[32];
 static int ml[32];
@@ -55,7 +58,7 @@ static char tokA[32][700], tokB[32][700];
 static const char *tp[32];
 static int tl[32];
 static jwt_result_t res[32];
-static char sigfix[44], sigrand[256][44];
+static char sigfix[44], sigrand[256][44], sigfixpool[256][44];
 static uint8_t dec[64];
 static int test;
 static uint8_t cmpa[32], cmpb0[32], cmpb1[32], cmpcur[32];
@@ -69,15 +72,28 @@ __attribute__((noinline)) static int leaky_eq(const uint8_t *a, const uint8_t *b
  * differ only in the secret, not in where it is read from) */
 static jwt_key_t kcur;
 static char tokcur[32][700], sigcur[44];
+/* branchless on the class: the pool is chosen by arithmetic, so no class-dependent branch enters the branch
+ * history that the timed operation's own branches are predicted from */
+static const jwt_key_t *kpool[2][2]; /* [aa][class] */
+static const char *tpool[2], *spool[2];
+static const uint8_t *cpool[2];
 static void prepare(int c, int i) {
-    if (test == 0) kcur = c ? krand[i & 255] : kfix;
-    else if (test == 1)
-        for (int j = 0; j < batch; j++) memcpy(tokcur[j], c ? tokB[j] : tokA[j], (size_t)tl[j]);
-    else if (test == 2) memcpy(sigcur, c ? sigrand[i & 255] : sigfix, 43);
-    else memcpy(cmpcur, c ? cmpb1 : cmpb0, 32);
+    if (test == 0 || test == 4) kcur = kpool[test == 4][c][i & 255];
+    else if (test == 1) {
+        const char *b = tpool[c];
+        for (int j = 0; j < batch; j++) memcpy(tokcur[j], b + 700 * j, (size_t)tl[j]);
+    } else if (test == 2) memcpy(sigcur, spool[c] + 44 * (i & 255), 43);
+    else memcpy(cmpcur, cpool[c], 32);
+}
+/* a fixed run of perfectly predictable branches: pushes the class out of the global branch history */
+static volatile int scrub_sink;
+__attribute__((noinline)) static void scrub_history(void) {
+    int a = 0;
+    for (int i = 0; i < 512; i++) a += i & 1 ? 3 : 5;
+    scrub_sink = a;
 }
 static void op(void) {
-    if (test == 0) eng(&kcur, batch, mp, ml, macs);
+    if (test == 0 || test == 4) eng(&kcur, batch, mp, ml, macs);
     else if (test == 1) jwt_verify_batch(&kfix, batch, tp, tl, 0, res);
     else if (test == 2) jwt_b64url_decode(dec, sigcur, 43);
     else sink = leaky_eq(cmpa, cmpcur);
@@ -87,7 +103,7 @@ int main(int argc, char **argv) {
     const char *t = argc > 1 ? argv[1] : "key", *e = argc > 2 ? argv[2] : "dispatch";
     batch = argc > 3 ? atoi(argv[3]) : 1;
     long N = argc > 4 ? atol(argv[4]) : 1000000;
-    test = !strcmp(t, "key") ? 0 : !strcmp(t, "mac") ? 1 : !strcmp(t, "b64") ? 2 : 3;
+    test = !strcmp(t, "key") ? 0 : !strcmp(t, "mac") ? 1 : !strcmp(t, "b64") ? 2 : !strcmp(t, "aa") ? 4 : 3;
     for (int i = 0; i < 32; i++) cmpa[i] = cmpb0[i] = cmpb1[i] = (uint8_t)rnd();
     cmpb0[0] ^= 1, cmpb1[31] ^= 1;
     uint8_t key[32];
@@ -96,6 +112,7 @@ int main(int argc, char **argv) {
     for (int r = 0; r < 256; r++) {
         for (int i = 0; i < 32; i++) key[i] = (uint8_t)rnd();
         jwt_key_init(&krand[r], key, 32);
+        kfixpool[r] = kfixpool2[r] = kfix;
     }
     for (int j = 0; j < 32; j++) {
         for (int i = 0; i < 570; i++) msgs[j][i] = (uint8_t)('A' + rnd() % 26);
@@ -111,7 +128,7 @@ int main(int argc, char **argv) {
 #if defined(JWT_SHANI_MB)
     else if (!strcmp(e, "shani_4r") && (f & JWT_CPU_SHANI)) eng = jwt_hmac_shani_4r;
 #endif
-    else if (strcmp(e, "scalar") && test == 0) {
+    else if (strcmp(e, "scalar") && (test == 0 || test == 4)) {
         printf("%s %s b%d: engine not available on this CPU/build\n", t, e, batch);
         return 0;
     }
@@ -159,6 +176,7 @@ int main(int argc, char **argv) {
         static const char *A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         for (int i = 0; i < 42; i++) sigfix[i] = A[rnd() & 63];
         sigfix[42] = 'A';
+        for (int r = 0; r < 256; r++) memcpy(sigfixpool[r], sigfix, 44);
         for (int r = 0; r < 256; r++) {
             for (int i = 0; i < 42; i++) sigrand[r][i] = A[rnd() & 63];
             sigrand[r][42] = "AEIMQUYcgkosw048"[rnd() & 15]; /* canonical last char (low 2 bits zero) */
@@ -167,10 +185,16 @@ int main(int argc, char **argv) {
     uint64_t *x = malloc(sizeof *x * N);
     uint8_t *cls = malloc(N);
     for (int j = 0; j < 32; j++) tp[j] = tokcur[j];
+    kpool[0][0] = kfixpool, kpool[0][1] = krand, kpool[1][0] = kfixpool, kpool[1][1] = kfixpool2;
+    tpool[0] = &tokA[0][0], tpool[1] = &tokB[0][0], spool[0] = &sigfixpool[0][0], spool[1] = &sigrand[0][0];
+    cpool[0] = cmpb0, cpool[1] = cmpb1;
+    uint8_t *seq = malloc(N); /* the class sequence, drawn before measuring */
+    for (long i = 0; i < N; i++) seq[i] = (uint8_t)(rnd() & 1);
     for (long i = 0; i < 10000; i++) prepare((int)(rnd() & 1), (int)i), op(); /* warm up */
     for (long i = 0; i < N; i++) {
-        int c = (int)(rnd() & 1);
+        int c = seq[i];
         prepare(c, (int)i);
+        scrub_history();
         _mm_mfence(), _mm_lfence(); /* the copy's stores done before the clock starts */
         uint64_t t0 = cyc();
         op();
