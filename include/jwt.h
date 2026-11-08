@@ -80,10 +80,11 @@ enum {
     JWT_CPU_SHA512 = 64,
     JWT_CPU_FAST_ZMM = 128,   /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */
     JWT_CPU_FAST_SHANI = 256, /* SHA-NI that beats the vector engines (AMD Zen): the 4-stream SHA-NI engine */
+    JWT_CPU_FULL_ZMM = 512,   /* full-width 512-bit execution (Zen 5 server/desktop): zmm for groups of 11+ */
     JWT_CPU_VBMI = 1024       /* AVX-512 VBMI (vpermi2b / vpermb): the zmm base64url decoder, with FAST_ZMM */
 };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
-const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "avx512vl", "avx2", "sha2", ... */
+const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "shani", "avx512vl", "avx2", ... */
 
 /* ---- engine-specific entry points (same contract), for tests and benchmarks ---- */
 void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
@@ -121,6 +122,13 @@ jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 
 #if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2;                       /* x2: 16 lanes = two interleaved 8-lane groups */
 jwt_hmac_fn jwt_hmac_shani_1, jwt_hmac_shani_2, jwt_hmac_shani_4; /* SHA-NI, 1 / 2 / 4 interleaved streams */
+#endif
+#if defined(JWT_SHANI_MB) && defined(__x86_64__) && defined(__ELF__)
+/* In assembly (link src/sha256_shani_mb.S and src/sha256_x16_avx512.S; the Makefile's default on x86-64 Linux):
+ * shani_4r = 4 hand-scheduled SHA-NI streams, the default on Zen; x16 = 16 lanes of zmm, a port of Intel ipsec-mb's
+ * sha256_x16_avx512 (needs JWT_CPU_AVX512VL), the zmm engine wherever it is built; shani_x16 = x16 for groups of 11+
+ * and shani_4r for the rest, the default on Zen 5 (JWT_CPU_FULL_ZMM; needs SHANI and AVX512VL) */
+jwt_hmac_fn jwt_hmac_shani_4r, jwt_hmac_x16, jwt_hmac_shani_x16;
 #endif
 #if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
