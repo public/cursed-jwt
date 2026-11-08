@@ -5,6 +5,8 @@
 # SHA-256.  Compiled on their own, without crypto_mb's build system or its OpenSSL dependency
 # (src/cmb_rsa/internal/rsa/ifma_rsa_arith.h stands in for the one header that needs OpenSSL).  Only the
 # -DJWT_RSAZ8 build uses them (src/jwt_pk.inc, PK.md).
+# Also crypto_mb's 8-lane P-256 field arithmetic (ifma_arith_p256.c / ifma_arith_m256.c and their header), which
+# src/cmb_ec/es8.c #includes for the -DJWT_ES8 build's 8-token ES256 comb additions.
 #   github.com/intel/cryptography-primitives @ 316ce55
 set -e
 cd "$(dirname "$0")/.."
@@ -34,4 +36,7 @@ get sources/ippcp/crypto_mb/include/internal/common/memory_clear.h b330a918ce867
 get sources/ippcp/crypto_mb/src/rsa/ifma_exp52x40_65537_mb8.c 174105ab80268638d2b8a0f39f993adfca433d70f03c796b8d705a1e1e16f869
 get sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_amm52x40_mb8.c feef4574e4f542a3cd8e23a0da0d2fb01bf21d784819d4c4e1b401af32439da7
 get sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_ams52x40_diagonal_mb8.c 72d356da1f67d1381e1dabf1273c7b79e6fb5e69d6fa545dd147eb1f23566137
-echo "crypto_mb rsa @ $C: OK"
+get sources/ippcp/crypto_mb/include/internal/ecnist/ifma_arith_p256.h e3f23b5a77a77133b713eb94569d1a6dda127401c96a5815d04c3b50e5af60c8
+get sources/ippcp/crypto_mb/src/ecnist/low_level_arith/ifma_arith_p256.c 986224af971bb454a8fdc84c6d71c7ab1f6fe0a1a2fbe578139be2b166dbc224
+get sources/ippcp/crypto_mb/src/ecnist/low_level_arith/ifma_arith_m256.c 93453428cefea9c5057c623ed921d0450ae19620c84a69de8ef7a14b9e1f8bbd
+echo "crypto_mb rsa + p256 @ $C: OK"
