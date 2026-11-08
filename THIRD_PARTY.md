@@ -27,6 +27,16 @@
     - the round constants and masks are local to the file; no SAFE_DATA clearing, no Windows ABI.
   - Used on x86-64 Linux by the `x16` HMAC engine (`-DJWT_SHANI_MB`, set by the Makefile there).
 
+- **Firedancer's AVX-512 IFMA curve25519 field** (https://github.com/firedancer-io/firedancer, commit `9d6f0a3`):
+  the marked block of `src/jwt_ed25519_r43x6.inc`.
+  - Copyright 2022 Firedancer Contributors. Apache License 2.0, full text in
+    [licenses/Firedancer-LICENSE.txt](licenses/Firedancer-LICENSE.txt).
+  - Copied: the `wwl_*` / `wwv_*` macros it uses (`src/util/simd/fd_avx512_wwl.h`, `fd_avx512_wwv.h`), the
+    `FD_R43X6_QUAD_*` macros and `fd_r43x6_quad_mul_fast` (`src/ballet/ed25519/avx512/fd_r43x6_inl.h` lines
+    36-391), and `FD_R43X6_GE_ADD_TABLE_ALT` (`fd_curve25519_secure.c`).
+  - Modifications: type and attribute definitions in place of Firedancer's `fd_util` headers, a target pragma
+    around the file. Used for EdDSA comb additions on AVX-512 IFMA CPUs with FAST_ZMM (`-DJWT_S2N`, x86-64).
+
 ## Credits
 
 cursed-jwt credits these projects for techniques and data:

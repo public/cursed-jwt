@@ -202,6 +202,54 @@ static void test_arith(void) {
     printf("  P-256 fe_mul/sqr/add/sub (selected and C) vs fiat-crypto, sc_inv: %d random + edge inputs\n", n);
 }
 
+#ifdef JWT_ED_S2N
+/* the radix-2^43 glue of jwt_ed25519_r43x6.inc: ed_r43_canon against fiat-crypto on random and extreme limbs, and
+ * ed_r43_from4 -> ed_r43_canon round trips (the latter on AVX-512 IFMA CPUs only) */
+static void test_r43(void) {
+    int bad = 0, n = 20000;
+    fe25_t p43[6]; /* 2^(43 i) as fiat elements */
+    for (int i = 0; i < 6; i++) {
+        uint8_t b[32] = { 0 };
+        b[(43 * i) / 8] = (uint8_t)(1u << ((43 * i) % 8));
+        fiat_25519_from_bytes(p43[i], b);
+    }
+    for (int it = 0; it < n; it++) {
+        long l[8] = { 0 };
+        for (int i = 0; i < 6; i++) {
+            uint64_t r = (uint64_t)rand() << 31 ^ (uint64_t)rand() << 62 ^ (uint64_t)rand();
+            int mode = it % 5;
+            l[i] = (long)(mode == 0 ? (1ull << 44) - 1 : mode == 1 ? r % 2 : r & ((1ull << 44) - 1));
+        }
+        if (it % 7 == 0) /* exactly p and p + 1 in radix 2^43 (limbs of 2^255 - 19, then + 1) */
+            l[0] = (1L << 43) - 19 + (it % 14 == 0), l[1] = l[2] = l[3] = l[4] = (1L << 43) - 1, l[5] = (1L << 40) - 1;
+        fe25_t acc, t, li;
+        memset(acc, 0, sizeof acc);
+        for (int i = 0; i < 6; i++) {
+            uint8_t b[32] = { 0 };
+            for (int j = 0; j < 8; j++) b[j] = (uint8_t)((uint64_t)l[i] >> (8 * j));
+            fiat_25519_from_bytes(li, b);
+            fiat_25519_carry_mul(t, li, p43[i]);
+            fiat_25519_add(acc, acc, t), fiat_25519_carry(acc, acc);
+        }
+        uint8_t want[32], got[32];
+        fiat_25519_to_bytes(want, acc);
+        ed_r43_canon(got, l);
+        bad += memcmp(want, got, 32) != 0;
+        if (ed_r43_ok()) { /* canonical -> 43-bit limbs -> canonical */
+            uint64_t v[4];
+            memcpy(v, want, 32);
+            long m[8];
+            ed_r43_from4_store(m, v);
+            ed_r43_canon(got, m);
+            bad += memcmp(want, got, 32) != 0 || m[6] || m[7];
+        }
+    }
+    CHECK(!bad, "EdDSA radix-2^43 glue: %d mismatches against fiat-crypto", bad);
+    printf("  EdDSA radix-2^43 glue vs fiat-crypto: %d random + extreme limb sets%s\n", n,
+           ed_r43_ok() ? ", with from4 round trips" : "");
+}
+#endif
+
 int main(int argc, char **argv) {
     printf("  cpu features 0x%x", jwt_cpu_features());
 #ifdef JWT_CRYPTO_MB
@@ -217,10 +265,14 @@ int main(int argc, char **argv) {
 #endif
 #endif
 #ifdef JWT_ED_S2N
-    printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
+    if (ed_r43_ok()) printf(", EdDSA additions: Firedancer r43x6 (AVX-512 IFMA)");
+    else printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
 #endif
     printf("\n");
     test_arith();
+#ifdef JWT_ED_S2N
+    test_r43();
+#endif
     FILE *f = fopen(argc > 1 ? argv[1] : "build/pk_vectors.txt", "r");
     if (!f) {
         perror("vectors");
