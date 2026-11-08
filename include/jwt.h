@@ -80,7 +80,8 @@ enum {
     JWT_CPU_SHA512 = 64,
     JWT_CPU_FAST_ZMM = 128,   /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */
     JWT_CPU_FAST_SHANI = 256, /* SHA-NI that beats the vector engines (AMD Zen): the 4-stream SHA-NI engine */
-    JWT_CPU_FULL_ZMM = 512    /* full-width 512-bit execution (Zen 5 server/desktop): zmm for groups of 11+ */
+    JWT_CPU_FULL_ZMM = 512,   /* full-width 512-bit execution (Zen 5 server/desktop): zmm for groups of 11+ */
+    JWT_CPU_VBMI = 1024       /* AVX-512 VBMI (vpermi2b / vpermb): the zmm base64url decoder, with FAST_ZMM */
 };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
 const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "shani", "avx512vl", "avx2", ... */
