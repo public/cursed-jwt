@@ -198,6 +198,41 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - It isn't yet known whether crypto_mb beats the fixed-key comb tables on ES256. Intel's code doesn't exploit
     a fixed key; ours does.
 
+### AVX-512 IFMA: 8-lane ES256 comb on crypto_mb's field (`-DJWT_ES8`)
+
+- **What it is.** The ES256 comb additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane
+  P-256 field arithmetic (`ifma_arith_p256.c` / `ifma_arith_m256.c`, cryptography-primitives @ 316ce55, Apache-2.0,
+  fetched pinned by `scripts/fetch-crypto-mb-rsa.sh`). `src/cmb_ec/es8.c` #includes them unchanged and builds into
+  `build/libcmbec.a`; only its `jwt_es8_*` symbols stay global.
+  - Not `mbx_nistp256_ecdsa_verify_mb8` itself: that has no per-key precompute and needs ~5,000 field multiplies
+    per token, against our ~730.
+- **How it works:**
+  - The per-key comb tables are read in place, with no second copy. Each lane gathers its own entry, which is moved
+    into crypto_mb's radix-2^52, R = 2^260 domain on the way in: ×16, then one Solinas fold, no multiply.
+  - The addition is the scalar code's madd-2007-bl (7M + 4S), with "at infinity" kept as a lane mask.
+  - The exceptional cases (acc = ±q) aren't branched on. They make H = 0, and Z stays 0 from then on. A lane that
+    ends with Z = 0 or at infinity, and the rare r + n < p candidate, is redone by the scalar code, so the results
+    are always the scalar code's.
+  - The batched s⁻¹ inversion and the recoding are unchanged.
+- **When it runs.** On IFMA CPUs where zmm costs no clock speed (FAST_ZMM: AMD Zen 4 / 5), for groups of at least
+  `JWT_ES8_MIN` (3) tokens. A short last group is padded. Batch 1 never takes it.
+- **Measured.** Raw verify per token on 570-byte signing inputs, gcc -O3, 1–2 vCPU Vultr VMs, median of 7 interleaved
+  rounds, against the same tree without it:
+
+  | CPU | b1 | b3 | b4 | b8 | b16 | b32 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | Turin (Zen 5) | 14.3 → 14.3 µs | 11.3 → 8.8 | 10.7 → 6.8 | 9.76 → 3.65 | **9.42 → 3.33** (2.8×) | 9.25 → 3.17 |
+  | Genoa (Zen 4) | 20.6 → 20.5 | 17.3 → 12.5 | 16.8 → 9.3 | 15.9 → 5.12 | **15.5 → 4.83** (3.2×) | 15.2 → 4.61 |
+
+  With the 8-lane group used from 2 tokens, b2 was +3.6% on Turin and −2% on Genoa, hence the minimum of 3.
+- **Tests** (`make pk-test-es8`; on Intel run them under SDE with `JWT_CPU_FORCE_ZMM=1`):
+  - the 8-lane field ops against fiat-crypto on [0, 2p) with edge values;
+  - the 8-lane accumulators against the scalar chain, including Q = G with d₂ = ±d₁, which forces both exceptional
+    cases;
+  - the verdicts against `es_points_c`;
+  - batches of 8 and 16 with one bad signature in every lane position;
+  - the full vector set.
+
 ### AVX-512 IFMA: OpenSSL's RSA-2048 multiply (`-DJWT_RSAZ`)
 
 - **What it gives.** One token at a time, RSA-2048 verification in 52-bit digits on IFMA CPUs. It's the fastest
