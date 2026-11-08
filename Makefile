@@ -173,6 +173,7 @@ licence: bench/licence_probe.c $(SRC) | $(B)
 # vendored in src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
 # Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
 PK := $(X86MONT)
+# (rules that also link $(X86SHA), which carries the same objects, take $(filter-out $(MONTOBJ),$(PK)))
 PKSRC := $(SRC)
 # property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
 HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run
@@ -180,7 +181,7 @@ $(B)/pyenv-hyp: | $(B)
 	@if $(PYTHON) -c "import cryptography, hypothesis" 2>/dev/null; then echo $(PYTHON) > $@; \
 	  else $(PYTHON) -m venv $(B)/venv && $(B)/venv/bin/pip -q install cryptography "hypothesis==6.*" && echo $(B)/venv/bin/python > $@; fi
 $(B)/libjwtshim.so: tests/pyshim.c $(PKSRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) -shared -fPIC $(INC) $(PK) $< $(X86SHA) -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) -shared -fPIC $(INC) $(filter-out $(MONTOBJ),$(PK)) $< $(X86SHA) -o $@
 test-hypothesis: $(B)/libjwtshim.so $(B)/pyenv-hyp
 	$$(cat $(B)/pyenv-hyp) -I tests/test_hypothesis.py $(B)/libjwtshim.so $(HYP_N)
 
@@ -192,7 +193,8 @@ $(B)/replay_verify: fuzz/fuzz_verify.c fuzz/replay.c $(SRC) | $(B)
 $(B)/replay_b64: fuzz/fuzz_b64.c fuzz/replay.c $(SRC) | $(B)
 	$(CC) $(FUZZ_SAN) fuzz/fuzz_b64.c fuzz/replay.c $(X86SHA) -o $@
 $(B)/replay_pk: fuzz/fuzz_pk.c fuzz/replay.c $(PKSRC) | $(B)
-	$(CC) $(FUZZ_SAN) $(PK) -DJWT_RSA_SCREEN fuzz/fuzz_pk.c fuzz/replay.c $(SSLLIB) -lcrypto $(X86SHA) -o $@
+	$(CC) $(FUZZ_SAN) $(filter-out $(MONTOBJ),$(PK)) -DJWT_RSA_SCREEN fuzz/fuzz_pk.c fuzz/replay.c $(SSLLIB) -lcrypto \
+	  $(X86SHA) -o $@
 fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_pk
 	@python3 -I fuzz/seeds.py $(B)/fuzz-seeds >/dev/null
 	@for h in verify b64 pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
