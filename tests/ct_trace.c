@@ -1,17 +1,27 @@
-/* ct_trace: constant-time check by trace equivalence, for the engines valgrind can't run (SHA-NI, AVX-512).
+/* ct_trace: constant-time check by trace equivalence, for the engines valgrind can't run here (SHA-NI, AVX-512, and
+ * the AArch64 NEON / SHA2 engines on an x86-64 machine).
  *
- * Runs jwt_key_init and one HMAC engine on fixed messages under key 0 or key 1, between two SDE SSC marks. Under Intel
- * SDE's debugtrace, scripts/ct-trace.sh records every executed instruction and every memory address, drops all data
+ * Runs jwt_key_init and one HMAC engine on fixed messages under key 0 or key 1, between two markers: SDE SSC marks on
+ * x86-64, calls to ct_trace_begin / ct_trace_end on AArch64. Under Intel SDE's debugtrace (x86-64) or qemu-aarch64's
+ * execlog plugin (AArch64), scripts/ct-trace.sh records every executed instruction and every memory address, drops all data
  * values, and requires the two keys' traces to be identical: same control flow and same addresses, so no key-dependent
  * branch or index. An emulator trace is deterministic, so unlike dudect this is a proof for the inputs traced, not a
  * statistic. The "leaky" engine (an early-exit compare on the key) is the positive control and must differ.
  *
  *   ct_trace ENGINE KEY BATCH          (prints the first MAC word)
- *   make test-ct-sde SDE=/path/to/sde64 */
+ *   make test-ct-sde SDE=/path/to/sde64
+ *   make test-ct-qemu QEMU=/path/to/qemu-aarch64 EXECLOG=/path/to/libexeclog.so   (cross-builds for AArch64) */
 #include "jwt.c"
 #include <stdio.h>
 
+#if defined(__x86_64__)
 #define SSC_MARK(x) __asm__ volatile("movl %0, %%ebx; .byte 0x64, 0x67, 0x90" ::"i"(x) : "ebx", "memory")
+#else
+/* elsewhere (AArch64 under qemu): calls to two empty functions, whose addresses ct-trace.sh cuts the trace at */
+__attribute__((noinline, used)) void ct_trace_begin(void) { __asm__ volatile("" ::: "memory"); }
+__attribute__((noinline, used)) void ct_trace_end(void) { __asm__ volatile("" ::: "memory"); }
+#define SSC_MARK(x) ((x) == 0x111 ? ct_trace_begin() : ct_trace_end())
+#endif
 
 static uint8_t msg[32][600];
 
@@ -39,9 +49,13 @@ int main(int argc, char **argv) {
         { "ossl", jwt_hmac_ossl },
 #endif
 #if defined(__x86_64__)
-        { "avx2", jwt_hmac_avx2 },       { "avx2x2", jwt_hmac_avx2x2 },   { "shani_1", jwt_hmac_shani_1 },
-        { "shani_2", jwt_hmac_shani_2 }, { "shani_4", jwt_hmac_shani_4 }, { "avx512", jwt_hmac_avx512 },
-        { "zmm", jwt_hmac_zmm },
+        { "avx2", jwt_hmac_avx2 },       { "avx2x2", jwt_hmac_avx2x2 },     { "shani_1", jwt_hmac_shani_1 },
+        { "shani_2", jwt_hmac_shani_2 }, { "shani_4", jwt_hmac_shani_4 },   { "avx512", jwt_hmac_avx512 },
+        { "zmm", jwt_hmac_zmm },         { "avx512x2", jwt_hmac_avx512x2 },
+#endif
+#if defined(__aarch64__)
+        { "neon", jwt_hmac_neon },       { "sha2_1", jwt_hmac_sha2_1 },     { "sha2_2", jwt_hmac_sha2_2 },
+        { "sha2", jwt_hmac_sha2 },
 #endif
     };
     jwt_hmac_fn *f = 0;

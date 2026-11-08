@@ -4,7 +4,7 @@
  * and every memory address computed from them. Undefined values flowing through arithmetic are not errors; only
  * branches, addresses and system calls are. That is exactly the set of operations whose timing can depend on data.
  *
- *   key      the HS256 secret: jwt_key_init and every HMAC engine this build has and this CPU runs, at batch sizes
+ *   key      the HS256 secret: jwt_key_init and every HMAC engine this build has and this CPU runs (x86-64 and AArch64), at batch sizes
  *            1..17 and message lengths 0..300. Expect 0 errors: run with --error-exitcode=1. The MACs are declassified
  *            only at the end, to check them against the scalar engine.
  *   token    (report only) the token bytes marked secret, through base64url decoding, a full HS256 verify and the
@@ -105,7 +105,16 @@ int main(int argc, char **argv) {
             }
             if (f & JWT_CPU_AVX512VL) {
                 bad += check_engine("avx512", jwt_hmac_avx512, secret, slen);
+                bad += check_engine("avx512x2", jwt_hmac_avx512x2, secret, slen);
                 bad += check_engine("zmm", jwt_hmac_zmm, secret, slen);
+            }
+#endif
+#if defined(__aarch64__)
+            bad += check_engine("neon", jwt_hmac_neon, secret, slen);
+            if (f & JWT_CPU_SHA2) {
+                bad += check_engine("sha2_1", jwt_hmac_sha2_1, secret, slen);
+                bad += check_engine("sha2_2", jwt_hmac_sha2_2, secret, slen);
+                bad += check_engine("sha2", jwt_hmac_sha2, secret, slen);
             }
 #endif
         }
