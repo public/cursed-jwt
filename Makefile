@@ -207,7 +207,8 @@ S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
 S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
              fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n
 # x86-64 only: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX
-S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt)
+S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt \
+  curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt)
 S2N := -DJWT_S2N $(B)/libs2n.a
 $(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
 	./scripts/fetch-s2n-bignum.sh

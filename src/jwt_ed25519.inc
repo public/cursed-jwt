@@ -26,9 +26,23 @@ typedef struct {
 typedef struct {
     fe25_t ypx, ymx, xy2d; /* y + x, y - x, 2 d x y of an affine point ("Niels" form) */
 } ed_niels;
+#if defined(JWT_S2N) && defined(__x86_64__)
+/* -DJWT_S2N on x86-64: the comb additions run on s2n-bignum's formally verified edwards25519_pepadd (BMI2 + ADX) or
+ * edwards25519_pepadd_alt (plain mul / adc, any x86-64): extended projective += precomputed affine, 7M, with every
+ * coordinate fully reduced mod p in 4 x 64-bit limbs.  Tables are stored in its (y - x, y + x, 2dxy) order; the
+ * accumulated point goes back to fiat's limbs once, for the batched inversion and the encoding. */
+#define JWT_ED_S2N 1
+typedef uint64_t ed_pp4[12];
+void edwards25519_pepadd(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
+void edwards25519_pepadd_alt(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
+#endif
 typedef struct ed_key {
+#ifdef JWT_ED_S2N
+    ed_pp4 tb[ED_NW][ED_H], ta[ED_NW][ED_H]; /* B and -A */
+#else
     ed_niels tb[ED_NW][ED_H], ta[ED_NW][ED_H]; /* B and -A */
-    uint8_t a[32];                             /* the public key as given (hashed into k) */
+#endif
+    uint8_t a[32]; /* the public key as given (hashed into k) */
 } ed_key_t;
 
 /* ---- field helpers over fiat's tight (carried) / loose (sum) bounds ---- */
@@ -157,6 +171,7 @@ static int ed_decode(ed_p3 *P, const uint8_t s[32]) {
     return 1;
 }
 
+#ifndef JWT_ED_S2N /* (with s2n-bignum on x86-64, edwards25519_pepadd does these) */
 /* P += Q (Niels), ref10's ge_madd: 8M */
 static void ed_madd(ed_p3 *P, const ed_niels *q) {
     fe25_t a, b, c, d, e, f, g, h;
@@ -177,6 +192,7 @@ static void ed_msub(ed_p3 *P, const ed_niels *q) {
     f_sub(e, b, a), f_add(f, d, c), f_sub(g, d, c), f_add(h, b, a);
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
+#endif
 /* P = P + Q, both extended (add-2008-hwcd-3, a = -1): table building only */
 static void ed_add(ed_p3 *P, const ed_p3 *Q) {
     fe25_t a, b, c, d, e, f, g, h, t;
@@ -345,6 +361,33 @@ static void sha512_ram(uint8_t out[64], const uint8_t *p1, const uint8_t *p2, co
         for (int j = 0; j < 8; j++) out[8 * i + j] = (uint8_t)(st[i] >> (56 - 8 * j));
 }
 
+#ifdef JWT_ED_S2N
+static void ed_fe_to4(uint64_t o[4], const fe25_t a) { /* canonical, little-endian limbs (x86-64 is little-endian) */
+    fiat_25519_to_bytes((uint8_t *)o, a);
+}
+static int ed_table4(ed_pp4 out[ED_NW][ED_H], const ed_p3 *P) {
+    ed_niels(*t)[ED_H] = malloc(sizeof(ed_niels) * ED_NW * ED_H);
+    if (!t) return 0;
+    ed_table(t, P);
+    for (int w = 0; w < ED_NW; w++)
+        for (int i = 0; i < ED_H; i++)
+            ed_fe_to4(out[w][i], t[w][i].ymx), ed_fe_to4(out[w][i] + 4, t[w][i].ypx),
+                ed_fe_to4(out[w][i] + 8, t[w][i].xy2d);
+    free(t);
+    return 1;
+}
+/* -Q = (-x, y): swap y - x and y + x, negate 2dxy (p - v; 0 stays 0) */
+static void ed_neg4(uint64_t o[12], const uint64_t q[12]) {
+    static const uint64_t p[4] = { 0xffffffffffffffedull, ~0ull, ~0ull, 0x7fffffffffffffffull };
+    memcpy(o, q + 4, 32), memcpy(o + 4, q, 32);
+    uint64_t z = q[8] | q[9] | q[10] | q[11], bw = 0;
+    for (int j = 0; j < 4; j++) {
+        u128 d = (u128)p[j] - q[8 + j] - bw;
+        o[8 + j] = z ? (uint64_t)d : 0, bw = (uint64_t)(d >> 64) & 1;
+    }
+}
+#endif
+
 /* ---- key setup and batch verification ---- */
 static ed_key_t *ed_key_new(const uint8_t pub[32]) {
     ed_consts();
@@ -358,13 +401,24 @@ static ed_key_t *ed_key_new(const uint8_t pub[32]) {
     if (!k) return NULL;
     memcpy(k->a, pub, 32);
     f_neg(A.X, A.X), f_neg(A.T, A.T); /* -A */
+#ifdef JWT_ED_S2N
+    if (!ed_table4(k->tb, &B) || !ed_table4(k->ta, &A)) {
+        free(k);
+        return NULL;
+    }
+#else
     ed_table(k->tb, &B), ed_table(k->ta, &A);
+#endif
     return k;
 }
 
 static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                         const int *slen, uint8_t *ok) {
     enum { CH = 32 };
+#ifdef JWT_ED_S2N
+    void (*pepadd)(uint64_t *, const uint64_t *, const uint64_t *) =
+        s2n_ok() ? edwards25519_pepadd : edwards25519_pepadd_alt;
+#endif
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH, c = 0, at[CH];
         ed_p3 R[CH];
@@ -380,6 +434,18 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
             int16_t ds[ED_NW], dk[ED_NW];
             ed_recode(ds, s), ed_recode(dk, kk);
             ed_p3 *P = &R[c];
+#ifdef JWT_ED_S2N
+            uint64_t P4[16] = { 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0 }, nq[12]; /* the identity */
+            for (int j = 0; j < ED_NW; j++) {
+                if (ds[j] > 0) pepadd(P4, P4, k->tb[j][ds[j] - 1]);
+                else if (ds[j] < 0) ed_neg4(nq, k->tb[j][-ds[j] - 1]), pepadd(P4, P4, nq);
+                if (dk[j] > 0) pepadd(P4, P4, k->ta[j][dk[j] - 1]);
+                else if (dk[j] < 0) ed_neg4(nq, k->ta[j][-dk[j] - 1]), pepadd(P4, P4, nq);
+            }
+            /* back to fiat (coordinates are < p, so canonical): the encoding below needs X, Y, Z */
+            fiat_25519_from_bytes(P->X, (const uint8_t *)P4), fiat_25519_from_bytes(P->Y, (const uint8_t *)(P4 + 4));
+            fiat_25519_from_bytes(P->Z, (const uint8_t *)(P4 + 8));
+#else
             f_set(P->X, 0), f_set(P->Y, 1), f_set(P->Z, 1), f_set(P->T, 0); /* the identity: additions are complete */
             for (int j = 0; j < ED_NW; j++) {
                 if (ds[j] > 0) ed_madd(P, &k->tb[j][ds[j] - 1]);
@@ -387,6 +453,7 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
                 if (dk[j] > 0) ed_madd(P, &k->ta[j][dk[j] - 1]);
                 else if (dk[j] < 0) ed_msub(P, &k->ta[j][-dk[j] - 1]);
             }
+#endif
             at[c++] = t;
         }
         if (!c) continue;

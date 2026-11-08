@@ -216,6 +216,9 @@ int main(int argc, char **argv) {
     printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive, CPU lacks BMI2/ADX");
 #endif
 #endif
+#ifdef JWT_ED_S2N
+    printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
+#endif
     printf("\n");
     test_arith();
     FILE *f = fopen(argc > 1 ? argv[1] : "build/pk_vectors.txt", "r");

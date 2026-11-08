@@ -60,8 +60,10 @@ if [ "$V" = cursed ]; then
     a=$([ "$(uname -m)" = x86_64 ] && echo x86 || echo arm)
     fs="p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256"
     fs="$fs fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n"
-    # x86-64: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX
+    # x86-64: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX, and the Ed25519 comb
+    # addition (both variants)
     [ "$a" = x86 ] && fs="$fs p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt"
+    [ "$a" = x86 ] && fs="$fs curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt"
     for f in $fs; do
       "$CC" -c -DS2N_BN_HIDE_SYMBOLS=1 -I"$J/third_party/s2n-bignum/include" "$J/third_party/s2n-bignum/$a/$f.S" \
         -o "$L/${f#*/}.o"
