@@ -49,12 +49,15 @@ int main(int argc, char **argv) {
         { "ossl", jwt_hmac_ossl },
 #endif
 #if defined(__x86_64__)
-        { "avx2", jwt_hmac_avx2 },       { "avx2x2", jwt_hmac_avx2x2 },     { "shani_1", jwt_hmac_shani_1 },
-        { "shani_2", jwt_hmac_shani_2 }, { "shani_4", jwt_hmac_shani_4 },   { "avx512", jwt_hmac_avx512 },
-        { "zmm", jwt_hmac_zmm },         { "avx512x2", jwt_hmac_avx512x2 },
+        { "avx2", jwt_hmac_avx2 },         { "avx2x2", jwt_hmac_avx2x2 },     { "shani_1", jwt_hmac_shani_1 },
+        { "shani_2", jwt_hmac_shani_2 },   { "shani_4", jwt_hmac_shani_4 },   { "avx512", jwt_hmac_avx512 },
+        { "zmm", jwt_hmac_zmm },           { "avx512x2", jwt_hmac_avx512x2 },
+#endif
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+        { "shani_4r", jwt_hmac_shani_4r }, { "x16", jwt_hmac_x16 },           { "shani_x16", jwt_hmac_shani_x16 },
 #endif
 #if defined(__aarch64__)
-        { "neon", jwt_hmac_neon },       { "sha2_1", jwt_hmac_sha2_1 },     { "sha2_2", jwt_hmac_sha2_2 },
+        { "neon", jwt_hmac_neon },         { "sha2_1", jwt_hmac_sha2_1 },     { "sha2_2", jwt_hmac_sha2_2 },
         { "sha2", jwt_hmac_sha2 },
 #endif
     };

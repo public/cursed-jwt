@@ -132,6 +132,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(e, "shani_4") && (f & JWT_CPU_SHANI)) eng = jwt_hmac_shani_4;
 #if defined(JWT_SHANI_MB)
     else if (!strcmp(e, "shani_4r") && (f & JWT_CPU_SHANI)) eng = jwt_hmac_shani_4r;
+    else if (!strcmp(e, "x16") && (f & JWT_CPU_AVX512VL)) eng = jwt_hmac_x16;
+    else if (!strcmp(e, "shani_x16") && (f & JWT_CPU_SHANI) && (f & JWT_CPU_AVX512VL)) eng = jwt_hmac_shani_x16;
 #endif
     else if (strcmp(e, "scalar") && (test == 0 || test == 4)) {
         printf("%s %s b%d: engine not available on this CPU/build\n", t, e, batch);

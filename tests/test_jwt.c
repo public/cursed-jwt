@@ -148,6 +148,8 @@ static const engine_t all_engines[] = {
     { "shani4", jwt_hmac_shani_4, NULL, JWT_CPU_SHANI },
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
     { "shani4r", jwt_hmac_shani_4r, NULL, JWT_CPU_SHANI },
+    { "x16", jwt_hmac_x16, NULL, JWT_CPU_AVX512VL },
+    { "shani-x16", jwt_hmac_shani_x16, NULL, JWT_CPU_SHANI | JWT_CPU_AVX512VL },
 #endif
     { "avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2 },
     { "avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2 },
@@ -312,7 +314,7 @@ static void test_hmac_random(void) {
 }
 
 
-/* the multi-stream SHA-NI engines against the scalar one at every length 0..600 and every batch size 1..32, with
+/* the multi-stream SHA-NI and zmm engines against the scalar one at every length 0..600 and every batch size 1..32, with
  * all messages of one length (full groups of every size) and with mixed lengths (ragged groups, leftover streams) */
 static void test_hmac_lengths(void) {
 #if defined(__x86_64__)
@@ -323,14 +325,13 @@ static void test_hmac_lengths(void) {
         unsigned need;
     } eng[] = {
         { "shani4", jwt_hmac_shani_4, JWT_CPU_SHANI },
+        { "zmm", jwt_hmac_zmm, JWT_CPU_AVX512VL },
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
         { "shani4r", jwt_hmac_shani_4r, JWT_CPU_SHANI },
+        { "x16", jwt_hmac_x16, JWT_CPU_AVX512VL },
+        { "shani-x16", jwt_hmac_shani_x16, JWT_CPU_SHANI | JWT_CPU_AVX512VL },
 #endif
     };
-    if (!(jwt_cpu_features() & JWT_CPU_SHANI)) {
-        printf("  lengths 0..%d x batch 1..%d: skipped (no SHA-NI)\n", MAXL, MAXB);
-        return;
-    }
     static uint8_t data[MAXB][MAXL + 64];
     static uint32_t ref[MAXB][MAXL + 1][8];
     const uint8_t *msg[MAXB];
@@ -359,8 +360,8 @@ static void test_hmac_lengths(void) {
                               eng[e].name, b, L, mix, i, len[i]);
                 }
     }
-    printf("  lengths 0..%d (step %d) x batch 1..%d x {same, mixed}: %d SHA-NI engines checked against scalar\n", MAXL,
-           step, MAXB, ne);
+    printf("  lengths 0..%d (step %d) x batch 1..%d x {same, mixed}: %d SHA-NI / zmm engines checked against scalar\n",
+           MAXL, step, MAXB, ne);
 #endif
 }
 

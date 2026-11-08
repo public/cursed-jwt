@@ -21,7 +21,7 @@ if [ "$1" = --qemu ]; then
   fi
 else
   MODE=sde SDE="$1" BIN="$2"
-  ENGINES="${3:-scalar ossl avx2 avx2x2 shani_1 shani_2 shani_4 avx512 avx512x2 zmm}"
+  ENGINES="${3:-scalar ossl avx2 avx2x2 shani_1 shani_2 shani_4 avx512 avx512x2 zmm shani_4r x16 shani_x16}"
 fi
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
