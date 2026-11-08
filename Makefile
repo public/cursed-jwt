@@ -107,7 +107,7 @@ test-ct: $(B)/test_ct
 $(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
 dudect: $(B)/dudect_hmac
-	./$(B)/dudect_hmac control x 1
+	./$(B)/dudect_hmac control x 1; ./$(B)/dudect_hmac aa ossl 1; ./$(B)/dudect_hmac aa avx2 16
 	for e in ossl avx2 avx512 zmm shani_4; do ./$(B)/dudect_hmac key $$e 16; done
 	./$(B)/dudect_hmac key ossl 1
 	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
