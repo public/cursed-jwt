@@ -98,6 +98,39 @@ test-vectors: $(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
 
 test: $(B)/test_jwt $(B)/tokens.json example-check
 	./$(B)/test_jwt $(B)/tokens.json
+# constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
+#   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
+#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
+#   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
+#                  AVX-512): every engine's instruction and address trace must be identical under two keys
+#   make test-ct-qemu QEMU=…/qemu-aarch64 EXECLOG=…/libexeclog.so   the same for the AArch64 engines (NEON, SHA2), cross-
+#                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
+#   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
+#                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
+$(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
+test-ct: $(B)/test_ct
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
+$(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
+SDE ?= sde64
+test-ct-sde: $(B)/ct_trace
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
+# the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
+CROSS ?= aarch64-linux-gnu-
+QEMU ?= qemu-aarch64
+EXECLOG ?= libexeclog.so
+$(B)/ct_trace_arm: tests/ct_trace.c $(SRC) | $(B)
+	$(CROSS)gcc -O2 -static $(WARN) $(INC) -include stdarg.h $< -o $@
+test-ct-qemu: $(B)/ct_trace_arm
+	NM=$(CROSS)nm scripts/ct-trace.sh --qemu $(QEMU) $(EXECLOG) ./$(B)/ct_trace_arm
+$(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
+dudect: $(B)/dudect_hmac
+	./$(B)/dudect_hmac control x 1; ./$(B)/dudect_hmac aa ossl 1; ./$(B)/dudect_hmac aa avx2 16
+	for e in ossl avx2 avx512 zmm shani_4; do ./$(B)/dudect_hmac key $$e 16; done
+	./$(B)/dudect_hmac key ossl 1
+	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json
@@ -237,4 +270,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean

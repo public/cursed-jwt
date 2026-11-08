@@ -842,6 +842,44 @@ static void test_vectors(const char *path) {
            nj);
 }
 
+/* Over-read guard: the default build (no -DJWT_INPUT_PADDED) must not read past msg[i] + len[i].  Every HMAC engine
+ * runs on messages allocated to their exact length, so under ASan a SIMD tail load past the end trips a redzone; each
+ * engine's tag is also checked against the scalar engine.  Lengths cluster on the SHA-256 block boundaries (55/56/63/
+ * 64 and +64k) where the padding block is built, mixed across batch sizes 1..33 and lane positions. */
+static void test_overread(void) {
+    jwt_key_t k;
+    jwt_key_init(&k, SECRET, strlen(SECRET));
+    static const int bl[] = { 0,  1,  2,  31,  32,  54,  55,  56,  57,  62,  63,  64,
+                              65, 66, 90, 118, 119, 120, 121, 126, 127, 128, 129, 255 };
+    const int nbl = (int)(sizeof bl / sizeof bl[0]);
+    int bsizes[] = { 1, 2, 3, 4, 8, 16, 32, 33 };
+    for (int bi = 0; bi < (int)(sizeof bsizes / sizeof bsizes[0]); bi++) {
+        int bs = bsizes[bi];
+        for (int off = 0; off < nbl; off++) {
+            const uint8_t *msg[33];
+            int len[33];
+            uint8_t *buf[33];
+            uint32_t mac[33][8], ref[33][8];
+            for (int i = 0; i < bs; i++) {
+                int L = bl[(off + i) % nbl];
+                buf[i] = malloc(L ? L : 1); /* tight: ASan redzone immediately after */
+                for (int j = 0; j < L; j++) buf[i][j] = (uint8_t)rnd();
+                msg[i] = buf[i], len[i] = L;
+            }
+            jwt_hmac_scalar(&k, bs, msg, len, ref);
+            for (int e = 0; e < NENG; e++) {
+                if (!engines[e].hmac) continue;
+                engines[e].hmac(&k, bs, msg, len, mac);
+                int bad = 0;
+                for (int i = 0; i < bs; i++) bad += memcmp(mac[i], ref[i], 32) != 0;
+                CHECK(bad == 0, "overread %s bs=%d off=%d: %d/%d tag mismatches", engines[e].name, bs, off, bad, bs);
+            }
+            for (int i = 0; i < bs; i++) free(buf[i]);
+        }
+    }
+    printf("  over-read: every engine on tight (unpadded) buffers, batch 1-33\n");
+}
+
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "build/tokens.json";
     int n;
@@ -863,6 +901,7 @@ int main(int argc, char **argv) {
     test_jint();
     test_hmac_random();
     test_hmac_lengths();
+    test_overread();
     test_sha256_raw();
     printf("  %d generated tokens\n", n);
     test_seed(t, n, now);

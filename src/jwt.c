@@ -1833,6 +1833,9 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
         for (int j = 0; j < c; j++) {
             uint32_t diff = 0; /* constant time over the 32 bytes */
             for (int w = 0; w < 8; w++) diff |= mac[j][w] ^ want[j][w];
+#if defined(__GNUC__)
+            __asm__("" : "+r"(diff)); /* opaque to the optimiser: no early exit, only the verdict branches */
+#endif
             if (!diff) good[ng++] = j;
         }
         for (int g = 0; g < ng; g++) {
