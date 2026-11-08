@@ -222,6 +222,14 @@ static int s2n_ok(void) {
     return 1;
 #endif
 }
+#if defined(__x86_64__)
+/* x86-64 CPUs without BMI2 / ADX (or VMs that hide them: Vultr's Genoa and Cascade Lake guests do) get
+ * s2n-bignum's _alt multiply / square, which use plain mul / adc and are verified like the others; its add / sub
+ * need neither extension */
+#define JWT_S2N_ALT 1
+void bignum_montmul_p256_alt(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void bignum_montsqr_p256_alt(uint64_t z[4], const uint64_t x[4]);
+#endif
 #endif
 /* the C field operations, for everything outside the per-token point arithmetic */
 #define fe_mul fe_mul_c
@@ -258,6 +266,15 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define EC(name)        name##_s2n
 #include "jwt_pk_ec.inc"
 #undef EC
+#ifdef JWT_S2N_ALT
+#undef fe_mul
+#undef fe_sqr
+#define fe_mul(o, a, b) bignum_montmul_p256_alt(o, a, b)
+#define fe_sqr(o, a)    bignum_montsqr_p256_alt(o, a)
+#define EC(name)        name##_s2na
+#include "jwt_pk_ec.inc"
+#undef EC
+#endif
 #undef fe_mul
 #undef fe_sqr
 #undef fe_add
@@ -274,6 +291,10 @@ static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_
         es_points_s2n(k, c, d1, d2, r, at, ok);
         return;
     }
+#ifdef JWT_S2N_ALT
+    es_points_s2na(k, c, d1, d2, r, at, ok);
+    return;
+#endif
 #endif
     es_points_c(k, c, d1, d2, r, at, ok);
 }
