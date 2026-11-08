@@ -98,12 +98,19 @@ test: $(B)/test_jwt $(B)/tokens.json example-check
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
+#   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
+#                  AVX-512): every engine's instruction and address trace must be identical under two keys
 #   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
 #                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 test-ct: $(B)/test_ct
 	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
+$(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
+SDE ?= sde64
+test-ct-sde: $(B)/ct_trace
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
 $(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
 dudect: $(B)/dudect_hmac
@@ -250,4 +257,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-ct dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-ct test-ct-sde dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
