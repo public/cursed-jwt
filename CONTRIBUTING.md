@@ -11,6 +11,7 @@ Bug reports, test cases and pull requests are welcome.
 - **Dependencies stay fetched, not vendored.** Test vectors and optional backends are downloaded by the pinned,
   checksummed scripts in `scripts/`; don't commit them or any build output.
 - **One vendored file** (`src/sha256_x86_64_ossl.S`) comes from OpenSSL; regenerate it with
-  `scripts/extract-openssl-sha256.sh` rather than editing it by hand.
+  `scripts/extract-openssl-sha256.sh` rather than editing it by hand. `src/sha256_shani_mb.S` is generated too: edit
+  `scripts/gen-shani-mb.py` and rerun it (`python3 scripts/gen-shani-mb.py > src/sha256_shani_mb.S`).
 
 Contributions are accepted under the MIT licence in [LICENSE](LICENSE).

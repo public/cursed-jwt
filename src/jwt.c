@@ -971,14 +971,13 @@ JWT_INLINE void ni_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint
                     s = i;
                     break;
                 }
+            /* five left with one block count: 3 + 2 streams, not 4 + a latency-bound single stream */
+            if (s == 4 && m - g == 5 && pp[g + 4]->nb == pp[g]->nb) s = 3;
             uint32_t *out[4];
             for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
             switch (s) { /* constant S per call so ni_hmac fully specialises */
                 case 4: ni_hmac(4, raw, k, pp + g, out); break;
-                case 3:
-                    ni_hmac(2, raw, k, pp + g, out);
-                    ni_hmac(1, raw, k, pp + g + 2, out + 2);
-                    break;
+                case 3: ni_hmac(3, raw, k, pp + g, out); break;
                 case 2: ni_hmac(2, raw, k, pp + g, out); break;
                 default: ni_hmac(1, raw, k, pp + g, out); break;
             }
@@ -995,6 +994,94 @@ void jwt_hmac_shani_2(const jwt_key_t *k, int n, const uint8_t *const *msg, cons
 void jwt_hmac_shani_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     ni_drive_x(4, 0, k, n, msg, len, mac);
 }
+
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+/* ---- SHA-NI multi-stream assembly: generated 3/4-stream kernels (src/sha256_shani_mb.S, scripts/gen-shani-mb.py)
+ * jwt_shani_mbS keeps all 2S state registers resident and the older message groups in a stack ring, so nothing on a
+ * stream's dependency chain goes through memory (the compiled ni_compress spills the state at S = 4: ~1,070 stack
+ * accesses per 960 sha256rnds2).  st is ABEF / CDGH per stream; blk is nb * S block pointers, block-major. */
+void jwt_shani_mb3(__m128i *st, const uint8_t *const *blk, size_t nb);
+void jwt_shani_mb4(__m128i *st, const uint8_t *const *blk, size_t nb);
+
+/* the outer block of HMAC: the inner digest (big-endian), 0x80, zeros, the bit length 768 */
+JWT_INLINE void hmac_outer_block(const uint32_t d[8], uint8_t ob[64]) {
+    const __m128i bswap = _mm_set_epi64x(0x0c0d0e0f08090a0bLL, 0x0405060700010203LL);
+    _mm_storeu_si128((__m128i *)ob, _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)d), bswap));
+    _mm_storeu_si128((__m128i *)(ob + 16), _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(d + 4)), bswap));
+    _mm_storeu_si128((__m128i *)(ob + 32), _mm_set_epi32(0, 0, 0, 0x80));
+    _mm_storeu_si128((__m128i *)(ob + 48), _mm_set_epi32(0x00030000, 0, 0, 0)); /* ob[62] = 0x03: 768 bits */
+}
+JWT_INLINE void mb_blocks(int S, __m128i *st, const uint8_t *const *blk, size_t nb) {
+    if (S == 4) jwt_shani_mb4(st, blk, nb);
+    else jwt_shani_mb3(st, blk, nb);
+}
+/* S = 3 or 4 plans with identical nb, through jwt_shani_mbS */
+JWT_INLINE void mb_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
+    enum { CB = 16 }; /* blocks per kernel call: the pointer array stays small for long messages */
+    const uint8_t *blk[CB * 4];
+    __m128i st[8], ih0, ih1, oh0, oh1;
+    ni_ld(k->ih, &ih0, &ih1);
+    for (int s = 0; s < S; s++) st[2 * s] = ih0, st[2 * s + 1] = ih1;
+    for (int b0 = 0, nb = p[0]->nb; b0 < nb; b0 += CB) {
+        int c = nb - b0 < CB ? nb - b0 : CB;
+        for (int b = 0; b < c; b++)
+            for (int s = 0; s < S; s++) blk[b * S + s] = hplan_block(p[s], b0 + b);
+        mb_blocks(S, st, blk, (size_t)c);
+    }
+    uint8_t ob[4][64];
+    ni_ld(k->oh, &oh0, &oh1);
+    for (int s = 0; s < S; s++) {
+        uint32_t d[8];
+        ni_st(st[2 * s], st[2 * s + 1], d);
+        hmac_outer_block(d, ob[s]);
+        blk[s] = ob[s], st[2 * s] = oh0, st[2 * s + 1] = oh1;
+    }
+    mb_blocks(S, st, blk, 1);
+    for (int s = 0; s < S; s++) ni_st(st[2 * s], st[2 * s + 1], mac[s]);
+}
+/* ni_drive_x's grouping (up to 4 same-length plans, 5 left as 3 + 2) with the asm kernels for 3 and 4 streams.  Two
+ * streams fit in registers compiled, and ni_hmac(2) is 1.5-2% faster there than a 2-stream asm kernel; one stream
+ * is latency-bound either way. */
+static void mb_drive(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    enum { CH = 64 };
+    hplan_t plan[CH];
+    const hplan_t *pp[CH];
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH;
+        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
+        for (int i = 0; i < m; i++) { /* sort by nb so groups share a block count */
+            const hplan_t *p = &plan[i];
+            int j = i;
+            while (j > 0 && pp[j - 1]->nb > p->nb) pp[j] = pp[j - 1], j--;
+            pp[j] = p;
+        }
+        int g = 0;
+        while (g < m) {
+            int s = 4;
+            if (m - g < s) s = m - g;
+            for (int i = 1; i < s; i++)
+                if (pp[g + i]->nb != pp[g]->nb) {
+                    s = i;
+                    break;
+                }
+            if (s == 4 && m - g == 5 && pp[g + 4]->nb == pp[g]->nb) s = 3;
+            uint32_t *out[4];
+            for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
+            if (s == 4) mb_hmac(4, k, pp + g, out);
+            else if (s == 3) mb_hmac(3, k, pp + g, out);
+            else if (s == 2) ni_hmac(2, 0, k, pp + g, out);
+            else ni_hmac(1, 0, k, pp + g, out);
+            g += s;
+        }
+    }
+}
+void jwt_hmac_shani_4r(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    /* no group of 3 or 4 possible: the compiled engine itself, so batches 1 and 2 run the very same machine code (a
+     * second inlined copy of ni_hmac(2) here measured 1.5-4% slower at batch 2 on Zen 2/3, from code placement) */
+    if (n <= 2) return jwt_hmac_shani_4(k, n, msg, len, mac);
+    mb_drive(k, n, msg, len, mac);
+}
+#endif /* JWT_SHANI_MB */
 JWT_END_TARGET
 #endif /* SHA-NI */
 
@@ -1793,6 +1880,9 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4r; /* every Zen: 4 SHA-NI streams, hand-scheduled */
+#endif
     if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
@@ -1827,6 +1917,9 @@ const char *jwt_engine(void) {
 #endif
 #if defined(JWT_X86)
     if (h == jwt_hmac_shani_4) return "shani";
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+    if (h == jwt_hmac_shani_4r) return "shani";
+#endif
     if (h == jwt_hmac_zmm) return "zmm";
     if (h == jwt_hmac_avx512) return "avx512vl";
     if (h == jwt_hmac_avx2) return "avx2";

@@ -21,6 +21,11 @@ cursed-jwt credits these projects for techniques and data:
 
 - **cpuminer-opt** (https://github.com/JayDDee/cpuminer-opt): the idea of reusing the previous round's
   `a ^ b` in SHA-256's Maj, saving two vector ops per round. No code is copied.
+- **Linux `lib/crypto/x86/sha256-ni-asm.S`** (Eric Biggers' 2-way interleaved SHA-NI), **OpenSSL's
+  `sha256_multi_block_shaext`** and **Intel ipsec-mb's `sha256_ni_x2_sse.asm`**: the layout of the generated
+  multi-stream SHA-NI kernels (`src/sha256_shani_mb.S`): every state register resident, the block's input state saved
+  in memory and added back from there, streams interleaved. No code is copied; the Linux code (GPL-2.0) informed the
+  design only.
 - **Intel isa-l_crypto** and **OpenSSL's sha256-mb**: the multi-buffer SHA-256 lane layout is the classic
   design these established; the `vpternlogd` immediates (0x96, 0xCA, 0xE8) are the standard truth tables. No
   code is copied.

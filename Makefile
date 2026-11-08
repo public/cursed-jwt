@@ -29,14 +29,15 @@ UNAME_M := $(shell uname -m)
 # (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
 ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
-# ELF only).  `make OSSL_SHA=` builds without it.
+# ELF only), and SHA-NI batches the generated 3/4-stream kernels (src/sha256_shani_mb.S, -DJWT_SHANI_MB).
+# `make OSSL_SHA=` builds without either.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
 ifeq ($(OSSL_SHA),1)
-SHAFLAG := -DJWT_OSSL_SHA256
-X86SHA := -DJWT_OSSL_SHA256 $(B)/sha256_x86_64_ossl.o
-SHAOBJ := $(B)/sha256_x86_64_ossl.o
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o
+X86SHA := $(SHAFLAG) $(SHAOBJ)
 endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
@@ -58,6 +59,8 @@ $(B):
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
 $(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/sha256_shani_mb.o: src/sha256_shani_mb.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^

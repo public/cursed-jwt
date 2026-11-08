@@ -146,6 +146,9 @@ static const engine_t all_engines[] = {
     { "shani1", jwt_hmac_shani_1, NULL, JWT_CPU_SHANI },
     { "shani2", jwt_hmac_shani_2, NULL, JWT_CPU_SHANI },
     { "shani4", jwt_hmac_shani_4, NULL, JWT_CPU_SHANI },
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+    { "shani4r", jwt_hmac_shani_4r, NULL, JWT_CPU_SHANI },
+#endif
     { "avx2", jwt_hmac_avx2, jwt_verify_batch_avx2, JWT_CPU_AVX2 },
     { "avx2x2", jwt_hmac_avx2x2, NULL, JWT_CPU_AVX2 },
     { "avx512", jwt_hmac_avx512, jwt_verify_batch_avx512, JWT_CPU_AVX512VL },
@@ -306,6 +309,59 @@ static void test_hmac_random(void) {
     jwt_hmac_scalar(&k2, 1, &m0, &l0, got);
     for (int i = 0; i < 8; i++) ref[0][i] = be32(d + 4 * i);
     CHECK(!memcmp(ref[0], got[0], 32), "long key");
+}
+
+
+/* the multi-stream SHA-NI engines against the scalar one at every length 0..600 and every batch size 1..32, with
+ * all messages of one length (full groups of every size) and with mixed lengths (ragged groups, leftover streams) */
+static void test_hmac_lengths(void) {
+#if defined(__x86_64__)
+    enum { MAXB = 32, MAXL = 600 };
+    static const struct {
+        const char *name;
+        jwt_hmac_fn *f;
+        unsigned need;
+    } eng[] = {
+        { "shani4", jwt_hmac_shani_4, JWT_CPU_SHANI },
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+        { "shani4r", jwt_hmac_shani_4r, JWT_CPU_SHANI },
+#endif
+    };
+    if (!(jwt_cpu_features() & JWT_CPU_SHANI)) {
+        printf("  lengths 0..%d x batch 1..%d: skipped (no SHA-NI)\n", MAXL, MAXB);
+        return;
+    }
+    static uint8_t data[MAXB][MAXL + 64];
+    static uint32_t ref[MAXB][MAXL + 1][8];
+    const uint8_t *msg[MAXB];
+    int len[MAXB], lid[MAXB];
+    uint32_t got[MAXB][8];
+    jwt_key_t k;
+    jwt_key_init(&k, SECRET, strlen(SECRET));
+    for (int i = 0; i < MAXB; i++) {
+        for (int j = 0; j < MAXL + 64; j++) data[i][j] = (uint8_t)rnd();
+        msg[i] = data[i];
+        for (int L = 0; L <= MAXL; L++) jwt_hmac_scalar(&k, 1, &msg[i], &L, ref[i] + L);
+    }
+    int step = quick ? 7 : 1;
+    int ne = 0;
+    for (size_t e = 0; e < sizeof eng / sizeof eng[0]; e++) {
+        if ((jwt_cpu_features() & eng[e].need) != eng[e].need) continue;
+        ne++;
+        for (int b = 1; b <= MAXB; b++)
+            for (int L = 0; L <= MAXL; L += step)
+                for (int mix = 0; mix < 2; mix++) {
+                    for (int i = 0; i < b; i++) len[i] = lid[i] = mix ? (L + 37 * i) % (MAXL + 1) : L;
+                    memset(got, 0, sizeof got);
+                    eng[e].f(&k, b, msg, len, got);
+                    for (int i = 0; i < b; i++)
+                        CHECK(!memcmp(got[i], ref[i][lid[i]], 32), "lengths %s b=%d L=%d mix=%d lane %d len %d",
+                              eng[e].name, b, L, mix, i, len[i]);
+                }
+    }
+    printf("  lengths 0..%d (step %d) x batch 1..%d x {same, mixed}: %d SHA-NI engines checked against scalar\n", MAXL,
+           step, MAXB, ne);
+#endif
 }
 
 
@@ -844,6 +900,7 @@ int main(int argc, char **argv) {
     test_b64();
     test_jint();
     test_hmac_random();
+    test_hmac_lengths();
     test_overread();
     test_sha256_raw();
     printf("  %d generated tokens\n", n);
