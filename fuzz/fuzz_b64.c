@@ -36,5 +36,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         fprintf(stderr, "b64: simd %d scalar %d reference %d on %.*s\n", ra, rb, rc, n, (const char *)in);
         abort();
     }
+#if defined(JWT_X86)
+    /* the VBMI decoder is dispatched only on VBMI && FAST_ZMM, so reach it directly wherever VBMI exists */
+    if (jwt_cpu_features() & JWT_CPU_VBMI) {
+        static uint8_t d[16384 + 64];
+        int rd = b64url_decode_vbmi(d, (const char *)in, n);
+        if (rd != rc || (rc > 0 && memcmp(d, c, (size_t)rc))) {
+            fprintf(stderr, "b64: vbmi %d reference %d on %.*s\n", rd, rc, n, (const char *)in);
+            abort();
+        }
+    }
+#endif
     return 0;
 }
