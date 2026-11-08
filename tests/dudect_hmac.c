@@ -7,7 +7,10 @@
  *   key ENGINE BATCH   class 0: one fixed key; class 1: a fresh random key. Same 570-byte messages. The key is
  *                      the HS256 secret.
  *   mac BATCH          a full jwt_verify_batch, the forged MAC wrong in its first byte (0) or its last (1). An
- *                      early-exit compare would separate the classes.
+ *                      early-exit compare would separate the classes, but so would input-dependent decoding of the
+ *                      (attacker-known) token, since the classes also differ in which character was changed.
+ *   mac1 / mac2 BATCH  disambiguation: class 0 wrong in its first (mac1) or last (mac2) byte, class 1 wrong in both. An
+ *                      early-exit compare separates mac2 only; input-dependent decoding separates both.
  *   b64                the dispatched base64url decoder on a 43-char signature: one fixed string (0) or random ones (1).
  *                      The token is a credential. In a tight loop the table stays in L1, so this shows branches, not
  *                      cache-line leaks; see test_ct.c's token map for those.
@@ -47,6 +50,7 @@ static int cmp_u64(const void *x, const void *y) {
 
 /* the operation under test: class c, sample i */
 static jwt_hmac_fn *eng;
+static int macv; /* mac variant: 0 wrong first vs last byte; 1 first vs both; 2 last vs both */
 static int batch;
 static jwt_key_t kfix, krand[256], kfixpool[256], kfixpool2[256]; /* equal-sized pools: both classes touch the same
                                                                      amount of memory (dudect's rule) */
@@ -103,7 +107,8 @@ int main(int argc, char **argv) {
     const char *t = argc > 1 ? argv[1] : "key", *e = argc > 2 ? argv[2] : "dispatch";
     batch = argc > 3 ? atoi(argv[3]) : 1;
     long N = argc > 4 ? atol(argv[4]) : 1000000;
-    test = !strcmp(t, "key") ? 0 : !strcmp(t, "mac") ? 1 : !strcmp(t, "b64") ? 2 : !strcmp(t, "aa") ? 4 : 3;
+    macv = !strcmp(t, "mac1") ? 1 : !strcmp(t, "mac2") ? 2 : 0;
+    test = !strcmp(t, "key") ? 0 : !strncmp(t, "mac", 3) ? 1 : !strcmp(t, "b64") ? 2 : !strcmp(t, "aa") ? 4 : 3;
     for (int i = 0; i < 32; i++) cmpa[i] = cmpb0[i] = cmpb1[i] = (uint8_t)rnd();
     cmpb0[0] ^= 1, cmpb1[31] ^= 1;
     uint8_t key[32];
@@ -167,8 +172,12 @@ int main(int argc, char **argv) {
             sg[43] = 0;
             memcpy(tokB[j], tokA[j], n0);
             memcpy(tokA[j] + n0, sg, 44), memcpy(tokB[j] + n0, sg, 44);
-            tokA[j][n0] = tokA[j][n0] == 'A' ? 'B' : 'A';           /* first byte of the MAC */
-            tokB[j][n0 + 42] = tokB[j][n0 + 42] == 'A' ? 'E' : 'A'; /* the last char: last byte's bits */
+            /* class 0: wrong first byte (mac, mac1) or last (mac2); class 1: last (mac) or both (mac1, mac2) */
+            int af = macv != 2, al = macv == 2, bf = macv != 0;
+            if (af) tokA[j][n0] = tokA[j][n0] == 'A' ? 'B' : 'A';           /* first byte of the MAC */
+            if (al) tokA[j][n0 + 42] = tokA[j][n0 + 42] == 'A' ? 'E' : 'A'; /* the last char: last byte */
+            if (bf) tokB[j][n0] = tokB[j][n0] == 'A' ? 'B' : 'A';
+            tokB[j][n0 + 42] = tokB[j][n0 + 42] == 'A' ? 'E' : 'A';
             tl[j] = n0 + 43;
         }
     }
