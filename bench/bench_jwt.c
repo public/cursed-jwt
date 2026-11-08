@@ -76,6 +76,11 @@ static const hengine_t all_hengines[] = {
     { "shani-1stream", jwt_hmac_shani_1, JWT_CPU_SHANI },
     { "shani-2stream", jwt_hmac_shani_2, JWT_CPU_SHANI },
     { "shani-4stream", jwt_hmac_shani_4, JWT_CPU_SHANI },
+#if defined(JWT_SHANI_MB) && defined(__ELF__)
+    { "shani-4r", jwt_hmac_shani_4r, JWT_CPU_SHANI },
+    { "x16", jwt_hmac_x16, JWT_CPU_AVX512VL },
+    { "shani-x16", jwt_hmac_shani_x16, JWT_CPU_SHANI | JWT_CPU_AVX512VL },
+#endif
     { "avx2-8lane", jwt_hmac_avx2, JWT_CPU_AVX2 },
     { "avx2-2x8lane", jwt_hmac_avx2x2, JWT_CPU_AVX2 },
     { "avx512vl-8lane", jwt_hmac_avx512, JWT_CPU_AVX512VL },
