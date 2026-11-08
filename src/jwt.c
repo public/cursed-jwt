@@ -266,6 +266,10 @@ static const jwt_key_t sha_iv_key = {
  * AVX2, BMI2, SHA).  AVX and AVX2 are cleared unless the OS saves ymm state (XCR0). */
 #include <cpuid.h>
 void jwt_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
+#endif
+#if (defined(JWT_OSSL_SHA256) || defined(JWT_OSSL_MONT)) && defined(__x86_64__) && defined(__ELF__)
+/* the capability word OpenSSL's extracted asm dispatches on (SHA-256 above; bn_mul_mont reads word 2's BMI2 + ADX) */
+#include <cpuid.h>
 __attribute__((visibility("hidden"))) unsigned int jwt_ossl_ia32cap_P[4];
 __attribute__((constructor)) static void jwt_ossl_cap_init(void) {
     unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0;
@@ -281,6 +285,8 @@ __attribute__((constructor)) static void jwt_ossl_cap_init(void) {
     if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5);
     jwt_ossl_ia32cap_P[0] = w0, jwt_ossl_ia32cap_P[1] = w1, jwt_ossl_ia32cap_P[2] = w2;
 }
+#endif
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
     uint32_t st[8];
     uint8_t ob[64] = { 0 };

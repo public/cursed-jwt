@@ -29,14 +29,17 @@ UNAME_M := $(shell uname -m)
 # (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
 ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
-# ELF only).  `make OSSL_SHA=` builds without it.
+# ELF only), and RSA uses OpenSSL's extracted bn_mul_mont (src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.
+# `make OSSL_SHA=` builds without either.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
 ifeq ($(OSSL_SHA),1)
-SHAFLAG := -DJWT_OSSL_SHA256
-X86SHA := -DJWT_OSSL_SHA256 $(B)/sha256_x86_64_ossl.o
-SHAOBJ := $(B)/sha256_x86_64_ossl.o
+MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_MONT
+X86SHA := -DJWT_OSSL_SHA256 -DJWT_OSSL_MONT $(B)/sha256_x86_64_ossl.o $(MONTOBJ)
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(MONTOBJ)
+X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
@@ -58,6 +61,10 @@ $(B):
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
 $(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/bn_mont_x86_64_ossl.o: src/bn_mont_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/bn_mont5_x86_64_ossl.o: src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
@@ -126,7 +133,7 @@ licence: bench/licence_probe.c $(SRC) | $(B)
 # RS256 / ES256 / EdDSA (src/jwt_pk.inc, PK.md) are part of the default build; their field arithmetic is fiat-crypto's,
 # vendored in src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
 # Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
-PK :=
+PK := $(X86MONT)
 PKSRC := $(SRC)
 # property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
 HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run

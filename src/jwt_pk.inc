@@ -584,13 +584,31 @@ static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
     mont_fin(r, z + 32, c, k->n, 32);
 }
 #endif
-static mont_ops_t mont_for(const rsa_key_t *k) {
-    switch (k->nl) {
-        case 32:
-#ifdef JWT_S2N
-            if (s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
+#if defined(JWT_OSSL_MONT) && defined(__x86_64__) && defined(__ELF__)
+/* -DJWT_OSSL_MONT (x86-64 Linux, on by default): OpenSSL's bn_mul_mont, extracted (src/bn_mont*_x86_64_ossl.S): 4-way
+ * multiply and 8-way squaring, with mulx/adcx/adox paths it takes only when the CPU has BMI2 + ADX.  Called directly,
+ * without libcrypto's BN layer.  It is the fastest kernel measured on x86-64 CPUs and VMs without ADX, and for
+ * moduli s2n-bignum has no fixed kernel for (3072, 4096).  Results are fully reduced; in-place calls are allowed
+ * (OpenSSL's own exponentiation makes them). */
+#define JWT_HAVE_OSSL_MONT 1
+int jwt_ossl_bn_mul_mont(uint64_t *rp, const uint64_t *ap, const uint64_t *bp, const uint64_t *np, const uint64_t *n0,
+                         int num);
+static void mont_mul_om(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
+    jwt_ossl_bn_mul_mont(r, a, b, k->n, &k->n0, k->nl);
+}
+static void mont_sqr_om(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
+    jwt_ossl_bn_mul_mont(r, a, a, k->n, &k->n0, k->nl);
+}
 #endif
-            return (mont_ops_t){ mont_mul_32, mont_sqr_32 };
+static mont_ops_t mont_for(const rsa_key_t *k) {
+#ifdef JWT_S2N
+    if (k->nl == 32 && s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
+#endif
+#ifdef JWT_HAVE_OSSL_MONT
+    if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
+#endif
+    switch (k->nl) {
+        case 32: return (mont_ops_t){ mont_mul_32, mont_sqr_32 };
         case 48: return (mont_ops_t){ mont_mul_48, mont_sqr_48 };
         case 64: return (mont_ops_t){ mont_mul_64, mont_sqr_64 };
         default: return (mont_ops_t){ mont_mul_any, mont_sqr_any };
@@ -742,7 +760,10 @@ static int bn_eq_limbs(const BIGNUM *x, const uint64_t *em, int nl) {
  * per verify on a Cascade Lake); on arm64 libcrypto's armv8-mont beats s2n-bignum (8.4 vs 13.2 us on an M5); for
  * 3072/4096-bit moduli s2n-bignum has no fixed-size kernel here and libcrypto beats the C. */
 static int rsa_use_ossl(const rsa_key_t *k) {
-#if defined(JWT_S2N) && defined(__x86_64__)
+#if defined(JWT_HAVE_OSSL_MONT)
+    (void)k; /* the same OpenSSL kernel, called directly (mont_for), beats going through libcrypto's BN layer */
+    return 0;
+#elif defined(JWT_S2N) && defined(__x86_64__)
     return k->nl != 32 || !s2n_ok();
 #else
     (void)k;
