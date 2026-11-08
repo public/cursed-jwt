@@ -1,5 +1,7 @@
 # cursed-jwt
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/public/cursed-jwt?utm_source=badge)
+
 Batch JWT verification in C. Instead of checking HS256 tokens one at a time, cursed-jwt checks many at once with **one
 multi-buffer SIMD HMAC-SHA256 pass**, one token per vector lane:
 - on AMD Zen, 4 interleaved SHA-NI streams;
@@ -451,6 +453,24 @@ engine; each figure is the median of 300 trials.
 | **SHA2 instructions, 4 streams (default)** | **72** | **~142** |
 
 **RS256 / ES256 / EdDSA:** [PK.md](PK.md) has every build at every batch size, on both machines.
+
+### Continuous benchmarking (CodSpeed)
+
+`bench/codspeed/bench_codspeed.cpp` benchmarks the public API with Google Benchmark (CodSpeed's fork), and
+`.github/workflows/codspeed.yml` runs it on every push to `main` and every pull request under
+[CodSpeed](https://app.codspeed.io/public/cursed-jwt)'s CPU simulation, which counts instructions and cache misses
+instead of timing, so results are stable enough to flag regressions per PR. It covers HS256 full verify (batch 1, 3, 8,
+64; shape-matched and strict JSON; forged tokens; the scalar engine), key setup, raw HMAC, batch SHA-256, base64url,
+and RS256-2048 / ES256 / EdDSA verify and key setup. The engine is picked at run time as usual (under simulation:
+AVX2 on x86-64). HS256 tokens are minted at start-up with the library's scalar HMAC; the public-key fixtures are in
+`bench/codspeed/pk_fixtures.h` (regenerate with `bench/codspeed/gen_fixtures.py`, which needs pyca/cryptography).
+No OpenSSL or Python is needed to build or run it:
+
+```sh
+cmake -S bench/codspeed -B build/codspeed -DCMAKE_BUILD_TYPE=Release -DCODSPEED_MODE=simulation
+cmake --build build/codspeed -j
+codspeed run -m simulation -- ./build/codspeed/bench_codspeed   # or run the binary directly for plain timings
+```
 
 ### Estimating other CPUs (`make mca`)
 
