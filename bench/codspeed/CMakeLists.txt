@@ -23,13 +23,13 @@ FetchContent_MakeAvailable(google_benchmark)
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 # The library exactly as the Makefile builds it: baseline ISA, engines picked at run time from the CPU, and on
-# x86-64 Linux OpenSSL's extracted SHA-256 block function for batch 1 / leftover lanes.
+# x86-64 Linux OpenSSL's extracted SHA-256 block function for batch 1 / leftover lanes and the SHA-NI kernels.
 add_library(cursedjwt STATIC ${ROOT}/src/jwt.c)
 target_include_directories(cursedjwt PUBLIC ${ROOT}/include PRIVATE ${ROOT}/src)
 target_compile_options(cursedjwt PRIVATE -O3 -g)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_sources(cursedjwt PRIVATE ${ROOT}/src/sha256_x86_64_ossl.S)
-  target_compile_definitions(cursedjwt PUBLIC JWT_OSSL_SHA256)
+  target_sources(cursedjwt PRIVATE ${ROOT}/src/sha256_x86_64_ossl.S ${ROOT}/src/sha256_shani_mb.S)
+  target_compile_definitions(cursedjwt PUBLIC JWT_OSSL_SHA256 JWT_SHANI_MB)
 endif()
 
 add_executable(bench_codspeed bench_codspeed.cpp)

@@ -82,7 +82,7 @@ enum {
     JWT_CPU_FAST_SHANI = 256 /* SHA-NI that beats the vector engines (AMD Zen): the 4-stream SHA-NI engine */
 };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
-const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "avx512vl", "avx2", "sha2", ... */
+const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "shani", "avx512vl", "avx2", ... */
 
 /* ---- engine-specific entry points (same contract), for tests and benchmarks ---- */
 void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
@@ -120,6 +120,11 @@ jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 
 #if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2;                       /* x2: 16 lanes = two interleaved 8-lane groups */
 jwt_hmac_fn jwt_hmac_shani_1, jwt_hmac_shani_2, jwt_hmac_shani_4; /* SHA-NI, 1 / 2 / 4 interleaved streams */
+#endif
+#if defined(JWT_SHANI_MB) && defined(__x86_64__) && defined(__ELF__)
+/* SHA-NI in assembly (link src/sha256_shani_mb.S; the Makefile's default on x86-64 Linux): 4 hand-scheduled
+ * streams, the default on Zen */
+jwt_hmac_fn jwt_hmac_shani_4r;
 #endif
 #if defined(__x86_64__)
 jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
