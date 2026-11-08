@@ -1349,7 +1349,9 @@ __attribute__((target("avx512f,avx512bw,avx512vl,avx512vbmi"))) static int b64ur
 static int b64url_decode_resolve(uint8_t *dst, const char *src, int n);
 static int (*b64url_impl)(uint8_t *, const char *, int) = b64url_decode_resolve;
 static int b64u_pick_vbmi(void) {
-    return (jwt_cpu() & (JWT_CPU_VBMI | JWT_CPU_FAST_ZMM)) == (JWT_CPU_VBMI | JWT_CPU_FAST_ZMM);
+    /* AVX512VL as well, so that JWT_CPU_MASK can take AVX-512 away on its own */
+    const unsigned need = JWT_CPU_VBMI | JWT_CPU_FAST_ZMM | JWT_CPU_AVX512VL;
+    return (jwt_cpu() & need) == need;
 }
 static int b64url_decode_resolve(uint8_t *dst, const char *src, int n) {
     int (*f)(uint8_t *, const char *, int) = b64u_pick_vbmi()           ? b64url_decode_vbmi
@@ -2011,11 +2013,14 @@ static jwt_hmac_fn *hmac_default(void) {
     if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
 #endif
 #if defined(JWT_X86)
+    /* each derived bit (FAST_SHANI, FULL_ZMM, FAST_ZMM) is tested with the feature it needs, so that JWT_CPU_MASK can
+     * take SHA-NI or AVX-512 away on its own */
+    const int shani = (f & JWT_CPU_FAST_SHANI) && (f & JWT_CPU_SHANI);
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
-    if ((f & JWT_CPU_FAST_SHANI) && (f & JWT_CPU_FULL_ZMM)) return jwt_hmac_shani_x16; /* Zen 5: x16 for >= 11 */
-    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4r; /* every Zen: 4 SHA-NI streams, hand-scheduled */
+    if (shani && (f & JWT_CPU_FULL_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_shani_x16; /* Zen 5: x16 for >= 11 */
+    if (shani) return jwt_hmac_shani_4r; /* every Zen: 4 SHA-NI streams, hand-scheduled */
 #endif
-    if (f & JWT_CPU_FAST_SHANI) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
+    if (shani) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_x16; /* 16 lanes, asm; < 9 live -> ymm */
 #endif
