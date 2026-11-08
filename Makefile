@@ -106,6 +106,8 @@ test: $(B)/test_jwt $(B)/tokens.json example-check
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
 #   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
 #                  AVX-512): every engine's instruction and address trace must be identical under two keys
+#   make test-ct-qemu QEMU=…/qemu-aarch64 EXECLOG=…/libexeclog.so   the same for the AArch64 engines (NEON, SHA2), cross-
+#                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
 #   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
 #                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
@@ -117,6 +119,14 @@ $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 SDE ?= sde64
 test-ct-sde: $(B)/ct_trace
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
+# the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
+CROSS ?= aarch64-linux-gnu-
+QEMU ?= qemu-aarch64
+EXECLOG ?= libexeclog.so
+$(B)/ct_trace_arm: tests/ct_trace.c $(SRC) | $(B)
+	$(CROSS)gcc -O2 -static $(WARN) $(INC) -include stdarg.h $< -o $@
+test-ct-qemu: $(B)/ct_trace_arm
+	NM=$(CROSS)nm scripts/ct-trace.sh --qemu $(QEMU) $(EXECLOG) ./$(B)/ct_trace_arm
 $(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
 dudect: $(B)/dudect_hmac
@@ -263,4 +273,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-ct test-ct-sde dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
