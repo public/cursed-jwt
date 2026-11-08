@@ -29,14 +29,19 @@ UNAME_M := $(shell uname -m)
 # (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
 ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
-# ELF only).  `make OSSL_SHA=` builds without it.
+# ELF only), SHA-NI batches the generated 3/4-stream kernels (src/sha256_shani_mb.S) and zmm batches the generated
+# 16-lane kernel (src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB, and RSA uses OpenSSL's extracted bn_mul_mont
+# (src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.
+# `make OSSL_SHA=` builds without either.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
 ifeq ($(OSSL_SHA),1)
-SHAFLAG := -DJWT_OSSL_SHA256
-X86SHA := -DJWT_OSSL_SHA256 $(B)/sha256_x86_64_ossl.o
-SHAOBJ := $(B)/sha256_x86_64_ossl.o
+MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ)
+X86SHA := $(SHAFLAG) $(SHAOBJ)
+X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
@@ -58,6 +63,14 @@ $(B):
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
 $(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/sha256_shani_mb.o: src/sha256_shani_mb.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/sha256_x16_avx512.o: src/sha256_x16_avx512.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/bn_mont_x86_64_ossl.o: src/bn_mont_x86_64_ossl.S | $(B)
+	$(CC) -c $< -o $@
+$(B)/bn_mont5_x86_64_ossl.o: src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
@@ -95,6 +108,39 @@ test-vectors: $(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
 
 test: $(B)/test_jwt $(B)/tokens.json example-check
 	./$(B)/test_jwt $(B)/tokens.json
+# constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
+#   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
+#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
+#   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
+#                  AVX-512): every engine's instruction and address trace must be identical under two keys
+#   make test-ct-qemu QEMU=…/qemu-aarch64 EXECLOG=…/libexeclog.so   the same for the AArch64 engines (NEON, SHA2), cross-
+#                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
+#   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
+#                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
+$(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
+test-ct: $(B)/test_ct
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
+$(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
+SDE ?= sde64
+test-ct-sde: $(B)/ct_trace
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
+# the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
+CROSS ?= aarch64-linux-gnu-
+QEMU ?= qemu-aarch64
+EXECLOG ?= libexeclog.so
+$(B)/ct_trace_arm: tests/ct_trace.c $(SRC) | $(B)
+	$(CROSS)gcc -O2 -static $(WARN) $(INC) -include stdarg.h $< -o $@
+test-ct-qemu: $(B)/ct_trace_arm
+	NM=$(CROSS)nm scripts/ct-trace.sh --qemu $(QEMU) $(EXECLOG) ./$(B)/ct_trace_arm
+$(B)/dudect_hmac: tests/dudect_hmac.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
+dudect: $(B)/dudect_hmac
+	./$(B)/dudect_hmac control x 1; ./$(B)/dudect_hmac aa ossl 1; ./$(B)/dudect_hmac aa avx2 16
+	for b in 3 16; do for e in ossl avx2 avx512 zmm x16 shani_4 shani_4r shani_x16; do ./$(B)/dudect_hmac key $$e $$b; done; done
+	./$(B)/dudect_hmac key ossl 1
+	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json
@@ -126,7 +172,7 @@ licence: bench/licence_probe.c $(SRC) | $(B)
 # RS256 / ES256 / EdDSA (src/jwt_pk.inc, PK.md) are part of the default build; their field arithmetic is fiat-crypto's,
 # vendored in src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
 # Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
-PK :=
+PK := $(X86MONT)
 PKSRC := $(SRC)
 # property-based tests (Hypothesis) against an independent Python model, every engine, HS256 + RS256/ES256
 HYP_N ?= 200   # quick dev default; e.g. HYP_N=20000 for a long run
@@ -249,4 +295,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-rsaz pk-test-rsaz pk-bench-rsaz mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz
