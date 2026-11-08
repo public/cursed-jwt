@@ -235,10 +235,25 @@ $(eval $(call PK_BACKEND,,,))
 $(eval $(call PK_BACKEND,_s2n,$(S2N),$(B)/libs2n.a))
 $(eval $(call PK_BACKEND,_fast,$(FAST),$(B)/libs2n.a))
 $(eval $(call PK_BACKEND,_ifma,$(CMB) $(FAST),$(B)/libs2n.a third_party/crypto-mb/lib/libcrypto_mb.a))
+# -DJWT_RSAZ: RSA-2048 through OpenSSL's 52-bit AVX-512 IFMA almost-Montgomery multiply ($(B)/rsaz-4k-avx512.S,
+# generated into build/ by scripts/fetch-ossl-rsaz.sh; x86-64 only, used only on CPUs with IFMA, checked at run time).
+# pk-test-rsaz / pk-bench-rsaz = the fast build plus it; test-rsaz checks it against libcrypto's BN_mod_exp.
+RSAZ := -DJWT_RSAZ $(B)/rsaz-4k-avx512.S
+$(B)/rsaz-4k-avx512.S: scripts/fetch-ossl-rsaz.sh
+	./scripts/fetch-ossl-rsaz.sh
+$(eval $(call PK_BACKEND,_rsaz,$(RSAZ) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S))
+$(B)/test_rsaz: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(FAST) -o $@
+test-rsaz: $(B)/test_rsaz
+	./$(B)/test_rsaz 8 200
+pk-test-rsaz: $(B)/test_rsaz $(B)/test_pk_rsaz $(B)/test_pk_rsaz_screen $(B)/pk_vectors.txt
+	./$(B)/test_rsaz 2 20
+	./$(B)/test_pk_rsaz $(B)/pk_vectors.txt
+	./$(B)/test_pk_rsaz_screen $(B)/pk_vectors.txt
 pk-test-s2n pk-test-fast pk-test-ifma: pk-test-%: $(B)/test_pk_% $(B)/test_pk_%_screen $(B)/pk_vectors.txt
 	./$(B)/test_pk_$* $(B)/pk_vectors.txt
 	./$(B)/test_pk_$*_screen $(B)/pk_vectors.txt
-pk-bench-s2n pk-bench-fast: pk-bench-%: $(B)/bench_pk_% $(B)/bench_pk_%_screen $(B)/pk_tokens.txt
+pk-bench-s2n pk-bench-fast pk-bench-rsaz: pk-bench-%: $(B)/bench_pk_% $(B)/bench_pk_%_screen $(B)/pk_tokens.txt
 	./$(B)/bench_pk_$* $(B)/pk_tokens.txt
 	./$(B)/bench_pk_$*_screen $(B)/pk_tokens.txt
 pk-bench-ifma: $(B)/bench_pk_ifma $(B)/pk_tokens.txt
@@ -280,4 +295,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean
+.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz

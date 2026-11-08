@@ -148,6 +148,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | RSA-2048: s2n-bignum `bignum_kmul_32_64` / `ksqr` + `emontredc_8n` | 13.2 µs | **16.4 µs** | Xeon |
 | RSA-2048: libcrypto `BN_mod_exp_mont` / `BN_mod_mul_montgomery` | **8.4 µs** | 20.4 µs | M5 |
 | RSA-3072/4096: libcrypto BN | **17.6 µs** | **41 µs** | both (s2n has no fixed kernel at these sizes) |
+| RSA-2048: OpenSSL's AVX-512 IFMA `ossl_rsaz_amm52x40_x1_ifma256` (`-DJWT_RSAZ`) | n/a | n/a (no IFMA) | not yet (opt-in): see below |
 
 - **Arm64:** s2n-bignum's Montgomery reduction (`bignum_emontredc_8n`) costs ~490 ns by itself. OpenSSL's whole
   2048-bit square, `armv8-mont` sqr8x through the BN API, costs 343 ns. That's why libcrypto wins on arm.
@@ -160,6 +161,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - `rsa_use_ossl()` / `mont_for()`: RSA-2048 on x86-64 uses s2n-bignum when BMI2 + ADX are present, otherwise
     libcrypto (if built in), otherwise C. Larger moduli and ARM use libcrypto.
   - `cmb_ok()`: crypto_mb runs only with AVX-512 IFMA (below).
+  - `ifma_ok()`: with `-DJWT_RSAZ`, RSA-2048 runs on OpenSSL's IFMA multiply only with AVX-512 IFMA + VL (below).
   - On the Xeon, the fast build passes every vector both with s2n-bignum and with BMI2/ADX masked off
     (`JWT_CPU_MASK=0x3`).
 - **Rosetta doesn't implement ADX,** so the x86 s2n-bignum kernels can't run under Docker on a Mac. They were
@@ -188,6 +190,46 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
   - `make pk-bench-ifma` benchmarks it, then repeats the same binary with IFMA masked off for comparison.
   - It isn't yet known whether crypto_mb beats the fixed-key comb tables on ES256. Intel's code doesn't exploit
     a fixed key; ours does.
+
+### AVX-512 IFMA: OpenSSL's RSA-2048 multiply (`-DJWT_RSAZ`)
+
+- **What it gives.** One token at a time, RSA-2048 verification in 52-bit digits on IFMA CPUs. It's the fastest
+  single-token RS256 measured. Full verify (`jwt_verify_batch_pk`, batch 1, ~920-byte OIDC-style tokens, gcc -O3,
+  1 vCPU, 7 interleaved rounds):
+
+  | CPU | `-DJWT_RSAZ` | fast build without it | jwt-simple (BoringSSL) | jsonwebtoken (aws-lc-rs) |
+  |---|---:|---:|---:|---:|
+  | AMD EPYC Genoa (Zen 4) | **6.98 µs** | 24.8 µs | 27.9 µs | 28.6 µs |
+  | AMD EPYC Turin (Zen 5) | **6.69 µs** | 11.7 µs | 18.7 µs | 19.3 µs |
+
+  The same binary with IFMA masked off (`JWT_CPU_MASK=0xffffffef`) matches the fast build within 1.3%.
+- **The kernel.** `ossl_rsaz_amm52x40_x1_ifma256`, from OpenSSL's `crypto/bn/asm/rsaz-4k-avx512.pl`, is Intel's
+  almost-Montgomery multiplication of 40-digit numbers in radix 2^52, on ymm registers (so no zmm clock drop).
+  OpenSSL uses it only for the private-key CRT halves of RSA-4096. `scripts/fetch-ossl-rsaz.sh` fetches it and
+  OpenSSL's perlasm translator at a pinned commit, SHA-256-checked, and generates `build/rsaz-4k-avx512.S`.
+- **How it's wired in.**
+  - Key setup adds n and R'^2 = 2^4160 mod n in radix 2^52 (64 more modular doublings after R^2).
+  - A verify is to-Montgomery, 16 squarings and 1 multiplication for e = 65537 (any odd e works), and one AMM by
+    1 out of the Montgomery domain.
+  - The result is checked to be normalised and below 2^2048, reduced once, and compared with the expected
+    PKCS#1 block.
+  - Screened batches (`-DJWT_RSA_SCREEN`, c ≥ 2) still take the screening path. Every other RS256-2048 token
+    takes this path when the CPU has IFMA.
+- **Tested.**
+  - `make test-rsaz` (`tests/test_rsaz.c`) checks it against libcrypto's `BN_mod_exp`. That's RSA keys with
+    e = 65537, 3 and a random 32-bit e, plus moduli at both ends of the 2048-bit range. s covers 0, 1, 2, n−1, n−2
+    and random values. Every case must accept the exact result and reject it with any of 10 single bits flipped.
+  - `make pk-test-rsaz` adds the full vector set (Wycheproof, CAVP, the generated vectors) through it.
+  - Results: 29,744 / 29,744 test_rsaz cases and every PK-suite check (49,356–49,386, depending on the engines
+    the CPU has) on real Genoa and Turin. Without IFMA hardware it also
+    passes under Intel SDE (`sde64 -icx`).
+- **Batches: two tokens per call.** A batch's tokens go through the two-way `ossl_rsaz_amm52x40_x2_ifma256` in
+  pairs, the odd one through x1. Full verify at batch 2–16 is 5–10% faster than one at a time:
+  - Genoa: 6.26 → 5.67 µs at batch 16;
+  - Turin: 5.54 → 5.26 µs;
+  - batch 1 unchanged.
+  The gain is smaller than the dependency-chain argument suggested, so the per-digit chain is not the whole cost.
+- **Next.** RSA-3072 and -4096 have their own kernels (`amm52x30`, `amm52x40` x2) in the same family.
 
 ## Comparison: algorithm × implementation × ns/token × licence
 
@@ -223,8 +265,8 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 | **cursed-jwt fast, screened, batch 16** | BGR screening, 2 mults/token + 1 exponentiation | **2.35 / 4.6** meas. | **3.8 / 9.1** meas. | same |
 | cursed-jwt portable C, screened, batch 16 | | 2.7 / 5.9 meas. | 6.9 / – meas. | MIT |
 
-- **No single-token win is possible here.** Verification is 19 Montgomery operations, and the libraries' asm already
-  does them. The 1.4× over OpenSSL on the Xeon is s2n-bignum's kernel against `x86_64-mont5`, plus skipping EVP and
+- **Without IFMA, no single-token win is possible here.** Verification is 19 Montgomery operations, and the
+  libraries' asm already does them. On IFMA CPUs, `-DJWT_RSAZ` does them in 52-bit digits, 1.7–3.5× faster (above). The 1.4× over OpenSSL on the Xeon is s2n-bignum's kernel against `x86_64-mont5`, plus skipping EVP and
   padding parsing.
 - **SME2 on the M5.** It has 16×16→64-bit outer products (`FEAT_SME_I16I64`). In principle that's a 2048-bit
   schoolbook product in tiles, but nothing public does it. It's research, not a borrowable implementation.
