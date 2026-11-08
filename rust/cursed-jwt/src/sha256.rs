@@ -205,9 +205,47 @@ pub(crate) fn load_be16(b: &[u8; 64]) -> [u32; 16] {
     w
 }
 
-/// 64 rounds, fully unrolled (the round macro renames the eight working variables instead of moving them).
+/// 64 rounds on `L` lanes (fully unrolled in release builds, see [`compress_unrolled`]).
 #[inline(always)]
 pub(crate) fn compress<V: Simd<L>, const L: usize>(s: &mut [V; 8], w: &mut [V; 16]) {
+    // Debug builds run the same rounds as a loop: unrolled and unoptimised, every round's temporaries get their
+    // own stack slots, and the multi-buffer kernels needed 1-2.5 MB of stack (more than a spawned thread's 2 MB).
+    #[cfg(debug_assertions)]
+    {
+        let mut v = *s;
+        for t in 0..64 {
+            let wt = if t < 16 {
+                w[t]
+            } else {
+                let w15 = w[(t - 15) & 15];
+                let w2 = w[(t - 2) & 15];
+                let s0 = V::xor3(w15.ror::<7, 25>(), w15.ror::<18, 14>(), w15.shr::<3, 3>());
+                let s1 = V::xor3(w2.ror::<17, 15>(), w2.ror::<19, 13>(), w2.shr::<10, 10>());
+                w[t & 15] = w[t & 15].add(s0).add(w[(t - 7) & 15].add(s1));
+                w[t & 15]
+            };
+            let [a, b, c, d, e, f, g, h] = v;
+            let s1 = V::xor3(e.ror::<6, 26>(), e.ror::<11, 21>(), e.ror::<25, 7>());
+            let t1 = h.add(s1).add(V::ch(e, f, g).add(V::splat(K256[t]))).add(wt);
+            let t2 = V::xor3(a.ror::<2, 30>(), a.ror::<13, 19>(), a.ror::<22, 10>())
+                .add(V::maj(a, b, c));
+            v = [t1.add(t2), a, b, c, d.add(t1), e, f, g];
+        }
+        for (si, o) in s.iter_mut().zip(v) {
+            *si = si.add(o);
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        compress_unrolled::<V, L>(s, w)
+    }
+}
+
+/// [`compress`] for release builds: 64 rounds, fully unrolled (the round macro renames the eight working
+/// variables instead of moving them).
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn compress_unrolled<V: Simd<L>, const L: usize>(s: &mut [V; 8], w: &mut [V; 16]) {
     let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *s;
     macro_rules! rnd {
         ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $t:expr, $wt:expr) => {{
