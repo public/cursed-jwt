@@ -1,0 +1,13 @@
+[package]
+name = "cjwt-sys"
+version = "0.0.0"
+description = "Test-only FFI bindings to the C cursed-jwt in this repository (differential tests, benchmarks)"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+links = "cursedjwt"
+
+[build-dependencies]
+cc = "1"

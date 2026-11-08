@@ -1,0 +1,151 @@
+//! A loop to profile under perf: `prof rust|c|rust-hmac|c-hmac|ed-rust|ed-c|rs-rust|rs-c BATCH SECONDS` verifies (or only
+//! HMACs) BATCH tokens per call for SECONDS and prints ns per token.  `xN` for SECONDS makes exactly N calls
+//! instead (deterministic, for instruction counts under callgrind: diff two runs with different N).
+use cursed_jwt::{Engine, Error, Hs256Key, Verdict};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use std::hint::black_box;
+use std::time::{Duration, Instant};
+
+const SECRET: &[u8] = b"cursed-jwt-test-secret";
+
+fn b64u(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut s = String::new();
+    for c in b.chunks(3) {
+        let v = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..c.len() + 1 {
+            s.push(A[(v >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    s
+}
+
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let mode = a.get(1).map(String::as_str).unwrap_or("rust");
+    let n: usize = a.get(2).and_then(|v| v.parse().ok()).unwrap_or(8);
+    let arg3 = a.get(3).map(String::as_str).unwrap_or("3");
+    let calls: Option<u64> = arg3.strip_prefix('x').and_then(|v| v.parse().ok());
+    let secs: f64 = arg3.parse().unwrap_or(3.0);
+    let head = b64u(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let toks: Vec<Vec<u8>> = (1..=n)
+        .map(|i| {
+            let pl = format!(
+                r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#
+            );
+            let msg = format!("{head}.{}", b64u(pl.as_bytes()));
+            let mut m = Hmac::<Sha256>::new_from_slice(SECRET).unwrap();
+            m.update(msg.as_bytes());
+            format!("{msg}.{}", b64u(&m.finalize().into_bytes())).into_bytes()
+        })
+        .collect();
+    let msgs: Vec<&[u8]> = toks
+        .iter()
+        .map(|t| &t[..t.iter().rposition(|&b| b == b'.').unwrap()])
+        .collect();
+    let k = Hs256Key::new(SECRET);
+    let ck = cjwt_sys::Key::new(SECRET);
+    let (p, l) = cjwt_sys::token_ptrs(&toks);
+    let mut out: Vec<Verdict> = vec![Err(Error::Invalid); n];
+    let mut cout = cjwt_sys::results(n);
+    let mut tags = vec![[0u8; 32]; n];
+    let e = Engine::best();
+    let (mp, ml): (Vec<*const u8>, Vec<i32>) = (
+        msgs.iter().map(|m| m.as_ptr()).collect(),
+        msgs.iter().map(|m| m.len() as i32).collect(),
+    );
+    let mut cmac = vec![[0u32; 8]; n];
+    let cdef = cjwt_sys::engine();
+    let chmac = cjwt_sys::hmac_engines()
+        .into_iter()
+        .find(|(name, _)| *name == cdef)
+        .map(|(_, f)| f)
+        .unwrap_or(cjwt_sys::jwt_hmac_scalar);
+    // EdDSA: one key, n tokens signed by ed25519-dalek
+    let sk = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+    let edk = cursed_jwt::Ed25519Key::new(&sk.verifying_key().to_bytes()).unwrap();
+    let edc = cjwt_sys::PKey::ed25519(&sk.verifying_key().to_bytes()).unwrap();
+    let ehead = b64u(br#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let etoks: Vec<Vec<u8>> = (1..=n)
+        .map(|i| {
+            use ed25519_dalek::Signer;
+            let pl = format!(
+                r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#
+            );
+            let msg = format!("{ehead}.{}", b64u(pl.as_bytes()));
+            format!("{msg}.{}", b64u(&sk.sign(msg.as_bytes()).to_bytes())).into_bytes()
+        })
+        .collect();
+    let (ep, el) = cjwt_sys::token_ptrs(&etoks);
+    // RS256: one 2048-bit key (seeded), n tokens signed by the rsa crate; only built for the rs modes
+    let (rsk, rsc, rtoks) = if mode.starts_with("rs") {
+        use rand::SeedableRng;
+        use rsa::pkcs1v15::SigningKey;
+        use rsa::signature::{SignatureEncoding, Signer};
+        use rsa::traits::PublicKeyParts;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let pk = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pubk = pk.to_public_key();
+        let (rn, re) = (pubk.n().to_bytes_be(), pubk.e().to_bytes_be());
+        let skey = SigningKey::<sha2::Sha256>::new(pk);
+        let rhead = b64u(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let rtoks: Vec<Vec<u8>> = (1..=n)
+            .map(|i| {
+                let pl = format!(
+                    r#"{{"sub":"{i}","username":"user_{i}","iat":1792832174,"exp":2108192174}}"#
+                );
+                let msg = format!("{rhead}.{}", b64u(pl.as_bytes()));
+                format!("{msg}.{}", b64u(&skey.sign(msg.as_bytes()).to_vec())).into_bytes()
+            })
+            .collect();
+        (
+            Some(cursed_jwt::Rs256Key::new(&rn, &re).unwrap()),
+            Some(cjwt_sys::PKey::rs256(&rn, &re).unwrap()),
+            rtoks,
+        )
+    } else {
+        (None, None, Vec::new())
+    };
+    let (rp, rl) = cjwt_sys::token_ptrs(&rtoks);
+    let reps = if mode.starts_with("ed") || mode.starts_with("rs") {
+        10
+    } else {
+        1000
+    };
+    let mut call = || match mode {
+        "ed-rust" => edk.verify_batch(black_box(&etoks), 1_800_000_000, &mut out),
+        "ed-c" => edc.verify_raw(black_box(&ep), &el, 1_800_000_000, &mut cout),
+        "rs-rust" => rsk
+            .as_ref()
+            .unwrap()
+            .verify_batch(black_box(&rtoks), 1_800_000_000, &mut out),
+        "rs-c" => rsc
+            .as_ref()
+            .unwrap()
+            .verify_raw(black_box(&rp), &rl, 1_800_000_000, &mut cout),
+        "c" => ck.verify_raw(black_box(&p), &l, 1_800_000_000, &mut cout),
+        "rust-hmac" => k.hmac_batch(e, black_box(&msgs), &mut tags),
+        "c-hmac" => ck.hmac_raw(chmac, black_box(&mp), &ml, &mut cmac),
+        _ => k.verify_batch(black_box(&toks), 1_800_000_000, &mut out),
+    };
+    let start = Instant::now();
+    let mut iters = 0u64;
+    if let Some(c) = calls {
+        for _ in 0..c {
+            call();
+        }
+        iters = c;
+    } else {
+        while start.elapsed() < Duration::from_secs_f64(secs) {
+            for _ in 0..reps {
+                call();
+            }
+            iters += reps;
+        }
+    }
+    let ns = start.elapsed().as_nanos() as f64 / (iters as f64 * n as f64);
+    println!("{mode} batch {n} engine {}: {ns:.1} ns/token", e.name());
+}

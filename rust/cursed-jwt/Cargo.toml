@@ -1,0 +1,49 @@
+[package]
+name = "cursed-jwt"
+version = "0.1.0"
+description = "Batch JWT verification: one multi-buffer SIMD HMAC-SHA256 pass for many HS256 tokens; RS256, ES256, EdDSA"
+readme = "README.md"
+build = "build.rs"
+include = ["src/**", "asm/**", "build.rs", "README.md"]
+keywords = ["jwt", "hmac", "simd", "es256", "eddsa"]
+categories = ["cryptography", "authentication", "no-std"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["std", "pk", "asm"]
+# run-time CPU feature detection (is_x86_feature_detected! / is_aarch64_feature_detected!) and the JWT_CPU_MASK
+# environment override; without it the engines are chosen from the compile-time target features
+std = ["alloc"]
+alloc = []
+# x86-64 Linux: OpenSSL's extracted SHA-256 assembly for single messages (as the C library uses it); needs a C
+# compiler at build time, and is ignored on every other target
+asm = ["dep:cc"]
+# RS256 / ES256 / EdDSA (needs alloc for the per-key tables)
+pk = ["alloc", "dep:fiat-crypto", "dep:sha2"]
+
+[dependencies]
+fiat-crypto = { version = "0.3", default-features = false, optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
+memchr = { version = "2.7", default-features = false }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[dev-dependencies]
+# independent implementations used as test oracles and benchmark baselines
+hmac = "0.12"
+sha2 = "0.10"
+proptest = "1"
+serde_json = "1"
+cjwt-sys = { path = "../cjwt-sys" }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
