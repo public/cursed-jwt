@@ -262,6 +262,21 @@ RSAZ8 := -DJWT_RSAZ8 $(B)/libcmbrsa.a
 $(eval $(call PK_BACKEND,_rsaz8,$(RSAZ) $(RSAZ8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a))
 $(B)/test_rsaz8: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(RSAZ8) $(FAST) -o $@
+# -DJWT_ES8: ES256 batches 8 tokens at a time through crypto_mb's 8-lane P-256 field arithmetic under our comb tables
+# (src/cmb_ec/es8.c #includes the two fetched files; every symbol but jwt_es8_* is made local).  Used only where zmm
+# costs no clock speed (FAST_ZMM: AMD Zen 4 / 5) and the CPU has IFMA.  pk-test-es8 / pk-bench-es8 = rsaz8 plus it.
+CMB_INC := -Ithird_party/crypto-mb-rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include
+$(B)/libcmbec.a: scripts/fetch-crypto-mb-rsa.sh src/cmb_ec/es8.c | $(B)
+	./scripts/fetch-crypto-mb-rsa.sh
+	mkdir -p $(B)/cmbec
+	$(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq $(CMB_INC) -c src/cmb_ec/es8.c \
+	  -o $(B)/cmbec/es8.o
+	objcopy -w --keep-global-symbol='jwt_es8_*' $(B)/cmbec/es8.o
+	rm -f $@ && ar rcs $@ $(B)/cmbec/es8.o
+ES8 := -DJWT_ES8 $(B)/libcmbec.a
+$(eval $(call PK_BACKEND,_es8,$(RSAZ) $(RSAZ8) $(ES8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a $(B)/libcmbec.a))
+pk-test-es8: $(B)/test_pk_es8 $(B)/pk_vectors.txt
+	./$(B)/test_pk_es8 $(B)/pk_vectors.txt
 $(B)/test_rsaz: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(FAST) -o $@
 test-rsaz: $(B)/test_rsaz
@@ -319,4 +334,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8
+.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

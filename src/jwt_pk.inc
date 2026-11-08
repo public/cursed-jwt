@@ -84,6 +84,9 @@ struct jwt_pkey {
     p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
     uint64_t qx[4], qy[4];                   /* ES256: the public point, plain little-endian limbs */
     struct ed_key *ed;                       /* EdDSA: comb tables for B and -A (jwt_ed25519.inc) */
+#ifdef JWT_ES8
+    int es8; /* ES256: batches go 8 tokens at a time through src/cmb_ec/es8.c (IFMA, and FAST_ZMM: AMD Zen 4 / 5) */
+#endif
 };
 
 #ifdef JWT_CRYPTO_MB
@@ -299,6 +302,47 @@ static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_
     es_points_c(k, c, d1, d2, r, at, ok);
 }
 
+#ifdef JWT_ES8
+/* -DJWT_ES8: the same additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane P-256 field
+ * arithmetic (src/cmb_ec/es8.c, built into build/libcmbec.a).  Each lane gathers its own entries of the tables above.
+ * Lanes es8.c can't finish (an exceptional addition, R at infinity) and the rare r + n < p second candidate are
+ * redone here by the scalar code, so the results are the scalar code's. */
+void jwt_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8],
+                    const int16_t *const d2[8], const uint64_t r[8][4], unsigned *good, unsigned *redo);
+#ifndef JWT_ES8_MIN
+#define JWT_ES8_MIN 3 /* the fewest tokens worth a (padded) group of 8; fewer go to the scalar code */
+#endif
+static void es_points8(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
+                       const int *at, uint8_t *ok) {
+    for (int g = 0; g < c; g += 8) {
+        int m = c - g < 8 ? c - g : 8;
+        if (m < JWT_ES8_MIN) {
+            es_points(k, m, d1 + g, d2 + g, r + g, at + g, ok);
+            break;
+        }
+        const int16_t *p1[8], *p2[8];
+        uint64_t rr[8][4];
+        for (int l = 0; l < 8; l++) { /* a short group repeats its first token */
+            int i = g + (l < m ? l : 0);
+            p1[l] = d1[i], p2[l] = d2[i], memcpy(rr[l], r[i], 32);
+        }
+        unsigned good, redo;
+        jwt_es8_points(k->tg, k->tq, P256_NW, P256_H, p1, p2, (const uint64_t(*)[4])rr, &good, &redo);
+        for (int l = 0; l < m; l++) {
+            int i = g + l, again = redo >> l & 1;
+            if (!again && !(good >> l & 1)) { /* r + n is a candidate too when it's < p */
+                uint64_t rn[4];
+                fiat_p256_scalar_uint1 cy = 0;
+                for (int j = 0; j < 4; j++) fiat_p256_scalar_addcarryx_u64(&rn[j], &cy, cy, r[i][j], P256_N[j]);
+                again = !cy && u256_lt(rn, P256_P);
+            }
+            if (again) es_points(k, 1, d1 + i, d2 + i, r + i, at + i, ok);
+            else ok[at[i]] = (uint8_t)(good >> l & 1);
+        }
+    }
+}
+#endif
+
 /* tab[w][k-1] = k * 2^(W w) * P, affine, k = 1..H */
 static void p256_table(p256_aff_t tab[P256_NW][P256_H], const fe_t px, const fe_t py) {
     p256_jac_t *jac = malloc(sizeof(p256_jac_t) * P256_H);
@@ -356,7 +400,13 @@ jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
     if (!u256_lt(xi, P256_P) || !u256_lt(yi, P256_P)) return NULL;
     jwt_pkey_t *k = calloc(1, sizeof *k);
     if (!k) return NULL;
+#ifdef JWT_ES8
+    /* 64-byte entries on 64-byte boundaries: es8.c's gathers then never split a cache line */
+    if (posix_memalign((void **)&k->tg, 64, sizeof(p256_aff_t[P256_NW][P256_H]) * 2)) k->tg = NULL;
+    k->es8 = (jwt_cpu() & (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM)) == (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM);
+#else
     k->tg = malloc(sizeof(p256_aff_t[P256_NW][P256_H]) * 2);
+#endif
     if (!k->tg) {
         free(k);
         return NULL;
@@ -499,6 +549,12 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             fiat_p256_scalar_from_montgomery(u2, u2);
             p256_recode(d1[i], u1), p256_recode(d2[i], u2);
         }
+#ifdef JWT_ES8
+        if (k->es8 && c >= JWT_ES8_MIN) {
+            es_points8(k, c, d1, d2, r, at, ok);
+            continue;
+        }
+#endif
         es_points(k, c, d1, d2, r, at, ok);
     }
 }
