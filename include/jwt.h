@@ -91,7 +91,8 @@ enum { /* the CC_CPU_* bits of cursed_crypto.h */
        JWT_CPU_FAST_SHANI = CC_CPU_FAST_SHANI,
        JWT_CPU_FULL_ZMM = CC_CPU_FULL_ZMM,
        JWT_CPU_VBMI = CC_CPU_VBMI,
-       JWT_CPU_ZMM_HMAC = CC_CPU_ZMM_HMAC
+       JWT_CPU_ZMM_HMAC = CC_CPU_ZMM_HMAC,
+       JWT_CPU_BMI2 = CC_CPU_BMI2
 };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
 const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "shani", "avx512vl", "avx2", ... */

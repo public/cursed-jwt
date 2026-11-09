@@ -646,6 +646,22 @@ typedef struct {
 MONT_SIZE(32)
 MONT_SIZE(48)
 MONT_SIZE(64)
+#if defined(CC_X86)
+/* the same kernels built for BMI2 (mulx: no fixed rax / rdx, no flags written), for the builds and CPUs that reach the
+ * C kernels (no s2n-bignum, no OpenSSL bn_mul_mont extract); picked at run time (CC_CPU_BMI2) */
+#define MONT_SIZE_BMI2(N)                                                                                              \
+    __attribute__((target("bmi2"), flatten)) static void mont_mul_##N##_bmi2(uint64_t *r, const uint64_t *a,           \
+                                                                             const uint64_t *b, const rsa_key_t *k) {  \
+        mont_mul(r, a, b, k->n, k->n0, N);                                                                             \
+    }                                                                                                                  \
+    __attribute__((target("bmi2"), flatten)) static void mont_sqr_##N##_bmi2(uint64_t *r, const uint64_t *a,           \
+                                                                             const rsa_key_t *k) {                     \
+        mont_sqr(r, a, k->n, k->n0, N);                                                                                \
+    }
+MONT_SIZE_BMI2(32)
+MONT_SIZE_BMI2(48)
+MONT_SIZE_BMI2(64)
+#endif
 static void mont_mul_any(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
     mont_mul(r, a, b, k->n, k->n0, k->nl);
 }
@@ -692,6 +708,13 @@ static mont_ops_t mont_for(const rsa_key_t *k) {
 #endif
 #ifdef CC_HAVE_OSSL_MONT
     if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
+#endif
+#if defined(CC_X86)
+    if (cc_cpu() & CC_CPU_BMI2) switch (k->nl) {
+            case 32: return (mont_ops_t){ mont_mul_32_bmi2, mont_sqr_32_bmi2 };
+            case 48: return (mont_ops_t){ mont_mul_48_bmi2, mont_sqr_48_bmi2 };
+            case 64: return (mont_ops_t){ mont_mul_64_bmi2, mont_sqr_64_bmi2 };
+        }
 #endif
     switch (k->nl) {
         case 32: return (mont_ops_t){ mont_mul_32, mont_sqr_32 };

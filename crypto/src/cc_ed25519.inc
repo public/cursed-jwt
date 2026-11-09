@@ -178,7 +178,7 @@ static int ed_decode(ed_p3 *P, const uint8_t s[32]) {
 #ifndef CC_ED_S2N /* (with s2n-bignum on x86-64, edwards25519_pepadd does these) */
 /* P += Q (Niels), ref10's ge_madd: 7M.  Only 2Z is carried (it is an add / sub input); every other sum feeds a
  * multiplication. */
-static void ed_madd(ed_p3 *P, const ed_niels *q) {
+CC_INLINE void ed_madd(ed_p3 *P, const ed_niels *q) {
     fe25_t a, b, c, d, e, f, g, h;
     F_SUBL(a, P->Y, P->X), F_MUL(a, a, q->ymx);
     F_ADDL(b, P->Y, P->X), F_MUL(b, b, q->ypx);
@@ -188,7 +188,7 @@ static void ed_madd(ed_p3 *P, const ed_niels *q) {
     F_MUL(P->X, e, f), F_MUL(P->Y, g, h), F_MUL(P->T, e, h), F_MUL(P->Z, f, g);
 }
 /* P += -Q (Niels): swap y+x / y-x, negate 2dxy */
-static void ed_msub(ed_p3 *P, const ed_niels *q) {
+CC_INLINE void ed_msub(ed_p3 *P, const ed_niels *q) {
     fe25_t a, b, c, d, e, f, g, h;
     F_SUBL(a, P->Y, P->X), F_MUL(a, a, q->ypx);
     F_ADDL(b, P->Y, P->X), F_MUL(b, b, q->ymx);
@@ -418,8 +418,33 @@ static ed_key_t *ed_key_new(const uint8_t pub[32]) {
     return k;
 }
 
+#ifndef CC_ED_S2N
+/* the comb additions of one token: the whole verify loop.  x86-64 also gets a copy built for BMI2, whose mulx leaves
+ * the flags and rax / rdx free (the baseline mul pins both); ed25519_raw picks it at run time (CC_CPU_BMI2). */
+CC_INLINE void ed_comb_body(const ed_key_t *k, const int16_t *ds, const int16_t *dk, ed_p3 *P) {
+    f_set(P->X, 0), f_set(P->Y, 1), f_set(P->Z, 1), f_set(P->T, 0); /* the identity: additions are complete */
+    for (int j = 0; j < ED_NW; j++) {
+        if (ds[j] > 0) ed_madd(P, &k->tb[j][ds[j] - 1]);
+        else if (ds[j] < 0) ed_msub(P, &k->tb[j][-ds[j] - 1]);
+        if (dk[j] > 0) ed_madd(P, &k->ta[j][dk[j] - 1]);
+        else if (dk[j] < 0) ed_msub(P, &k->ta[j][-dk[j] - 1]);
+    }
+}
+static void ed_comb_fiat(const ed_key_t *k, const int16_t *ds, const int16_t *dk, ed_p3 *P) {
+    ed_comb_body(k, ds, dk, P);
+}
+#if defined(CC_X86)
+__attribute__((target("bmi2"), flatten)) static void ed_comb_fiat_bmi2(const ed_key_t *k, const int16_t *ds,
+                                                                       const int16_t *dk, ed_p3 *P) {
+    ed_comb_body(k, ds, dk, P);
+}
+#endif
+#endif
 static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                         const int *slen, uint8_t *ok) {
+#if !defined(CC_ED_S2N) && defined(CC_X86)
+    const int bmi2 = (cc_cpu() & CC_CPU_BMI2) != 0;
+#endif
     enum { CH = 32 };
 #ifdef CC_ED_S2N
     void (*pepadd)(uint64_t *, const uint64_t *, const uint64_t *) =
@@ -458,13 +483,11 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
             fiat_25519_from_bytes(P->X, (const uint8_t *)P4), fiat_25519_from_bytes(P->Y, (const uint8_t *)(P4 + 4));
             fiat_25519_from_bytes(P->Z, (const uint8_t *)(P4 + 8));
 #else
-            f_set(P->X, 0), f_set(P->Y, 1), f_set(P->Z, 1), f_set(P->T, 0); /* the identity: additions are complete */
-            for (int j = 0; j < ED_NW; j++) {
-                if (ds[j] > 0) ed_madd(P, &k->tb[j][ds[j] - 1]);
-                else if (ds[j] < 0) ed_msub(P, &k->tb[j][-ds[j] - 1]);
-                if (dk[j] > 0) ed_madd(P, &k->ta[j][dk[j] - 1]);
-                else if (dk[j] < 0) ed_msub(P, &k->ta[j][-dk[j] - 1]);
-            }
+#if defined(CC_X86)
+            if (bmi2) ed_comb_fiat_bmi2(k, ds, dk, P);
+            else
+#endif
+                ed_comb_fiat(k, ds, dk, P);
 #endif
             at[c++] = t;
         }

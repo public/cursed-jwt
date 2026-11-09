@@ -41,7 +41,8 @@ enum {
     CC_CPU_FAST_SHANI = 256, /* SHA-NI that beats the vector engines (AMD Zen): the 4-stream SHA-NI engine */
     CC_CPU_FULL_ZMM = 512,   /* full-width 512-bit execution (Zen 5 server/desktop): zmm for groups of 11+ */
     CC_CPU_VBMI = 1024,      /* AVX-512 VBMI (vpermi2b / vpermb) */
-    CC_CPU_ZMM_HMAC = 2048   /* Intel AVX-512 without SHA-NI: zmm (x16) HMAC for groups of 9+; mask it to stay on ymm */
+    CC_CPU_ZMM_HMAC = 2048,  /* Intel AVX-512 without SHA-NI: zmm (x16) HMAC for groups of 9+; mask it to stay on ymm */
+    CC_CPU_BMI2 = 4096       /* BMI2 (mulx): the C RSA Montgomery kernels and EdDSA comb additions built for it */
 };
 unsigned cc_cpu_features(void); /* CC_CPU_* bits */
 const char *cc_engine(void);    /* the engine cc_hmac_sha256_batch uses: "shani", "zmm", "avx512vl", "avx2", ... */

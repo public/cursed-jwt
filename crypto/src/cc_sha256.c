@@ -41,6 +41,7 @@ __attribute__((constructor)) static void cc_cpu_init(void) {
         f |= CC_CPU_AVX512VL; /* F, VL, BW, DQ, CD */
     if ((f & CC_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= CC_CPU_IFMA;
     if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= CC_CPU_BMI2_ADX;
+    if (ebx7 & (1u << 8)) f |= CC_CPU_BMI2;
     if (ebx7 & (1u << 29)) f |= CC_CPU_SHANI;
     if ((f & CC_CPU_AVX512VL) && (ecx7 & (1u << 1))) f |= CC_CPU_VBMI;
     unsigned vb = 0, vc = 0, vd = 0, fam;
