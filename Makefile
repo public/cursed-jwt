@@ -78,14 +78,21 @@ $(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
 #                            on its own works as before; linking both is fine too (the linker takes each object once)
 # build/jwt.o is everything as one unit (src/jwt.c #includes crypto/src/cursed_crypto.c), as the tests and the
 # contrib modules build it.
+# LIBFLAGS adds build flags to both (e.g. LIBFLAGS="-DJWT_S2N -DJWT_OPENSSL", the fast public-key build; see the
+# flags table in README.md).  $(B)/libcursedjwt_all.a is libcursedjwt.a plus, with -DJWT_S2N in LIBFLAGS, s2n-bignum's
+# kernels: one archive for builds of their own (contrib/nginx, contrib/haproxy), which then take nothing else from
+# this tree but include/ and crypto/include/.
 $(B)/cursed_crypto.o: $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -c crypto/src/cursed_crypto.c -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(LIBFLAGS) $(WARN) -c crypto/src/cursed_crypto.c -o $@
 $(B)/jwt_layer.o: $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -DJWT_EXTERNAL_CRYPTO -c src/jwt.c -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(LIBFLAGS) $(WARN) -Iinclude -DJWT_EXTERNAL_CRYPTO -c src/jwt.c -o $@
 $(B)/libcursedcrypto.a: $(B)/cursed_crypto.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
 $(B)/libcursedjwt.a: $(B)/jwt_layer.o $(B)/cursed_crypto.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
+LIB_S2N := $(if $(findstring -DJWT_S2N,$(LIBFLAGS))$(findstring -DCC_S2N,$(LIBFLAGS)),$(B)/libs2n.a)
+$(B)/libcursedjwt_all.a: $(B)/jwt_layer.o $(B)/cursed_crypto.o $(SHAOBJ) $(LIB_S2N)
+	rm -f $@ && ar rcs $@ $(filter %.o,$^) $(if $(LIB_S2N),$(addprefix $(B)/s2n/,$(addsuffix .o,$(notdir $(S2N_FILES)))))
 $(B)/verify: examples/verify.c $(B)/libcursedjwt.a
 	$(CC) $(CFLAGS) $(WARN) -Iinclude $< $(B)/libcursedjwt.a -o $@
 
@@ -118,8 +125,11 @@ $(B)/hmac_vectors.txt: tests/make_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
 test-vectors: $(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
 
-test: $(B)/test_jwt $(B)/tokens.json example-check
+test: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	./$(B)/test_jwt $(B)/tokens.json
+# the libraries' exported symbols are all cc_* / jwt_* (scripts/check-symbols.sh)
+check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
+	./scripts/check-symbols.sh $^
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
@@ -153,7 +163,7 @@ dudect: $(B)/dudect_hmac
 	for b in 3 16; do for e in ossl avx2 avx512 zmm x16 shani_4 shani_4r shani_x16; do ./$(B)/dudect_hmac key $$e $$b; done; done
 	./$(B)/dudect_hmac key ossl 1
 	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
-test-quick: $(B)/test_jwt $(B)/tokens.json example-check
+test-quick: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json
 	ASAN_OPTIONS=detect_leaks=0 JWT_TEST_QUICK=1 ./$(B)/asan_jwt $(B)/tokens.json
@@ -224,11 +234,13 @@ S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p
 S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt \
   curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt)
 S2N := -DJWT_S2N $(B)/libs2n.a
+# each kernel's one global is renamed cc_s2n_<name> as it is assembled (the C side declares those names), so the
+# archive links next to AWS-LC or another copy of s2n-bignum, which carry the plain bignum_* / edwards25519_* names
 $(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
 	./scripts/fetch-s2n-bignum.sh
 	mkdir -p $(B)/s2n
-	for f in $(S2N_FILES); do $(CC) -c -DS2N_BN_HIDE_SYMBOLS=1 -Ithird_party/s2n-bignum/include \
-	  third_party/s2n-bignum/$(S2N_ARCH)/$$f.S -o $(B)/s2n/$${f#*/}.o || exit 1; done
+	for f in $(S2N_FILES); do n=$${f#*/}; $(CC) -c -DS2N_BN_HIDE_SYMBOLS=1 -D$$n=cc_s2n_$$n \
+	  -Ithird_party/s2n-bignum/include third_party/s2n-bignum/$(S2N_ARCH)/$$f.S -o $(B)/s2n/$$n.o || exit 1; done
 	rm -f $@ && ar rcs $@ $(addprefix $(B)/s2n/,$(addsuffix .o,$(notdir $(S2N_FILES))))
 # -DJWT_OPENSSL: RSA arithmetic through libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery (OpenSSL's asm);
 # pk-test-fast / pk-bench-fast build the fastest combination: s2n-bignum for P-256, OpenSSL for RSA
@@ -352,4 +364,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
