@@ -3,6 +3,8 @@
 # (ossl_rsaz_amm52x40_x1_ifma256, crypto/bn/asm/rsaz-4k-avx512.pl; Intel's contribution, Apache-2.0) into
 # third_party/openssl-rsaz (git-ignored), each file checked against a pinned SHA-256, then translated by OpenSSL's own
 # perlasm translator into build/rsaz-4k-avx512.S.  Only the -DJWT_RSAZ build uses it (src/jwt_pk.inc, PK.md).
+# Every global ossl_* symbol becomes jwt_ossl_* and is marked .hidden, as in scripts/extract-openssl-mont.sh, so a
+# program that also links libcrypto statically (which defines the same ossl_rsaz_* names) links cleanly.
 #   github.com/openssl/openssl @ openssl-4.1.0 (2f4e3a5)
 # Needs perl and an assembler that knows AVX-512 IFMA (binutils >= 2.26 or clang >= 7). x86-64 only.
 set -e
@@ -30,11 +32,15 @@ get crypto/perlasm/x86_64-xlate.pl 77c24c8986367cac72253eaec5af35e2387bb72ad43f0
 mkdir -p build
 # the generator probes $CC's assembler for IFMA support and emits an empty file without it: refuse that
 CC="${CC:-cc}" perl "$D/rsaz-4k-avx512.pl" elf build/rsaz-4k-avx512.S.tmp
-grep -q 'ossl_rsaz_amm52x40_x1_ifma256:' build/rsaz-4k-avx512.S.tmp || {
+grep -q '^ossl_rsaz_amm52x40_x1_ifma256:' build/rsaz-4k-avx512.S.tmp || {
   echo "fetch-ossl-rsaz: the assembler ($CC) lacks AVX-512 IFMA; -DJWT_RSAZ needs binutils >= 2.26 or clang >= 7" >&2
   rm -f build/rsaz-4k-avx512.S.tmp
   exit 1
 }
+SYMS=$(awk '/^\.globl[[:space:]]+ossl_/ { print $2 }' build/rsaz-4k-avx512.S.tmp | sort -u | paste -sd'|' -)
+sed -E "s/\b($SYMS)\b/jwt_\1/g" build/rsaz-4k-avx512.S.tmp |
+  awk '{ print } /^\.globl[[:space:]]+jwt_ossl_/ && !seen[$2]++ { print ".hidden\t" $2 }' >build/rsaz-4k-avx512.S.t2
+mv build/rsaz-4k-avx512.S.t2 build/rsaz-4k-avx512.S.tmp
 printf '.section .note.GNU-stack,"",@progbits\n' >>build/rsaz-4k-avx512.S.tmp # no executable stack (OpenSSL passes --noexecstack instead)
 mv build/rsaz-4k-avx512.S.tmp build/rsaz-4k-avx512.S
 echo "openssl rsaz @ $C: OK"
