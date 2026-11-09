@@ -42,42 +42,26 @@ if [ "${UNIT:-0}" = 1 ]; then DEFS="-DDEBUG_UNIT"; fi
 if [ "$V" = cursed ]; then
   (cd "$S" && patch -s -p1 <"$HERE/haproxy-$HAPROXY_VER.patch")
   [ "${UNIT:-0}" = 1 ] && OBJS="src/jwt_cursed_test.o"
-  # cursed-jwt plus the glue, in one archive. The glue is compiled apart from HAProxy: cursed-jwt's jwt.h and
+  # cursed-jwt, and the glue in an archive of its own. The glue is compiled apart from HAProxy: cursed-jwt's jwt.h and
   # HAProxy's haproxy/jwt.h share the jwt_ prefix, so no file includes both.
   L="$O/lib"
   rm -rf "$L"
   mkdir -p "$L"
+  # the library comes from the root Makefile (libcursedjwt_all.a: the JWT layer, cursed-crypto and, with S2N=1,
+  # s2n-bignum's kernels), built -fPIC with this build's flags; no source list lives here
   JDEFS="-DJWT_OPENSSL"
-  LOBJS="$L/jwt.o $L/jwt_cursed.o"
+  SHA="SHAFLAG= SHAOBJ="
   if [ "$(uname -m)-$(uname -s)" = x86_64-Linux ]; then
     JDEFS="$JDEFS -DJWT_OSSL_SHA256"
-    "$CC" -c "$J/crypto/src/sha256_x86_64_ossl.S" -o "$L/sha256_x86_64_ossl.o"
-    LOBJS="$LOBJS $L/sha256_x86_64_ossl.o"
+    SHA="SHAFLAG=-DJWT_OSSL_SHA256 SHAOBJ=$L/root/sha256_x86_64_ossl.o"
   fi
-  if [ "${S2N:-1}" = 1 ]; then
-    [ -d "$J/third_party/s2n-bignum/include" ] || (cd "$J" && ./scripts/fetch-s2n-bignum.sh >/dev/null)
-    JDEFS="$JDEFS -DJWT_S2N"
-    a=$([ "$(uname -m)" = x86_64 ] && echo x86 || echo arm)
-    fs="p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256"
-    fs="$fs fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n"
-    # x86-64: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX, and the Ed25519 comb
-    # addition (both variants)
-    [ "$a" = x86 ] && fs="$fs p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt"
-    [ "$a" = x86 ] && fs="$fs curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt"
-    for f in $fs; do
-      "$CC" -c -DS2N_BN_HIDE_SYMBOLS=1 -I"$J/third_party/s2n-bignum/include" "$J/third_party/s2n-bignum/$a/$f.S" \
-        -o "$L/${f#*/}.o"
-      LOBJS="$LOBJS $L/${f#*/}.o"
-    done
-  fi
+  [ "${S2N:-1}" = 1 ] && JDEFS="$JDEFS -DJWT_S2N"
   # shellcheck disable=SC2086 # word splitting intended
-  "$CC" -O3 -fPIC -Wall -Wno-deprecated-declarations -Wno-unused-function $JDEFS -I"$J/include" -I"$J/src" \
-    -c "$J/src/jwt.c" -o "$L/jwt.o"
+  make -s -C "$J" B="$L/root" CC="$CC" CFLAGS="-O3 -fPIC" $SHA LIBFLAGS="$JDEFS" "$L/root/libcursedjwt_all.a"
   # shellcheck disable=SC2086
   "$CC" -O2 -fPIC -Wall $JDEFS -I"$J/include" -c "$HERE/jwt_cursed.c" -o "$L/jwt_cursed.o"
-  # shellcheck disable=SC2086
-  ar rcs "$L/libcursedjwt-haproxy.a" $LOBJS
-  LIBS="$L/libcursedjwt-haproxy.a $LIBS"
+  ar rcs "$L/libcursedjwt-haproxy.a" "$L/jwt_cursed.o"
+  LIBS="$L/libcursedjwt-haproxy.a $L/root/libcursedjwt_all.a $LIBS"
 fi
 
 case $(uname -s) in Linux) TARGET=linux-glibc ;; Darwin) TARGET=osx ;; *) TARGET=generic ;; esac
