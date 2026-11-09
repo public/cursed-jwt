@@ -8,6 +8,9 @@
  * branch or index. An emulator trace is deterministic, so unlike dudect this is a proof for the inputs traced, not a
  * statistic. The "leaky" engine (an early-exit compare on the key) is the positive control and must differ.
  *
+ * ENGINE "verify" is cc_hmac_sha256_verify (the dispatched engine, then the tag compare) against key 0's tags: key 0
+ * accepts them all and key 1 none, and the traces must still be identical.
+ *
  *   ct_trace ENGINE KEY BATCH          (prints the first MAC word)
  *   make test-ct-sde SDE=/path/to/sde64
  *   make test-ct-qemu QEMU=/path/to/qemu-aarch64 EXECLOG=/path/to/libexeclog.so   (cross-builds for AArch64) */
@@ -61,9 +64,10 @@ int main(int argc, char **argv) {
 #endif
     };
     jwt_hmac_fn *f = 0;
+    int verify = !strcmp(e, "verify");
     for (size_t i = 0; i < sizeof eng / sizeof eng[0]; i++)
         if (!strcmp(e, eng[i].name)) f = eng[i].fn;
-    if (!f) return fprintf(stderr, "ct_trace: no engine %s in this build\n", e), 2;
+    if (!f && !verify) return fprintf(stderr, "ct_trace: no engine %s in this build\n", e), 2;
     const uint8_t *mp[32];
     int ml[32];
     static uint32_t mac[32][8];
@@ -72,6 +76,19 @@ int main(int argc, char **argv) {
         mp[i] = msg[i], ml[i] = 570 - 3 * i;
     }
     jwt_key_t k;
+    if (verify) { /* the tags are public: key 0's MACs, computed before the traced region */
+        static uint8_t tag[32][32], ok[32];
+        uint8_t k0[64];
+        for (int i = 0; i < 64; i++) k0[i] = (uint8_t)(i * 13 + 1);
+        cc_hmac_key_init(&k, k0, 64);
+        cc_hmac_sha256_bytes(&k, n, mp, ml, tag);
+        SSC_MARK(0x111);
+        cc_hmac_key_init(&k, key, 64);
+        int good = cc_hmac_sha256_verify(&k, n, mp, ml, (const uint8_t(*)[32])tag, ok);
+        SSC_MARK(0x222);
+        printf("%d of %d\n", good, n);
+        return 0;
+    }
     SSC_MARK(0x111);
     jwt_key_init(&k, key, 64);
     f(&k, n, mp, ml, mac);

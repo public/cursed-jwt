@@ -6,7 +6,9 @@
  *
  *   key      the HS256 secret: jwt_key_init and every HMAC engine this build has and this CPU runs (x86-64 and AArch64), at batch sizes
  *            1..17 and message lengths 0..300. Expect 0 errors: run with --error-exitcode=1. The MACs are declassified
- *            only at the end, to check them against the scalar engine.
+ *            only at the end, to check them against the scalar engine.  Then cursed-crypto's compares:
+ *            cc_hmac_sha256_verify against public tags (right and wrong ones) and cc_tag_eq32 on secret bytes, whose
+ *            verdicts are declassified only after the call.
  *   token    (report only) the token bytes marked secret, through base64url decoding, a full HS256 verify and the
  *            RS256 / ES256 / EdDSA raw verifies, to map where token data steers branches and addresses. Bearer tokens
  *            are credentials, but all of verification's inputs are public in the cryptographic sense, so
@@ -43,6 +45,42 @@ static int check_engine(const char *name, jwt_hmac_fn *f, const uint8_t *secret,
             runs++;
         }
     printf("  key: %-14s %d runs, %s\n", name, runs, bad ? "MAC MISMATCH" : "MACs match the scalar engine");
+    return bad;
+}
+
+/* cc_hmac_sha256_verify under a secret key: the MACs it computes are secret, the tags (the token's) are public, and
+ * ok[] may be read only by the caller; then cc_tag_eq32 with both sides secret */
+static int check_compare(const uint8_t *secret, size_t slen) {
+    cc_hmac_key_t k;
+    uint8_t s[200], tag[17][32], ok[17], a[32], b[32];
+    memcpy(s, secret, slen);
+    cc_hmac_key_init(&k, s, slen); /* public copy, for the expected tags */
+    int bad = 0, runs = 0;
+    for (int n = 1; n <= 17; n++) {
+        for (int i = 0; i < n; i++) ml[i] = (40 * n + 13 * i) % 301;
+        cc_hmac_sha256_bytes(&k, n, mp, ml, tag);
+        for (int i = 0; i < n; i++)
+            if (i % 3 == 1) tag[i][(i * 5) % 32] ^= (uint8_t)(1u << (i % 8)); /* a wrong tag, wrong in one bit */
+        cc_hmac_key_t ks;
+        memcpy(s, secret, slen);
+        VALGRIND_MAKE_MEM_UNDEFINED(s, slen);
+        cc_hmac_key_init(&ks, s, slen);
+        int good = cc_hmac_sha256_verify(&ks, n, mp, ml, (const uint8_t(*)[32])tag, ok);
+        VALGRIND_MAKE_MEM_DEFINED(ok, sizeof ok); /* the verdicts are the caller's to branch on */
+        VALGRIND_MAKE_MEM_DEFINED(&good, sizeof good);
+        int want = 0;
+        for (int i = 0; i < n; i++) want += i % 3 != 1, bad += ok[i] != (i % 3 != 1);
+        bad += good != want, runs++;
+    }
+    for (int i = 0; i < 64; i++) {
+        for (int j = 0; j < 32; j++) a[j] = b[j] = (uint8_t)(secret[(i + j) % 200] + j);
+        if (i & 1) b[i % 32] ^= (uint8_t)(0x80u >> (i % 8));
+        VALGRIND_MAKE_MEM_UNDEFINED(a, 32), VALGRIND_MAKE_MEM_UNDEFINED(b, 32);
+        int eq = cc_tag_eq32(a, b);
+        VALGRIND_MAKE_MEM_DEFINED(&eq, sizeof eq);
+        bad += eq != !(i & 1), runs++;
+    }
+    printf("  compare: verify + tag_eq32 %d runs, %s\n", runs, bad ? "WRONG VERDICT" : "verdicts right");
     return bad;
 }
 
@@ -122,6 +160,7 @@ int main(int argc, char **argv) {
                 bad += check_engine("sha2", jwt_hmac_sha2, secret, slen);
             }
 #endif
+            bad += check_compare(secret, slen);
         }
         printf("test_ct key: %s (memcheck reports any key-dependent branch or address above)\n",
                bad ? "FAIL" : "MACs OK");
