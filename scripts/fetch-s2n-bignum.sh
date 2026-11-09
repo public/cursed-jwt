@@ -3,7 +3,8 @@
 # third_party/s2n-bignum (git-ignored), each file checked against a pinned SHA-256.  Licence: Apache-2.0 OR ISC OR
 # MIT-0 (used under MIT-0).  Only the -DJWT_PK -DJWT_S2N build uses them (src/jwt_pk.inc, PK.md).
 #   github.com/awslabs/s2n-bignum @ 3306729
-# The x86 versions need BMI2 + ADX (mulx / adcx / adox); the arm versions need plain ARMv8.
+# The x86 versions need BMI2 + ADX (mulx / adcx / adox), except the _alt P-256 multiply / square, which s2n-bignum
+# provides for x86-64 CPUs without them (plain mul / adc); the arm versions need plain ARMv8.
 set -e
 cd "$(dirname "$0")/.."
 D=third_party/s2n-bignum
@@ -37,6 +38,10 @@ get x86/p256/bignum_montmul_p256.S 67054aa23bc758c6c63126d4b72653a9a8bce9edf3fb5
 get x86/p256/bignum_montsqr_p256.S d2423a6d39fb9e118a4f10f8a8f3cd9bca5d833474a67a6ab194f4cb300d3fd8
 get x86/p256/bignum_add_p256.S ea02371a7025d462b2210e35966b304318a67bc9226558111c0e4026f1c34aed
 get x86/p256/bignum_sub_p256.S daf9e19b257d3403b2653ad63e64a8fa3ec16718e5e1459468b86e6fc6f3611d
+get x86/p256/bignum_montmul_p256_alt.S 57abd32623288e7fd69c7d14a9322450bc7f96877f97079e67655984aa1f8885
+get x86/p256/bignum_montsqr_p256_alt.S ba968e36c0b3abab3bfbcf0489964e76e1562ba1151de694369c65a58484222a
+get x86/curve25519/edwards25519_pepadd.S a531b994784d625984e16ac91fa9ee3e3ceb350c4b23d6518ea71e0015cb6620
+get x86/curve25519/edwards25519_pepadd_alt.S 9bcfa257d417430effa12628b09e30face4fe94ad679bbde0cdd7243b5a4f7de
 get x86/fastmul/bignum_kmul_32_64.S 2fa9179f8445f4d2f540e21c3dbd6f9a852f0be57763aae713ab4a077d76df6e
 get x86/fastmul/bignum_ksqr_32_64.S 16f7cf7fe364974bc208621ab01079c53f25e2fcfbe269d786ad048e30b8c9ae
 get x86/fastmul/bignum_emontredc_8n.S 395a67897f51b0f6c708ac788fd871b8b1350f51afb2b3eba855f5d9cb359bb1
