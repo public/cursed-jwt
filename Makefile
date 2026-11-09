@@ -259,7 +259,11 @@ $(B)/libcmbrsa.a: scripts/fetch-crypto-mb-rsa.sh src/cmb_rsa/cmb_rsa_glue.c src/
 	  -Isrc/cmb_rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include -c third_party/crypto-mb-rsa/$$f \
 	  -o $(B)/cmbrsa/$$(basename $$f .c).o || exit 1; done
 	$(CC) -O2 -c src/cmb_rsa/cmb_rsa_glue.c -o $(B)/cmbrsa/cmb_rsa_glue.o
-	rm -f $@ && ar rcs $@ $(B)/cmbrsa/*.o
+	ld -r $(B)/cmbrsa/ifma_*.o $(B)/cmbrsa/cmb_rsa_glue.o -o $(B)/cmbrsa/cmbrsa.o
+	# one global, renamed so it never clashes with Intel's own libcrypto_mb: everything else local
+	objcopy --redefine-sym EXP52x40_pub65537_mb8=jwt_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
+	objcopy -w --keep-global-symbol=jwt_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
+	rm -f $@ && ar rcs $@ $(B)/cmbrsa/cmbrsa.o
 RSAZ8 := -DJWT_RSAZ8 $(B)/libcmbrsa.a
 $(eval $(call PK_BACKEND,_rsaz8,$(RSAZ) $(RSAZ8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a))
 $(B)/test_rsaz8: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a | $(B)
