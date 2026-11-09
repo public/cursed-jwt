@@ -2,53 +2,117 @@
 
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/public/cursed-jwt?utm_source=badge)
 
-Batch JWT verification in C. Instead of checking HS256 tokens one at a time, cursed-jwt checks many at once with **one
-multi-buffer SIMD HMAC-SHA256 pass**, one token per vector lane:
-- on AMD Zen, 4 interleaved SHA-NI streams;
-- elsewhere on x86, AVX-512VL or AVX2 hash 8 tokens per vector;
-- interleaved ARMv8 SHA2 instructions hash 4 streams on ARM;
-- a lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
+Batch JWT verification in C, and the crypto library underneath it, **cursed-crypto**, which works on its own. Most
+JWT libraries verify one token per call. cursed-jwt verifies many per call, so the CPU's SIMD units and independent
+instruction streams can work on several tokens at once:
+- **HS256:** one multi-buffer HMAC-SHA256 pass, a token per vector lane or SHA-NI stream:
+  - 4 interleaved SHA-NI streams on AMD Zen;
+  - 16 lanes of zmm for larger batches on Zen 5, and on Intel AVX-512 CPUs without SHA-NI;
+  - 8 lanes of AVX-512VL or AVX2 on other x86-64, and 4 interleaved SHA2 streams on ARMv8.
+  A lone token runs OpenSSL's own single-stream SHA-256 code (x86-64 Linux) or one SHA2 stream (ARM).
+- **RS256, ES256 and EdDSA (Ed25519):**
+  - per-key precomputed tables;
+  - verified or borrowed assembly kernels (s2n-bignum, OpenSSL's);
+  - on AVX-512 IFMA CPUs, optionally, 8 tokens per call in 52-bit vector lanes.
 
-The front end is SIMD too: base64url with NEON or AVX2, and a strict RFC 8259 JSON parser with a shape-matched fast
-path. Every signature is recomputed on every call. Nothing is cached except the key's HMAC ipad/opad midstates. One
-binary picks the best engine for the CPU it runs on.
+  Design and numbers: [PK.md](PK.md).
+- **The front end:** SIMD base64url (AVX2, AVX-512 VBMI, NEON) and a strict RFC 8259 JSON parser with a shape-matched
+  fast path.
 
-RS256, ES256 and EdDSA (Ed25519) use the same front end ([PK.md](PK.md)).
+Every signature is recomputed on every call; only key material is kept (HMAC midstates, public-key tables). One binary
+picks the best engine for the CPU it runs on.
 
-**Why it exists.** JWT libraries verify one token per call, and HMAC-SHA256 is most of that call's cost. A server
-that already reads requests in batches (an io_uring or epoll loop handling many connections per wakeup) can verify
-all of their tokens at once. One SHA-256 has no parallelism to spare, but independent messages do: with one message
-per vector lane, an HMAC costs 154 ns per token at batch 8 on a Cascade Lake Xeon, against 762 ns for one at a time
-(see [Benchmarks](#benchmarks)). cursed-jwt is that batch verifier, with a strict JSON front end and tests against
-independent implementations.
+**Why it exists.** HMAC-SHA256 is most of an HS256 verify, and one SHA-256 has no parallelism to spare. Independent
+messages do. A server that already reads requests in batches (an io_uring or epoll loop handling many connections per
+wakeup) can verify all their tokens together. On a Cascade Lake VM, one HMAC of a 570-byte signing input takes 1,684 ns
+alone. At 16 per call it takes 247 ns per token.
 
-**Status.** The HS256 path is complete and tested on x86-64 and AArch64. RS256, ES256 and EdDSA are
-built in and tested against the same kinds of vectors; they don't parse JWKS yet (you pass the key's numbers). There are no tagged
-releases yet; `main` is the current version. It has not had an external security review (see [Security](#security)).
+**Status.** HS256, RS256, ES256 and EdDSA are complete and tested on x86-64 and AArch64, against independent
+implementations and published vectors (see [Testing](#testing)).
+- Keys are passed as their numbers; there's no JWKS parsing yet.
+- There are no tagged releases yet; `main` is the current version.
+- It has not had an external security review (see [Security](#security)).
 
-## At a glance
+## How fast
 
-**HS256 full verify** (signature, base64url, JSON, claims), ns per token, on an Intel Xeon Platinum 8260 (Cascade
-Lake, no SHA-NI). Every implementation accepted the same 20,000 tokens and rejected a forged one.
+**Setup.** Single thread on Vultr VMs: AMD EPYC Turin (Zen 5), AMD EPYC Genoa (Zen 4) and Intel Xeon Cascade Lake.
+gcc 13.3 `-O3`, no `-march`, OpenSSL 3.0.13, Ubuntu 24.04. Medians of 7 interleaved rounds, measured in November
+2026. Every implementation had to accept all the tokens and reject a forged one before it was timed. The ratios are
+the other implementation's time divided by ours, so above 1 means cursed-jwt is faster.
 
-| implementation | batch 1 | batch 3 | batch 8 |
+**Against JWT libraries:** whole-token verify (split, base64url, signature, JSON, claims) of 1,024 realistic
+OIDC-style tokens. HS256 is also shown with compact ones. The ratio is to the fastest other library on that CPU and
+algorithm, at our batch 1 / batch 16. The other libraries verify one token per call, so their time is the same at every
+batch size.
+
+| | Turin | Genoa | Cascade Lake | fastest other library |
+|---|---|---|---|---|
+| HS256, compact | 2.4× / 3.6× | 2.5× / 3.7× | 1.7× / 4.5× | zerojwt (Go) |
+| HS256, realistic | 1.9× / 2.6× | 1.9× / 2.5× | 1.4× / 3.1× | zerojwt |
+| RS256-2048 | 1.6× / 1.7× | 1.2× / 1.2× | 1.2× / 1.2× | jwt-simple (Rust, BoringSSL) |
+| ES256 | 2.7× / 4.1× | 2.7× / 3.6× | 2.8× / 4.2× | jsonwebtoken (Rust, aws-lc-rs) |
+| EdDSA | 3.1× / 4.3× | 4.0× / 5.5× | 3.4× / 4.1× | jsonwebtoken |
+
+- **The other libraries:** jsonwebtoken 11.1.0 (aws-lc-rs), jwt-simple 0.15.0, golang-jwt v5.3.1, zerojwt v2.3.3,
+  jwt-cpp, libjwt v3, cjose 0.8.1 and l8w8jwt 2.5.0.
+- **cursed-jwt's build:** `-DJWT_S2N -DJWT_OPENSSL`, with the IFMA options off.
+- **How the ratios were measured.** The other libraries were timed against an earlier cursed-jwt (`800fa54`) on one
+  set of VMs. That commit was then timed against `main` on a second set, and the two same-VM ratios are multiplied.
+- **cursed-jwt alone,** ns per token at batch 1 / 16:
+
+| | Turin | Genoa | Cascade Lake |
 |---|---|---|---|
-| **cursed-jwt** | **922** | **507** | **277** |
-| cursed-jwt, strict JSON only | 1,038 | 615 | 375 |
-| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,236 | 6,236 | 6,236 |
-| [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,673 | 8,673 | 8,673 |
+| HS256, realistic | 680 / 511 | 691 / 493 | 2,516 / 1,131 (2,403 / 967 with `make JCC=1`) |
+| RS256-2048 | 11,495 / 11,256 | 21,908 / 21,362 | 28,680 / 26,635 |
+| ES256 | 17,415 / 11,457 | 20,960 / 15,532 | 26,207 / 17,952 |
+| EdDSA | 10,025 / 7,283 | 10,728 / 8,057 | 16,529 / 13,194 |
 
-That's **6.8–31× faster**. On an Apple M5 Pro, cursed-jwt takes 116 ns at batch 8 against jwt-cpp's 2,521. How these
-were measured, and the caveats, are under [Benchmarks](#benchmarks).
+- **The IFMA builds** add, in µs per token at batch 1 / 16:
+  - `-DJWT_RSAZ` runs RS256 one or two tokens at a time on IFMA, on Zen 4 / Zen 5 and Intel Ice Lake or later;
+  - `-DJWT_RSAZ8 -DJWT_ES8` run RS256 and ES256 8 tokens at a time, on Zen 4 / Zen 5 only.
 
-**RS256 / ES256 / EdDSA** (fastest build: `-DJWT_S2N -DJWT_OPENSSL`), µs per token against OpenSSL `EVP_DigestVerify`:
+  | | Turin | Genoa |
+  |---|---|---|
+  | RS256 | 6.6 / 2.9 | 6.3 / 4.5 |
+  | ES256 at batch 16 | 4.3 | 5.0 |
 
-| | Xeon, batch 1 | Xeon, batch 16 | Xeon, OpenSSL | M5, batch 16 | M5, OpenSSL |
-|---|---|---|---|---|---|
-| ES256 | 21.8 | **14.9** | 78.8 | **9.2** | 32.4 |
-| RS256-2048 | 16.5 | 16.0 | 22.9 | 8.3 | 9.0 |
-| RS256-2048, batch screening | 16.2 | **3.16** | 22.9 | **2.35** | 9.0 |
-| EdDSA (Ed25519), portable C | 21.5 | **16.5** | 150.2 | **4.6** (b32) | 40.4 |
+**Against crypto libraries:** one operation at a time, on the same 570-byte signing inputs. The ratio is to the
+fastest other library on that CPU, which is named.
+
+| | Turin | Genoa | Cascade Lake |
+|---|---|---|---|
+| HMAC-SHA256 | 1.03× (AWS-LC) | 1.00× (AWS-LC) | 1.10× (OpenSSL) |
+| RSA-2048 verify | 2.20× (AWS-LC) | 3.39× (AWS-LC) | 1.03× (AWS-LC) |
+| ECDSA P-256 verify | 2.47× (AWS-LC) | 2.51× (AWS-LC) | 2.64× (AWS-LC) |
+| Ed25519 verify | 2.95× (AWS-LC) | 2.89× (ed25519-dalek) | 2.83× (ed25519-dalek) |
+
+- **The other libraries:** OpenSSL 3.0.13, AWS-LC 5.13.0, libsodium 1.0.22, Go 1.27's standard library, ring 0.17.14
+  and ed25519-dalek 3.0.0, each through its fastest documented path (keys parsed once).
+- **cursed-crypto's build:** `-DJWT_S2N -DJWT_OPENSSL -DJWT_RSAZ -DJWT_RSAZ8`.
+
+**Against Intel ipsec-mb's multi-buffer HMAC-SHA256** (3.0.0, its 16-lane AVX-512 manager on all three CPUs).
+ipsec-mb gets exactly N messages and a flush, the same job as our call with N. Ratios for N = 1 to 32:
+
+| | Turin | Genoa | Cascade Lake |
+|---|---|---|---|
+| our default engine, N = 1–32 | 1.08–5.2× | 1.24–7.8× | 1.36–2.1× at N = 1–8 |
+| … from N = 9 on Cascade Lake: the 16-lane x16 kernel | — | — | 1.20–1.27× at N = 11, 12, 16, 32 |
+| ipsec-mb with all 1,024 messages queued (its best case) vs our batch 16 | 1.15× | 1.24× | 1.15× |
+
+On Cascade Lake, 9 or more tokens run on the x16 kernel, at the cost of the zmm frequency licence (see
+[Building](#building)). The x16 kernel wasn't measured at N = 9, 10 or 24.
+
+**Is it the fastest?** Of everything we measured, on those three CPUs, yes, with four caveats:
+- **One HMAC at a time ties AWS-LC.** The batch-1 path is OpenSSL's own SHA-256 code, and so is AWS-LC's; batching is
+  where the gain comes from.
+- **ES256 and EdDSA's lead depends partly on per-key tables:** about 530–570 KB and a few milliseconds of key setup per
+  key. That's the right trade for a server that sees many tokens per key, and the wrong one for verifying under a
+  fresh key each time.
+- **Not everything was measured:** BoringSSL directly (jwt-simple builds on it), wolfSSL, Intel IPP, Apple's
+  CommonCrypto, or GPU/FPGA offload. These are VMs, not bare metal, and the ARM numbers are older (see
+  [Benchmarks](#benchmarks)).
+- **The licence isn't only MIT.** cursed-jwt's own code is MIT, and every fast path is permissively licensed, but some
+  of the fastest kernels are other projects' code under Apache-2.0 or BSD-3-Clause (see [Licence](#licence)).
 
 ## Proven, tested, or neither
 
@@ -77,6 +141,7 @@ The tests need OpenSSL's libcrypto as the reference: on macOS `brew install open
 
 ## Contents
 
+- [How fast](#how-fast)
 - [Using it](#using-it)
 - [Claim semantics](#claim-semantics)
 - [The crypto on its own](#the-crypto-on-its-own)
@@ -198,10 +263,18 @@ cc_pkey_free(pk);
   - Plans are sorted by block count, so vectors are almost never ragged. When they are, a finished lane keeps its
     state through a mask select.
   - The outer hash never leaves registers: the inner digest becomes W0..7 directly.
-- **AVX-512VL on ymm, not zmm.**
+- **AVX-512: ymm or zmm, depending on the CPU.**
   - `vprord` does the rotates; `vpternlogd` does the three-input functions (0x96 xor3, 0xCA Ch and the lane select,
     0xE8 Maj).
-  - A zmm burst slows *all following code* by 19.4% for 0.5–1 ms on Cascade Lake. ymm costs 0% (measured below).
+  - On Intel, a zmm burst lowers the core's frequency licence: the scalar code after it runs 16–19% slower for 0.5–1
+    ms (`make licence`). ymm costs nothing. So Intel uses 8 lanes of ymm for small batches. It switches to the 16-lane
+    zmm kernel (`x16`) from 9 tokens on CPUs without SHA-NI, where only zmm reaches ipsec-mb's speed. Masking
+    `JWT_CPU_ZMM_HMAC` keeps it on ymm.
+  - AMD Zen 4 / Zen 5 have no licence drop, so zmm is used freely there:
+    - on both, as the 16-lane engine when SHA-NI is masked;
+    - on Zen 5 server and desktop parts, for groups of 11 or more beside the SHA-NI streams.
+
+    See [Building](#building).
 - **ARM uses the SHA2 instructions, interleaved.** NEON multi-buffer is 2.9× slower than one stream of `sha256h`.
   Interleaving 4 independent streams hides the instruction latency (−15%).
 - **The engine is picked at run time.** Each SIMD engine is compiled in its own target region, and the CPU's
@@ -221,11 +294,18 @@ cc_pkey_free(pk);
   - `exp`/`nbf` are compared with `now` by digit count, then bytewise, with no number conversion.
 - **Identical results either way.** The shape matcher defers to the strict parser on anything unusual. The tests
   fuzz it against the strict parser.
-- **RS256 / ES256** don't batch like HMAC: SIMD across tokens would need AVX-512 IFMA. Instead:
-  - ES256 precomputes comb tables for the public key at key setup, so a verify is two fixed-base multiplications.
-  - RS256 can check a whole batch with one exponentiation ("screening"), which is opt-in because of a caveat.
-  - Both use AWS s2n-bignum's verified asm or libcrypto's bignum asm where those beat portable C.
-  - [PK.md](PK.md) has the design, the survey of other implementations, the licences and every number.
+- **RS256 / ES256 / EdDSA:**
+  - **ES256 and EdDSA** precompute comb tables for the public key at key setup, so a verify is two fixed-base
+    multiplications. With `-DJWT_S2N` the field arithmetic is s2n-bignum's formally verified assembly, including its
+    ADX-free versions for CPUs (and VMs) that hide ADX. Without it, it's fiat-crypto's verified C.
+  - **RS256** uses s2n-bignum where it can run (RSA-2048 with BMI2 + ADX). Otherwise it uses OpenSSL's `bn_mul_mont`
+    (x86-64 Linux), extracted and called directly, or portable C. RS256 can also check a whole batch with one exponentiation ("screening"), opt-in
+    because of a caveat.
+  - **On AVX-512 IFMA CPUs (opt-in builds):** RS256 runs one or two tokens at a time in OpenSSL's 52-bit IFMA multiply
+    (`-DJWT_RSAZ`). On Zen 4 / Zen 5, 8 tokens at a time go through Intel crypto_mb's 8-lane exponentiation
+    (`-DJWT_RSAZ8`) and its 8-lane P-256 field under our comb tables (`-DJWT_ES8`). EdDSA's comb additions run on
+    Firedancer's 4-way IFMA field there (with `-DJWT_S2N`).
+  - [PK.md](PK.md) has the design, the survey of other implementations and the per-build numbers.
 
 ## Building
 
@@ -243,9 +323,9 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 |---|---|---|
 | AMD Zen 5 server / desktop (Turin, Granite Ridge) | 16 lanes of zmm (asm) for groups of 11+ tokens, 4 SHA-NI streams for the rest | as the rows below |
 | AMD with SHA-NI (every Zen) | 4 interleaved SHA-NI streams (hand-scheduled asm on x86-64 Linux) | as the rows below |
-| AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512, SHA-NI masked | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
-| Intel with AVX-512 F/VL/BW/DQ/CD and no SHA-NI (Skylake-SP, Cascade Lake, Cooper Lake) | groups of 9+ on zmm (x16), the rest AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
-| x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
+| AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512, SHA-NI masked | zmm, 16 lanes (no frequency-licence drop on AMD) | + IFMA if built with it: RS256 1, 2 or 8 tokens per call, ES256 8, EdDSA's 4-way field |
+| Intel with AVX-512 F/VL/BW/DQ/CD and no SHA-NI (Skylake-SP, Cascade Lake, Cooper Lake) | groups of 9+ on zmm (x16), the rest AVX-512VL on ymm, 8 lanes | s2n-bignum (ADX-free versions where ADX is hidden) or OpenSSL's `bn_mul_mont` |
+| x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm (`-DJWT_S2N`; RSA-2048 needs BMI2 + ADX), else OpenSSL's `bn_mul_mont` on Linux |
 | other x86-64 | scalar | portable C |
 | AArch64 with SHA2 instructions | 4 interleaved SHA2 streams | s2n-bignum / libcrypto |
 | other AArch64 | NEON, 4 lanes | portable C |
@@ -314,10 +394,15 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 | `-DJWT_NO_SHAPE_JSON` | strict parser only |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `crypto/src/fiat/`) |
-| `-DJWT_S2N` | s2n-bignum's asm kernels (`scripts/fetch-s2n-bignum.sh`; x86 needs BMI2 + ADX) |
+| `-DJWT_S2N` | s2n-bignum's formally verified asm kernels for P-256, Ed25519 and RSA-2048 (`scripts/fetch-s2n-bignum.sh`). On x86, its ADX-free P-256 / Ed25519 versions run where BMI2 + ADX are missing; RSA-2048 then uses `bn_mul_mont` |
 | `-DJWT_OPENSSL` | libcrypto's bignum asm for RSA (links `-lcrypto`) |
 | `-DJWT_RSA_SCREEN` | RSA batch screening (read the caveat in [PK.md](PK.md) first) |
-| `-DJWT_CRYPTO_MB` | Intel crypto_mb's 8-way AVX-512 IFMA ES256 / RSA, used only on IFMA CPUs (`scripts/build-crypto-mb.sh`; Linux x86-64; not yet run on IFMA hardware) |
+| `-DJWT_RSAZ` | RS256-2048 on AVX-512 IFMA (Zen 4 / Zen 5, Intel Ice Lake and later): OpenSSL's 52-bit multiply, one or two tokens per call (`scripts/fetch-ossl-rsaz.sh`, x86-64 Linux) |
+| `-DJWT_RSAZ8` | with `-DJWT_RSAZ`: 8 RS256 tokens per call through crypto_mb's 8-lane exponentiation, on Zen 4 / Zen 5 (`scripts/fetch-crypto-mb-rsa.sh`) |
+| `-DJWT_ES8` | 8 ES256 tokens per call on crypto_mb's 8-lane P-256 field under our comb tables, on Zen 4 / Zen 5 |
+| `-DJWT_CRYPTO_MB` | Intel crypto_mb's own 8-way ES256 / RSA API (`scripts/build-crypto-mb.sh`, which needs OpenSSL ≥ 3.5.5 headers). Kept for comparison: `-DJWT_RSAZ8` / `-DJWT_ES8` are the measured paths |
+| `make OSSL_SHA=` | build without the x86-64 Linux assembly (OpenSSL's SHA-256 and `bn_mul_mont` extracts, the generated 4-stream SHA-NI and 16-lane zmm kernels); the compiled engines stay |
+| `make JCC=1` | keep branches off 32-byte boundaries (Intel's JCC erratum): for builds that run only on Intel Skylake through Cascade Lake / Cooper Lake |
 
 **Targets:**
 
@@ -371,7 +456,8 @@ vectors, which `scripts/fetch-vectors.sh` downloads and checks against pinned SH
 
 - **Engines covered.** Every vector runs on every engine the machine has:
   - scalar, NEON and SHA2 ×1/×2/×4 on ARM;
-  - SHA-NI ×1/×2/×4, AVX2, AVX-512VL and zmm on x86;
+  - SHA-NI ×1/×2/×4 (compiled, and the hand-scheduled 3/4-stream assembly), AVX2, AVX-512VL, zmm (compiled, and
+    the `x16` assembly) and the SHA-NI + `x16` split on x86;
   - each dispatch path of the extracted OpenSSL code (SHA-NI, AVX2, AVX, SSSE3, x86-64);
   - a C emulation of `vpternlogd` with the same immediates, so the AVX-512 logic is exercised on any machine.
 - **How the external vectors run.** Each one sits in a batch of 1–24 messages, at a random lane. The other lanes are
@@ -443,6 +529,24 @@ JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in bu
   matcher's username limit. That path only fires on one exact payload layout, so the property tests and the crafted
   cases are what cover it.
 
+### Constant time
+
+Everything that touches an HMAC key must take the same branches and touch the same addresses whatever the key:
+key setup, every engine, `cc_tag_eq32`, `cc_hmac_sha256_verify`. Three deterministic checks prove it, each with a
+planted early-exit compare as a positive control that must fail:
+- **`make test-ct`.** valgrind memcheck with the key marked undefined, in the style of TIMECOP: any key-dependent
+  branch or address fails it. It covers the engines valgrind runs (scalar, OpenSSL's SHA-256 code, AVX2, and on arm64
+  the NEON and SHA2 engines).
+- **`make test-ct-sde SDE=…/sde64`.** Intel SDE traces key setup plus each SHA-NI and AVX-512 engine under two keys, at
+  batches 1, 3 and 16. The instruction and memory-address traces must be identical.
+- **`make test-ct-qemu QEMU=… EXECLOG=…`.** The same for the AArch64 engines, from an x86-64 machine, through
+  qemu-aarch64's execlog plugin. It needs a qemu built with `--enable-plugins`.
+
+**`make dudect`** adds a statistical timing test on real hardware: Welch's t, fixed against random keys, with A/A
+negative controls and the leaky positive control. On Turin, Genoa and Cascade Lake it's clean, with one exception:
+the AVX-512 engine on Genoa sat at the threshold, and its SDE traces are identical. RS256 / ES256 / EdDSA verification
+is variable time by design, since every input it handles is public.
+
 **Platforms run:**
 
 | platform | compilers | what ran |
@@ -451,9 +555,17 @@ JOBS=6 ./scripts/fuzz.sh arm64 600   # a real campaign; corpora accumulate in bu
 | Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan; pk-test, every backend |
 | Linux amd64 (Ubuntu 24.04, Docker on Rosetta) | gcc 13.3, clang 18.1 | test, test-vectors (AVX2 engines, every OpenSSL SHA-256 path but SHA-NI), ASan/UBSan, AVX-512 build; pk-test, portable C |
 | Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test, test-vectors on real AVX-512 (every engine); pk-test, every backend |
-| GitHub Actions | gcc, clang | test-quick, test-vectors, ASan, AVX-512 build on Ubuntu x86/ARM and macOS |
+| AMD EPYC Turin (Zen 5), AMD EPYC Genoa (Zen 4), Intel Xeon Cascade Lake (Vultr VMs, Ubuntu 24.04) | gcc 13.3 | test, pk-test, the AVX-512 / IFMA / SHA-NI / VBMI suites natively, dudect, the benchmarks in [How fast](#how-fast) |
+| Intel SDE 10.13 (Ice Lake and Cascade Lake emulation) | gcc 13.3 | test_jwt on every AVX-512 and SHA-NI engine, the IFMA PK suites (`scripts/ifma-sde-test.sh`), test-ct-sde |
+| qemu 8.2 aarch64-linux-user, with plugins | gcc 13.3 (cross) | test-ct-qemu, the AArch64 engines against scalar |
+| GitHub Actions | gcc, clang | test-quick, test-vectors, ASan, AVX-512 build, fuzz-smoke, lint on Ubuntu x86/ARM and macOS; the Rust port's tests |
 
 ## Benchmarks
+
+The comparisons with other libraries are in [How fast](#how-fast). This section has the per-engine detail, measured
+earlier: on a bare-metal Xeon Platinum 8260 (Cascade Lake) and an Apple M5 Pro, before the November 2026 SHA-NI, zmm
+and IFMA work. The engines picked by default have changed since (see [Building](#building)), but what each engine
+costs on those machines hasn't.
 
 **Method.**
 - `bench/bench_jwt.c`, ns per token, best of several runs, hot cache.
@@ -475,14 +587,14 @@ HMAC only, ns/token:
 | compiled scalar template | 1,007 | 1,009 | 1,022 | 1,006 | 1,008 |
 | extracted OpenSSL SHA-256, one stream at a time | 754 | 754 | 752 | 749 | 752 |
 | AVX2 ×8 | 766 | 423 | 222 | 222 | 222 |
-| **AVX-512VL ymm ×8 (default)** | **762** | **286** | **154** | 154 | 154 |
-| zmm ×16 (not recommended) | 767 | 287 | 154 | 125 | 125 |
+| **AVX-512VL ymm ×8** (this CPU class's engine below 9 tokens) | **762** | **286** | **154** | 154 | 154 |
+| zmm ×16, compiled (the `x16` assembly kernel now runs 9+ tokens here) | 767 | 287 | 154 | 125 | 125 |
 
 At batch 1 every vector engine runs the extracted single-stream code. Two interleaved 8-lane ymm groups (16 lanes;
 AVX2 ×2 and AVX-512VL 2×ymm) were slower than one group at every batch size (AVX-512VL: 176 vs 154 ns at 16 and 32;
 2.80 vs 2.43 and 1.66 vs 1.34 cycles/byte measured) and were removed.
 
-Full verify, ns/token, default engine:
+Full verify, ns/token, on the ymm engine (the default then):
 
 | batch | 1 | 2 | 3 | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|---|---|---|
@@ -490,8 +602,18 @@ Full verify, ns/token, default engine:
 | strict JSON only (`-DJWT_NO_SHAPE_JSON`) | 1,046 | 803 | 616 | 519 | 375 | 366 | 362 |
 
 **Against established libraries.** `make compare` runs the same 20,000 tokens and the same job through each one:
-HS256 only, `exp` required, `sub` and `username` read. Those are the numbers in [At a glance](#at-a-glance), from
-`bench/compare/e2e.c`, which measures within ~1.5% of `bench_jwt`.
+HS256 only, `exp` required, `sub` and `username` read (`bench/compare/e2e.c`, which measures within ~1.5% of
+`bench_jwt`). Full verify, ns per token, on the Xeon Platinum 8260 (the wider November 2026 comparison is in
+[How fast](#how-fast)):
+
+| implementation | batch 1 | batch 3 | batch 8 |
+|---|---|---|---|
+| **cursed-jwt** | **922** | **507** | **277** |
+| cursed-jwt, strict JSON only | 1,038 | 615 | 375 |
+| [jwt-cpp](https://github.com/Thalhammer/jwt-cpp) (C++, OpenSSL + picojson) | 6,236 | 6,236 | 6,236 |
+| [golang-jwt v5](https://github.com/golang-jwt/jwt) (Go, `MapClaims`) | 8,673 | 8,673 | 8,673 |
+
+On the Apple M5 Pro, cursed-jwt took 116 ns at batch 8 against jwt-cpp's 2,521.
 
 | library | build |
 |---|---|
@@ -515,7 +637,7 @@ engine; each figure is the median of 300 trials.
 | after a burst of… | slowdown of the following scalar code |
 |---|---|
 | AVX2 ymm | +0.1% |
-| **AVX-512VL ymm (default)** | **0.0%** |
+| **AVX-512VL ymm** | **0.0%** |
 | zmm | **+19.4%**, lasting 0.5–1 ms |
 
 **Apple M5 Pro** (macOS, Apple clang 21), ns/token:
@@ -564,14 +686,14 @@ Calibration on the Xeon Platinum 8260 (`make mca-validate`, clang 18), cycles pe
 |---|---|---|---|---|
 | scalar | 15.4 | 15.6 | 16.1 | 8.9 |
 | AVX2, 8 lanes | 2.43 | 2.35 | 2.23 | 1.31 |
-| AVX-512VL, 8 lanes (default) | 1.34 | 1.45 | 1.44 | 0.70 |
+| AVX-512VL, 8 lanes | 1.34 | 1.45 | 1.44 | 0.70 |
 | zmm, 16 lanes | 0.86 | 0.84 | 0.83 | 0.66 |
 
 - **uiCA** is within about 5% of the measurement on every engine.
 - **llvm-mca** gets the order right but is 1.3–2.1× optimistic, so read its other CPUs as relative numbers.
 - **Chained vs independent calls** cost about the same, because one compress is already one long dependency chain.
-- **zmm is the cheapest compress per byte.** It isn't the default because of the frequency-licence drop
-  measured by `make licence`, which cycle counts can't show.
+- **zmm is the cheapest compress per byte.** On Intel the frequency-licence drop measured by `make licence` (which
+  cycle counts can't show) is why it runs only batches of 9 or more, and only on CPUs without SHA-NI.
 
 What the models add (llvm-mca, cycles per byte per message, relative):
 - **Zen 4 / Zen 5:**
@@ -593,6 +715,9 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 - **x86-64 macOS and Windows** use the compiled scalar template for single tokens: the extracted file is ELF-only.
 - **Big-endian targets are untested.**
 - `jwt_result_t` embeds a 256-byte username buffer per token.
+- **Public keys are heavy:** an ES256 or EdDSA key holds about 530–570 KB of precomputed tables and takes a few
+  milliseconds to set up. That's cheap per token for long-lived keys, and expensive for a key used once.
+- **The IFMA paths are opt-in build flags** (`-DJWT_RSAZ`, `-DJWT_RSAZ8`, `-DJWT_ES8`), x86-64 Linux only.
 
 ## Security
 
@@ -603,12 +728,32 @@ What the models add (llvm-mca, cycles per byte per message, relative):
 - **The RS256/ES256/EdDSA code is not constant-time**, by design: it only handles public data (keys, signatures,
   messages). RSA batch screening (`-DJWT_RSA_SCREEN`) accepts some mangled signature pairs that one-at-a-time
   verification rejects; read [PK.md](PK.md#screening-what-it-does-and-doesnt-prove) before turning it on.
-- **No external review yet.** Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+- **The HMAC key path is constant time:** every engine, key setup and the tag compare, proven by trace
+  equivalence (see [Constant time](#constant-time)).
+- **An internal review, not an external one.** It reproduced the bug classes known from other JWT and crypto
+  libraries: `alg=none` and algorithm confusion, ECDSA r = s = 0 and out-of-range scalars, invalid-curve points,
+  Ed25519 S ≥ L and non-canonical encodings, Bleichenbacher's e = 3 forgery, duplicate claims and parser
+  differentials against PyJWT and python-jose. It also ran long fuzzing campaigns on AVX-512 / IFMA hardware. None
+  found a vulnerability; the tests it added are in the suite. Report vulnerabilities privately, as described in
+  [SECURITY.md](SECURITY.md).
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE).
-- The one vendored file, `crypto/src/sha256_x86_64_ossl.S`, is OpenSSL's, under Apache-2.0
-  ([licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt)).
-- The optional builds' fetched dependencies (fiat-crypto, s2n-bignum), and credits for techniques
-  (cpuminer-opt), are in [THIRD_PARTY.md](THIRD_PARTY.md).
+cursed-jwt's own code is MIT, see [LICENSE](LICENSE). Some of the fastest code paths are other projects' code, all
+under permissive licences that allow commercial use; [THIRD_PARTY.md](THIRD_PARTY.md) has every entry, its exact
+origin and its pinned commit.
+- **Vendored in the repository:**
+  - OpenSSL's x86-64 SHA-256 and `bn_mul_mont` extracts (`crypto/src/sha256_x86_64_ossl.S`,
+    `crypto/src/bn_mont*_x86_64_ossl.S`), Apache-2.0;
+  - a port of Intel ipsec-mb's `sha256_x16_avx512` (`crypto/src/sha256_x16_avx512.S`), BSD-3-Clause;
+  - Firedancer's AVX-512 IFMA curve25519 field (in `crypto/src/cc_ed25519_r43x6.inc`), Apache-2.0;
+  - fiat-crypto's generated field arithmetic (`crypto/src/fiat/`), used under MIT.
+- **Fetched at build time, never committed, and only for the builds that use them:**
+  - s2n-bignum (`-DJWT_S2N`), used under MIT-0;
+  - OpenSSL's IFMA RSA multiply (`-DJWT_RSAZ`), Apache-2.0;
+  - parts of Intel crypto_mb (`-DJWT_RSAZ8`, `-DJWT_ES8`), Apache-2.0.
+
+  The vendored projects' licence texts are in [licenses/](licenses/), and fiat-crypto's is in `crypto/src/fiat/`. The
+  fetched projects' come with them.
+- **Optional libraries linked:** OpenSSL's libcrypto with `-DJWT_OPENSSL`.
+- **Credits for ideas:** cpuminer-opt and others, in [THIRD_PARTY.md](THIRD_PARTY.md).
