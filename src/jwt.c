@@ -109,6 +109,12 @@ __attribute__((constructor)) static void jwt_cpu_init(void) {
     /* Every Zen has SHA-NI, and there 4 interleaved SHA-NI streams beat every vector engine at every batch size
      * (Zen 2, 3 and 4 measured).  Intel's SHA-NI parts have not been timed, so they keep the vector engines. */
     if ((f & JWT_CPU_SHANI) && amd) f |= JWT_CPU_FAST_SHANI;
+    /* Intel AVX-512 without SHA-NI (Skylake-SP, Cascade Lake, Cooper Lake): only 512-bit code reaches ipsec-mb's
+     * multi-buffer HMAC there, and ipsec-mb itself runs its 16-lane AVX-512 kernel on these CPUs.  So groups of 9 or
+     * more go to the x16 kernel (fewer stay on ymm), at the cost of the zmm frequency licence: on Cascade Lake, full
+     * verify at batch 16 is ~2% slower and scalar code right after zmm runs slower for up to a millisecond.  Masking
+     * JWT_CPU_ZMM_HMAC keeps HS256 on ymm.  Intel's SHA-NI parts (Ice Lake and later) are unmeasured and unchanged. */
+    if ((f & JWT_CPU_AVX512VL) && !amd && !(f & JWT_CPU_SHANI)) f |= JWT_CPU_ZMM_HMAC;
     /* tests: JWT_CPU_FORCE_ZMM=1 claims FAST_ZMM on any AVX-512 CPU, to exercise that dispatch on Intel hardware */
     if ((f & JWT_CPU_AVX512VL) && getenv("JWT_CPU_FORCE_ZMM") && *getenv("JWT_CPU_FORCE_ZMM") == '1')
         f |= JWT_CPU_FAST_ZMM;
@@ -2023,6 +2029,7 @@ static jwt_hmac_fn *hmac_default(void) {
     if (shani) return jwt_hmac_shani_4; /* every Zen: 4 interleaved SHA-NI streams */
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_x16; /* 16 lanes, asm; < 9 live -> ymm */
+    if ((f & JWT_CPU_ZMM_HMAC) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_x16; /* Intel, no SHA-NI: zmm for 9+ */
 #endif
     if ((f & JWT_CPU_FAST_ZMM) && (f & JWT_CPU_AVX512VL)) return jwt_hmac_zmm; /* 16 lanes; < 9 live -> 8-lane ymm */
     if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;

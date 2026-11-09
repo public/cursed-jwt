@@ -208,7 +208,7 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 | AMD Zen 5 server / desktop (Turin, Granite Ridge) | 16 lanes of zmm (asm) for groups of 11+ tokens, 4 SHA-NI streams for the rest | as the rows below |
 | AMD with SHA-NI (every Zen) | 4 interleaved SHA-NI streams (hand-scheduled asm on x86-64 Linux) | as the rows below |
 | AMD Zen 4 / Zen 5 (family ≥ 0x19) with AVX-512, SHA-NI masked | zmm, 16 lanes (no frequency-licence drop on AMD) | + crypto_mb 8-way IFMA if built with it |
-| x86-64 with AVX-512 F/VL/BW/DQ/CD (Skylake-SP, Cascade Lake, Ice Lake …) | AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
+| Intel with AVX-512 F/VL/BW/DQ/CD and no SHA-NI (Skylake-SP, Cascade Lake, Cooper Lake) | groups of 9+ on zmm (x16), the rest AVX-512VL on ymm, 8 lanes | + crypto_mb 8-way IFMA if built with it and the CPU has IFMA |
 | x86-64 with AVX2 + BMI2 | AVX2, 8 lanes | s2n-bignum asm if BMI2 + ADX |
 | other x86-64 | scalar | portable C |
 | AArch64 with SHA2 instructions | 4 interleaved SHA2 streams | s2n-bignum / libcrypto |
@@ -242,9 +242,13 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 - **Zen 5.** `JWT_CPU_FULL_ZMM` is set for family 1Ah models 00h–1Fh and 40h–4Fh, which execute 512-bit ops at full
   width; SHA-NI there keeps only 2 `sha256rnds2` in flight. `jwt_hmac_shani_x16` sends each group of 11 to 16 tokens to
   `jwt_hmac_x16` and the rest to the 4 SHA-NI streams.
-- **Cascade Lake keeps 8-lane ymm.** `jwt_hmac_x16` is 1.4× the ymm engine on HMAC alone, but zmm drops the core's
-  licence: scalar code after it runs 16% slower for 0.5–1 ms (`make licence`), and a full `jwt_verify_batch` at batch
-  16 measured 1,110 ns with zmm against 1,062 with ymm. `JWT_CPU_FORCE_ZMM=1` opts in.
+- **Intel AVX-512 without SHA-NI** (`JWT_CPU_ZMM_HMAC`): groups of 9 or more tokens run on `jwt_hmac_x16`, as Intel
+  ipsec-mb runs its own 16-lane kernel on these CPUs; the 8-lane ymm engine there loses to ipsec-mb at 10–16 tokens.
+  Raw HMAC of 570-byte messages on Cascade Lake, ns per message, against ipsec-mb given exactly N jobs: 345 vs 415 at
+  11, 322 vs 390 at 12, 247 vs 315 at 16 (ymm: 500, 463, 351). The cost is zmm's frequency licence: scalar code right
+  after it runs 16% slower for 0.5–1 ms (`make licence`), and a full `jwt_verify_batch` at batch 16 measured 1,088 ns
+  against 1,067 on ymm. Masking `JWT_CPU_ZMM_HMAC` (bit 2048) in `JWT_CPU_MASK` keeps HS256 on ymm. Intel's SHA-NI
+  parts (Ice Lake and later) haven't been measured and keep AVX-512VL on ymm.
 - **Speed of the dispatching build.** On the Xeon its HMAC matches a `-march=cascadelake` build. Full verify is
   within 2% with clang and 7% with gcc, because the front end is compiled for baseline x86-64.
   `ARCHFLAGS=-march=native` still works, and dispatch still checks the CPU.
