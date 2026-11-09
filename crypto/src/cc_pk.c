@@ -26,15 +26,14 @@
 #include "fiat/p256_64.c"
 #include "fiat/p256_scalar_64.c"
 
-#ifndef JWT_P256_W
-#define JWT_P256_W                                                                                                     \
-    8 /* comb window: 33 windows x 128 points x 64 B = 264 KB per base point (W=7: 148 KB, ~12% slower) */
+#ifndef CC_P256_W
+#define CC_P256_W 8 /* comb window: 33 windows x 128 points x 64 B = 264 KB per base point (W=7: 148 KB, ~12% slower) */
 #endif
-#define P256_NW ((257 + JWT_P256_W - 1) / JWT_P256_W)
-#ifndef JWT_ES_ILV
-#define JWT_ES_ILV 1 /* ES256 tokens whose point additions run interleaved; no gain measured on an M5 (PK.md) */
+#define P256_NW ((257 + CC_P256_W - 1) / CC_P256_W)
+#ifndef CC_ES_ILV
+#define CC_ES_ILV 1 /* ES256 tokens whose point additions run interleaved; no gain measured on an M5 (PK.md) */
 #endif
-#define P256_H (1 << (JWT_P256_W - 1))
+#define P256_H (1 << (CC_P256_W - 1))
 
 typedef uint64_t fe_t[4]; /* little-endian 64-bit limbs; field elements in fiat's Montgomery domain */
 typedef struct {
@@ -52,19 +51,19 @@ typedef struct {
     uint64_t e;
     uint64_t n[RSA_MAXL], r2[RSA_MAXL]; /* R^2 mod n, R = 2^(64 nl) */
     uint64_t em[RSA_MAXL];              /* EMSA-PKCS1-v1_5 block with a zero hash, as limbs */
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
     uint64_t kc[16][RSA_MAXL]; /* R^((c-1)(e-1)) mod n for a screened batch of c = 1..16 */
 #endif
-#ifdef JWT_OPENSSL
+#ifdef CC_OPENSSL
     struct bignum_st *bn_n, *bn_e, *bn_kcm[16]; /* the same values for libcrypto; kcm = kc R (Montgomery form) */
     struct bn_mont_ctx_st *mont;
 #endif
-#ifdef JWT_RSAZ
+#ifdef CC_RSAZ
     int ifma;                                       /* RSA-2048 on an AVX-512 IFMA CPU: the 52-bit-digit path */
     uint64_t n52[80] __attribute__((aligned(32)));  /* n in radix 2^52, twice (the two-way kernel's [2][40] layout) */
     uint64_t rr52[80] __attribute__((aligned(32))); /* R'^2 mod n, R' = 2^2080, in radix 2^52, twice */
     uint64_t k02[2];                                /* n0 twice, for the two-way kernel */
-#ifdef JWT_RSAZ8
+#ifdef CC_RSAZ8
     /* the same for crypto_mb's 8-lane kernels, one copy per lane: [digit][lane]; k0 there is -n^-1 mod 2^52 */
     uint64_t n52x8[40][8] __attribute__((aligned(64))), rr52x8[40][8] __attribute__((aligned(64)));
     uint64_t k0x8[8] __attribute__((aligned(64)));
@@ -73,38 +72,36 @@ typedef struct {
 #endif
 } rsa_key_t;
 
-#ifdef JWT_OPENSSL
+#ifdef CC_OPENSSL
 static int rsa_ossl_init(rsa_key_t *k);
 #endif
 
-struct jwt_pkey {
-    int alg; /* 1 RS256, 2 ES256, 3 EdDSA (Ed25519) */
-    const char *name, *canon;
-    int sig_bytes, sig_chars;
+struct cc_pkey {
+    int alg; /* CC_PK_RS256, CC_PK_ES256, CC_PK_ED25519 */
     rsa_key_t rsa;
     p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
     uint64_t qx[4], qy[4];                   /* ES256: the public point, plain little-endian limbs */
     struct ed_key *ed;                       /* EdDSA: comb tables for B and -A (cc_ed25519.inc) */
-#ifdef JWT_ES8
+#ifdef CC_ES8
     int es8; /* ES256: batches go 8 tokens at a time through crypto/src/cmb_ec/es8.c (IFMA, and FAST_ZMM: AMD Zen 4 / 5) */
 #endif
 };
 
-#ifdef JWT_CRYPTO_MB
+#ifdef CC_CRYPTO_MB
 /* -DJWT_CRYPTO_MB: Intel's crypto_mb (intel/cryptography-primitives, Apache-2.0; scripts/build-crypto-mb.sh) runs
  * 8 ES256 verifies or 8 RSA public-key operations at once in 52-bit AVX-512 IFMA lanes, i.e. SIMD across tokens.
- * Used only when the CPU has AVX-512 IFMA (Ice Lake and later; jwt_cpu); everything else falls back to the paths
+ * Used only when the CPU has AVX-512 IFMA (Ice Lake and later; cc_cpu); everything else falls back to the paths
  * below.  Byte order, from Intel's own known-answer tests: r, s, digests and RSA inputs / outputs are big-endian
  * strings, public-key coordinates and moduli little-endian 64-bit limbs. */
 #include <crypto_mb/ec_nistp256.h>
 #include <crypto_mb/rsa.h>
 #include <crypto_mb/status.h>
-static int cmb_ok(void) { return (jwt_cpu() & JWT_CPU_IFMA) != 0; }
+static int cmb_ok(void) { return (cc_cpu() & CC_CPU_IFMA) != 0; }
 #endif
-enum { PK_RS256 = 1, PK_ES256 = 2, PK_ED25519 = 3 };
+enum { PK_RS256 = CC_PK_RS256, PK_ES256 = CC_PK_ES256, PK_ED25519 = CC_PK_ED25519 };
 
 /* ---------------------------------------------------------------------------------- signing-input hashes */
-/* SHA-256 of the m messages of a chunk whose signature length is right, in one multi-buffer call (jwt_sha256_batch:
+/* SHA-256 of the m messages of a chunk whose signature length is right, in one multi-buffer call (cc_sha256_batch:
  * 8 lanes on AVX-512 / AVX2, 4 interleaved SHA2 streams on ARM), as 4 little-endian limbs of the big-endian digest */
 static void hash_chunk(int m, const uint8_t *const *msg, const int *len, const int *slen, int want, uint64_t (*e)[4]) {
     const uint8_t *mp[32] = { 0 };
@@ -112,7 +109,7 @@ static void hash_chunk(int m, const uint8_t *const *msg, const int *len, const i
     uint32_t dig[32][8];
     for (int i = 0; i < m; i++)
         if (slen[i] == want) mp[c] = msg[i], ml[c] = len[i], at[c++] = i;
-    jwt_sha256_batch(c, mp, ml, dig);
+    cc_sha256_batch(c, mp, ml, dig);
     for (int j = 0; j < c; j++)
         for (int w = 0; w < 4; w++) e[at[j]][3 - w] = (uint64_t)dig[j][2 * w] << 32 | dig[j][2 * w + 1];
 }
@@ -125,8 +122,8 @@ static void be_to_limbs4(uint64_t o[4], const uint8_t b[32]) {
         o[i] = v;
     }
 }
-JWT_INLINE int fe_iszero(const fe_t a) { return !(a[0] | a[1] | a[2] | a[3]); }
-JWT_INLINE int fe_eq(const fe_t a, const fe_t b) {
+CC_INLINE int fe_iszero(const fe_t a) { return !(a[0] | a[1] | a[2] | a[3]); }
+CC_INLINE int fe_eq(const fe_t a, const fe_t b) {
     return !((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3]));
 }
 /* a < b, plain 256-bit integers */
@@ -150,7 +147,7 @@ static const uint8_t P256_GY[32] = { 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0
 
 /* a + b, a - b, -a mod p for a, b < p; branch-free but without fiat's value barriers (public data only) */
 static const uint64_t P256_P[4];
-JWT_INLINE void fe_add_c(fe_t o, const fe_t a, const fe_t b) {
+CC_INLINE void fe_add_c(fe_t o, const fe_t a, const fe_t b) {
     unsigned __int128 z = 0;
     uint64_t t[4], r[4], bw = 0;
     for (int i = 0; i < 4; i++) z = (unsigned __int128)a[i] + b[i] + (uint64_t)(z >> 64), t[i] = (uint64_t)z;
@@ -162,7 +159,7 @@ JWT_INLINE void fe_add_c(fe_t o, const fe_t a, const fe_t b) {
     uint64_t keep = (uint64_t)0 - (bw & ~cy); /* borrow and no carry: a + b < p */
     for (int i = 0; i < 4; i++) o[i] = (t[i] & keep) | (r[i] & ~keep);
 }
-JWT_INLINE void fe_sub_c(fe_t o, const fe_t a, const fe_t b) {
+CC_INLINE void fe_sub_c(fe_t o, const fe_t a, const fe_t b) {
     uint64_t t[4], bw = 0;
     for (int i = 0; i < 4; i++) {
         unsigned __int128 d = (unsigned __int128)a[i] - b[i] - bw;
@@ -182,7 +179,7 @@ static const fe_t P256_ZERO = { 0 };
  * than fiat's generic word-by-word code here (which also carries value barriers for constant time). */
 #define P256_P1 0x00000000ffffffffull
 #define P256_P3 0xffffffff00000001ull
-JWT_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
+CC_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
     uint64_t t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5, c, m;
     unsigned __int128 z;
     for (int i = 0; i < 4; i++) {
@@ -210,7 +207,7 @@ JWT_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
 }
 #define fe_sqr_c(o, a) fe_mul_c(o, a, a)
 
-#ifdef JWT_S2N
+#ifdef CC_S2N
 /* -DJWT_S2N: AWS s2n-bignum's formally verified assembly (scripts/fetch-s2n-bignum.sh, MIT-0), Montgomery
  * multiply / square and modular add / sub for p_256.  Same domain and contracts as the C versions above, which
  * tests/test_pk.c still cross-checks against fiat-crypto alongside these.  On x86-64 they need BMI2 + ADX, so they
@@ -221,7 +218,7 @@ void bignum_add_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 void bignum_sub_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 static int s2n_ok(void) {
 #if defined(__x86_64__)
-    return (jwt_cpu() & JWT_CPU_BMI2_ADX) != 0;
+    return (cc_cpu() & CC_CPU_BMI2_ADX) != 0;
 #else
     return 1;
 #endif
@@ -230,7 +227,7 @@ static int s2n_ok(void) {
 /* x86-64 CPUs without BMI2 / ADX (or VMs that hide them: Vultr's Genoa and Cascade Lake guests do) get
  * s2n-bignum's _alt multiply / square, which use plain mul / adc and are verified like the others; its add / sub
  * need neither extension */
-#define JWT_S2N_ALT 1
+#define CC_S2N_ALT 1
 void bignum_montmul_p256_alt(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 void bignum_montsqr_p256_alt(uint64_t z[4], const uint64_t x[4]);
 #endif
@@ -258,7 +255,7 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define EC(name) name##_c
 #include "cc_pk_ec.inc"
 #undef EC
-#ifdef JWT_S2N
+#ifdef CC_S2N
 #undef fe_mul
 #undef fe_sqr
 #undef fe_add
@@ -270,7 +267,7 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define EC(name)        name##_s2n
 #include "cc_pk_ec.inc"
 #undef EC
-#ifdef JWT_S2N_ALT
+#ifdef CC_S2N_ALT
 #undef fe_mul
 #undef fe_sqr
 #define fe_mul(o, a, b) bignum_montmul_p256_alt(o, a, b)
@@ -288,14 +285,14 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define fe_add fe_add_c
 #define fe_sub fe_sub_c
 #endif
-static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
+static void es_points(const cc_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
                       const int *at, uint8_t *ok) {
-#ifdef JWT_S2N
+#ifdef CC_S2N
     if (s2n_ok()) {
         es_points_s2n(k, c, d1, d2, r, at, ok);
         return;
     }
-#ifdef JWT_S2N_ALT
+#ifdef CC_S2N_ALT
     es_points_s2na(k, c, d1, d2, r, at, ok);
     return;
 #endif
@@ -303,21 +300,21 @@ static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_
     es_points_c(k, c, d1, d2, r, at, ok);
 }
 
-#ifdef JWT_ES8
+#ifdef CC_ES8
 /* -DJWT_ES8: the same additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane P-256 field
  * arithmetic (crypto/src/cmb_ec/es8.c, built into build/libcmbec.a).  Each lane gathers its own entries of the tables above.
  * Lanes es8.c can't finish (an exceptional addition, R at infinity) and the rare r + n < p second candidate are
  * redone here by the scalar code, so the results are the scalar code's. */
 void jwt_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8],
                     const int16_t *const d2[8], const uint64_t r[8][4], unsigned *good, unsigned *redo);
-#ifndef JWT_ES8_MIN
-#define JWT_ES8_MIN 3 /* the fewest tokens worth a (padded) group of 8; fewer go to the scalar code */
+#ifndef CC_ES8_MIN
+#define CC_ES8_MIN 3 /* the fewest tokens worth a (padded) group of 8; fewer go to the scalar code */
 #endif
-static void es_points8(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
+static void es_points8(const cc_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
                        const int *at, uint8_t *ok) {
     for (int g = 0; g < c; g += 8) {
         int m = c - g < 8 ? c - g : 8;
-        if (m < JWT_ES8_MIN) {
+        if (m < CC_ES8_MIN) {
             es_points(k, m, d1 + g, d2 + g, r + g, at + g, ok);
             break;
         }
@@ -395,16 +392,16 @@ static int p256_on_curve(const fe_t x, const fe_t y) { /* y^2 = x^3 - 3x + b */
     return fe_eq(l, r);
 }
 
-jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
+cc_pkey_t *cc_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
     uint64_t xi[4], yi[4], gx[4], gy[4];
     be_to_limbs4(xi, x), be_to_limbs4(yi, y);
     if (!u256_lt(xi, P256_P) || !u256_lt(yi, P256_P)) return NULL;
-    jwt_pkey_t *k = calloc(1, sizeof *k);
+    cc_pkey_t *k = calloc(1, sizeof *k);
     if (!k) return NULL;
-#ifdef JWT_ES8
+#ifdef CC_ES8
     /* 64-byte entries on 64-byte boundaries: es8.c's gathers then never split a cache line */
     if (posix_memalign((void **)&k->tg, 64, sizeof(p256_aff_t[P256_NW][P256_H]) * 2)) k->tg = NULL;
-    k->es8 = (jwt_cpu() & (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM)) == (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM);
+    k->es8 = (cc_cpu() & (CC_CPU_IFMA | CC_CPU_FAST_ZMM)) == (CC_CPU_IFMA | CC_CPU_FAST_ZMM);
 #else
     k->tg = malloc(sizeof(p256_aff_t[P256_NW][P256_H]) * 2);
 #endif
@@ -424,8 +421,7 @@ jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
     fiat_p256_to_montgomery(gmx, gx), fiat_p256_to_montgomery(gmy, gy);
     p256_table(k->tg, gmx, gmy);
     p256_table(k->tq, qx, qy);
-    k->alg = PK_ES256, k->name = "ES256", k->canon = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9";
-    k->sig_bytes = 64, k->sig_chars = 86;
+    k->alg = PK_ES256;
     return k;
 }
 
@@ -433,10 +429,10 @@ jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) {
 static void p256_recode(int16_t d[P256_NW], const uint64_t u[4]) {
     int carry = 0;
     for (int w = 0; w < P256_NW; w++) {
-        int bit = w * JWT_P256_W, li = bit >> 6, sh = bit & 63;
+        int bit = w * CC_P256_W, li = bit >> 6, sh = bit & 63;
         uint64_t v = li < 4 ? u[li] >> sh : 0;
-        if (sh + JWT_P256_W > 64 && li + 1 < 4) v |= u[li + 1] << (64 - sh);
-        int c = (int)(v & ((1u << JWT_P256_W) - 1)) + carry;
+        if (sh + CC_P256_W > 64 && li + 1 < 4) v |= u[li + 1] << (64 - sh);
+        int c = (int)(v & ((1u << CC_P256_W) - 1)) + carry;
         if (c > P256_H) d[w] = (int16_t)(c - 2 * P256_H), carry = 1;
         else d[w] = (int16_t)c, carry = 0;
     }
@@ -490,7 +486,7 @@ static void sc_inv(uint64_t o[4], const uint64_t am[4]) {
     fiat_p256_scalar_mul(o, t, r3);
 }
 
-static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
+static void es256_raw(const cc_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                       const int *slen, uint8_t *ok) {
     enum { CH = 32 };
     for (int base = 0; base < n; base += CH) {
@@ -514,7 +510,7 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             at[c++] = t;
         }
         if (!c) continue;
-#ifdef JWT_CRYPTO_MB
+#ifdef CC_CRYPTO_MB
         if (cmb_ok()) { /* 8 verifies per call; short groups repeat their first lane */
             for (int g = 0; g < c; g += 8) {
                 const int8u *pr[8], *ps[8], *pm[8];
@@ -550,8 +546,8 @@ static void es256_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, con
             fiat_p256_scalar_from_montgomery(u2, u2);
             p256_recode(d1[i], u1), p256_recode(d2[i], u2);
         }
-#ifdef JWT_ES8
-        if (k->es8 && c >= JWT_ES8_MIN) {
+#ifdef CC_ES8
+        if (k->es8 && c >= CC_ES8_MIN) {
             es_points8(k, c, d1, d2, r, at, ok);
             continue;
         }
@@ -590,7 +586,7 @@ typedef unsigned __int128 u128;
         (c1) = (uint64_t)s_, (c2) += (uint64_t)(s_ >> 64);                                                             \
     } while (0)
 #endif
-JWT_INLINE void mont_fin(uint64_t *r, const uint64_t *t, uint64_t top, const uint64_t *n, int nl) {
+CC_INLINE void mont_fin(uint64_t *r, const uint64_t *t, uint64_t top, const uint64_t *n, int nl) {
     uint64_t d[RSA_MAXL], bw = 0;
     for (int j = 0; j < nl; j++) {
         u128 z = (u128)t[j] - n[j] - bw;
@@ -611,7 +607,7 @@ JWT_INLINE void mont_fin(uint64_t *r, const uint64_t *t, uint64_t top, const uin
         }                                                                                                              \
         c0 = c1, c1 = c2, c2 = 0;                                                                                      \
     } while (0)
-JWT_INLINE void mont_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *n, uint64_t n0, int nl) {
+CC_INLINE void mont_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *n, uint64_t n0, int nl) {
     uint64_t m[RSA_MAXL], t[RSA_MAXL], c0 = 0, c1 = 0, c2 = 0;
     for (int i = 0; i < 2 * nl - 1; i++) {
         int lo = i < nl ? 0 : i - nl + 1, hi = i < nl ? i : nl - 1;
@@ -621,7 +617,7 @@ JWT_INLINE void mont_mul(uint64_t *r, const uint64_t *a, const uint64_t *b, cons
     t[nl - 1] = c0;
     mont_fin(r, t, c1, n, nl);
 }
-JWT_INLINE void mont_sqr(uint64_t *r, const uint64_t *a, const uint64_t *n, uint64_t n0, int nl) {
+CC_INLINE void mont_sqr(uint64_t *r, const uint64_t *a, const uint64_t *n, uint64_t n0, int nl) {
     uint64_t m[RSA_MAXL], t[RSA_MAXL], c0 = 0, c1 = 0, c2 = 0;
     for (int i = 0; i < 2 * nl - 1; i++) {
         int lo = i < nl ? 0 : i - nl + 1;
@@ -654,7 +650,7 @@ static void mont_mul_any(uint64_t *r, const uint64_t *a, const uint64_t *b, cons
     mont_mul(r, a, b, k->n, k->n0, k->nl);
 }
 static void mont_sqr_any(uint64_t *r, const uint64_t *a, const rsa_key_t *k) { mont_sqr(r, a, k->n, k->n0, k->nl); }
-#ifdef JWT_S2N
+#ifdef CC_S2N
 /* -DJWT_S2N, 2048-bit moduli: s2n-bignum's Karatsuba product / square (bignum_kmul_32_64, bignum_ksqr_32_64) and
  * its 8-limb-blocked Montgomery reduction (bignum_emontredc_8n), as AWS-LC uses them for RSA-2048.  emontredc
  * leaves z + q n = 2^2048 (c 2^2048 + hi): hi plus carry c is the unreduced result, < 2n. */
@@ -674,13 +670,13 @@ static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
     mont_fin(r, z + 32, c, k->n, 32);
 }
 #endif
-#if defined(JWT_OSSL_MONT) && defined(__x86_64__) && defined(__ELF__)
+#if defined(CC_OSSL_MONT) && defined(__x86_64__) && defined(__ELF__)
 /* -DJWT_OSSL_MONT (x86-64 Linux, on by default): OpenSSL's bn_mul_mont, extracted (crypto/src/bn_mont*_x86_64_ossl.S): 4-way
  * multiply and 8-way squaring, with mulx/adcx/adox paths it takes only when the CPU has BMI2 + ADX.  Called directly,
  * without libcrypto's BN layer.  It is the fastest kernel measured on x86-64 CPUs and VMs without ADX, and for
  * moduli s2n-bignum has no fixed kernel for (3072, 4096).  Results are fully reduced; in-place calls are allowed
  * (OpenSSL's own exponentiation makes them). */
-#define JWT_HAVE_OSSL_MONT 1
+#define CC_HAVE_OSSL_MONT 1
 int jwt_ossl_bn_mul_mont(uint64_t *rp, const uint64_t *ap, const uint64_t *bp, const uint64_t *np, const uint64_t *n0,
                          int num);
 static void mont_mul_om(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
@@ -691,10 +687,10 @@ static void mont_sqr_om(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
 }
 #endif
 static mont_ops_t mont_for(const rsa_key_t *k) {
-#ifdef JWT_S2N
+#ifdef CC_S2N
     if (k->nl == 32 && s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
 #endif
-#ifdef JWT_HAVE_OSSL_MONT
+#ifdef CC_HAVE_OSSL_MONT
     if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
 #endif
     switch (k->nl) {
@@ -736,7 +732,7 @@ static void rsa_dbl(uint64_t *x, const rsa_key_t *k) {
     }
 }
 
-#ifdef JWT_RSAZ
+#ifdef CC_RSAZ
 /* -DJWT_RSAZ, RSA-2048 on AVX-512 IFMA CPUs (Ice Lake and later, Zen 4 / 5): OpenSSL's
  * ossl_rsaz_amm52x40_x1_ifma256 (rsaz-4k-avx512.pl, Apache-2.0; generated by scripts/fetch-ossl-rsaz.sh, which renames
  * it jwt_ossl_rsaz_amm52x40_x1_ifma256 and hides it), an almost-Montgomery multiplication of 40-digit numbers in
@@ -750,7 +746,7 @@ void jwt_ossl_rsaz_amm52x40_x1_ifma256(uint64_t *res, const uint64_t *a, const u
  * multiplication's per-digit dependency chain is the bound, so a second one in the same loop is nearly free */
 void jwt_ossl_rsaz_amm52x40_x2_ifma256(uint64_t *res, const uint64_t *a, const uint64_t *b, const uint64_t *m,
                                        const uint64_t k0[2]);
-static int ifma_ok(void) { return (jwt_cpu() & JWT_CPU_IFMA) != 0; }
+static int ifma_ok(void) { return (cc_cpu() & CC_CPU_IFMA) != 0; }
 #define M52 ((1ull << 52) - 1)
 static void to52(uint64_t o[40], const uint64_t in[32]) { /* 2048 bits, radix 2^64 -> radix 2^52 */
     for (int i = 0; i < 40; i++) {
@@ -777,11 +773,11 @@ static void rsa_ifma_init(rsa_key_t *k) {
     to52(k->n52, k->n), to52(k->rr52, x);
     memcpy(k->n52 + 40, k->n52, 40 * sizeof(uint64_t)), memcpy(k->rr52 + 40, k->rr52, 40 * sizeof(uint64_t));
     k->k02[0] = k->k02[1] = k->n0;
-#ifdef JWT_RSAZ8
+#ifdef CC_RSAZ8
     for (int d = 0; d < 40; d++)
         for (int l = 0; l < 8; l++) k->n52x8[d][l] = k->n52[d], k->rr52x8[d][l] = k->rr52[d];
     for (int l = 0; l < 8; l++) k->k0x8[l] = k->n0 & ((1ull << 52) - 1);
-    k->ifma8 = k->e == 65537 && (jwt_cpu() & JWT_CPU_FAST_ZMM) != 0;
+    k->ifma8 = k->e == 65537 && (cc_cpu() & CC_CPU_FAST_ZMM) != 0;
 #endif
 }
 /* y = s^e mod n (radix 2^52, < n) -> accept iff it equals em */
@@ -816,7 +812,7 @@ static int rsa_one_ifma(const rsa_key_t *k, const uint64_t *s, const uint64_t *e
     jwt_ossl_rsaz_amm52x40_x1_ifma256(y, y, one, k->n52, k->n0); /* out of the Montgomery domain */
     return rsa_fin52(k, y, em);
 }
-#ifdef JWT_RSAZ8
+#ifdef CC_RSAZ8
 /* -DJWT_RSAZ8: crypto_mb's 8-lane public-exponent exponentiation (Intel cryptography-primitives, Apache-2.0,
  * scripts/fetch-crypto-mb-rsa.sh): 8 tokens, one per 64-bit lane of the zmm registers, s^65537 by 16 squarings
  * (AMS52x40_diagonal_mb8) and 1 multiplication, then out of the Montgomery domain.  The per-key n, R'^2 = 2^4160
@@ -872,17 +868,17 @@ static void rsa_pow(uint64_t *x, const uint64_t *sr, uint64_t e, const rsa_key_t
 static const uint8_t sha256_di[19] = { 0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
                                        0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20 };
 
-jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen) {
+cc_pkey_t *cc_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen) {
     while (nlen && !*n) n++, nlen--;
     while (elen && !*e) e++, elen--;
     if (nlen < 256 || nlen > 512 || !(n[nlen - 1] & 1) || !elen || elen > 8 || !(e[elen - 1] & 1)) return NULL;
-#ifdef JWT_RSAZ8
+#ifdef CC_RSAZ8
     /* crypto_mb's kernels load the per-lane modulus with aligned 64-byte moves; calloc only promises 16 */
-    jwt_pkey_t *pk = NULL;
+    cc_pkey_t *pk = NULL;
     if (posix_memalign((void **)&pk, 64, sizeof *pk)) return NULL;
     memset(pk, 0, sizeof *pk);
 #else
-    jwt_pkey_t *pk = calloc(1, sizeof *pk);
+    cc_pkey_t *pk = calloc(1, sizeof *pk);
 #endif
     if (!pk) return NULL;
     rsa_key_t *k = &pk->rsa;
@@ -902,10 +898,10 @@ jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size
     uint64_t x[RSA_MAXL + 1] = { 1 };
     for (int it = 0; it < 2 * 64 * nl; it++) rsa_dbl(x, k);
     memcpy(k->r2, x, sizeof(uint64_t) * nl);
-#ifdef JWT_RSAZ
+#ifdef CC_RSAZ
     rsa_ifma_init(k);
 #endif
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
     { /* kc[c-1] = Q^(c-1), Q = R^(e-1): computed in the Montgomery domain, stored plain */
         mont_ops_t mo = mont_for(k);
         uint64_t q[RSA_MAXL], km[RSA_MAXL], one[RSA_MAXL] = { 1 };
@@ -926,11 +922,10 @@ jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size
     memcpy(em + 3 + ps, sha256_di, 19);
     memset(em + kk - 32, 0, 32);
     be_to_limbs(k->em, nl, em, kk);
-    pk->alg = PK_RS256, pk->name = "RS256", pk->canon = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
-    pk->sig_bytes = kk, pk->sig_chars = (kk * 4 + 2) / 3;
-#ifdef JWT_OPENSSL
+    pk->alg = PK_RS256;
+#ifdef CC_OPENSSL
     if (!rsa_ossl_init(k)) {
-        jwt_pkey_free(pk);
+        cc_pkey_free(pk);
         return NULL;
     }
 #endif
@@ -949,14 +944,14 @@ static int rsa_lt_n(const uint64_t *s, const rsa_key_t *k) {
     return 0;
 }
 
-#ifdef JWT_OPENSSL
+#ifdef CC_OPENSSL
 /* -DJWT_OPENSSL: the RSA arithmetic goes to libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery, i.e. OpenSSL's
  * hand-written bn_mul_mont / sqr8x assembly, which neither the C here nor s2n-bignum beats (PK.md).  Everything
  * else stays ours: the token front end, the exact PKCS#1 block compare, screening.  Limbs are little-endian
  * uint64 arrays, so on a little-endian host they are BN_lebin2bn byte strings. */
 #include <openssl/bn.h>
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
-#error "JWT_OPENSSL assumes a little-endian host"
+#error "CC_OPENSSL assumes a little-endian host"
 #endif
 static int rsa_ossl_init(rsa_key_t *k) {
     BN_CTX *ctx = BN_CTX_new();
@@ -965,7 +960,7 @@ static int rsa_ossl_init(rsa_key_t *k) {
     k->mont = BN_MONT_CTX_new();
     int ok =
         ctx && k->bn_n && k->bn_e && k->mont && BN_set_word(k->bn_e, k->e) && BN_MONT_CTX_set(k->mont, k->bn_n, ctx);
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
     for (int c = 0; ok && c < 16; c++)
         ok = (k->bn_kcm[c] = BN_lebin2bn((const uint8_t *)k->kc[c], 8 * k->nl, NULL)) &&
              BN_to_montgomery(k->bn_kcm[c], k->bn_kcm[c], k->mont, ctx);
@@ -987,10 +982,10 @@ static int bn_eq_limbs(const BIGNUM *x, const uint64_t *em, int nl) {
  * per verify on a Cascade Lake); on arm64 libcrypto's armv8-mont beats s2n-bignum (8.4 vs 13.2 us on an M5); for
  * 3072/4096-bit moduli s2n-bignum has no fixed-size kernel here and libcrypto beats the C. */
 static int rsa_use_ossl(const rsa_key_t *k) {
-#if defined(JWT_HAVE_OSSL_MONT)
+#if defined(CC_HAVE_OSSL_MONT)
     (void)k; /* the same OpenSSL kernel, called directly (mont_for), beats going through libcrypto's BN layer */
     return 0;
-#elif defined(JWT_S2N) && defined(__x86_64__)
+#elif defined(CC_S2N) && defined(__x86_64__)
     return k->nl != 32 || !s2n_ok();
 #else
     (void)k;
@@ -1005,7 +1000,7 @@ static void rs256_ossl(const rsa_key_t *k, int c, uint64_t (*s)[RSA_MAXL], uint6
     BIGNUM *x = BN_CTX_get(ctx), *a = BN_CTX_get(ctx), *b = BN_CTX_get(ctx), *t = BN_CTX_get(ctx);
     if (!t) goto out;
     (void)b;
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
     if (c >= 2) { /* the same algebra as the C screening below, with libcrypto's Montgomery products */
         BN_lebin2bn((const uint8_t *)s[0], 8 * k->nl, a), BN_lebin2bn((const uint8_t *)em[0], 8 * k->nl, b);
         for (int i = 1; i < c; i++) {
@@ -1029,7 +1024,7 @@ out:
 }
 #endif
 
-#ifdef JWT_CRYPTO_MB
+#ifdef CC_CRYPTO_MB
 /* crypto_mb handles e = 65537 with full-size 2048 / 3072 / 4096-bit moduli */
 static int rsa_cmb_usable(const rsa_key_t *k) {
     int bits = 8 * k->k;
@@ -1075,7 +1070,7 @@ static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const u
     return d == 0;
 }
 
-static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
+static void rs256_raw(const cc_pkey_t *pk, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                       const int *slen, uint8_t *ok) {
     const rsa_key_t *k = &pk->rsa;
     mont_ops_t mo = mont_for(k);
@@ -1093,15 +1088,15 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             rsa_em(em[c], k, hs[i]);
             at[c++] = t;
         }
-#ifdef JWT_RSAZ
+#ifdef CC_RSAZ
         /* on IFMA: two tokens per call, the odd one alone; a screened batch (c >= 2) still goes to the screening */
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
         if (k->ifma && c < 2) {
 #else
         if (k->ifma) {
 #endif
             int i = 0;
-#ifdef JWT_RSAZ8
+#ifdef CC_RSAZ8
             if (k->ifma8) /* crypto_mb's kernel has e = 65537 built in, and runs on zmm */
                 for (; i + 8 <= c; i += 8) rsa_eight_ifma(k, s + i, em + i, at + i, ok);
 #endif
@@ -1110,8 +1105,8 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             continue;
         }
 #endif
-#ifdef JWT_OPENSSL
-#ifdef JWT_CRYPTO_MB
+#ifdef CC_OPENSSL
+#ifdef CC_CRYPTO_MB
         if (rsa_use_ossl(k) && !rsa_cmb_usable(k)) {
 #else
         if (rsa_use_ossl(k)) {
@@ -1120,7 +1115,7 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             continue;
         }
 #endif
-#ifdef JWT_RSA_SCREEN
+#ifdef CC_RSA_SCREEN
         /* A = prod s_i R^-(c-1), B = prod EM_i R^-(c-1) by chained Montgomery products of the raw values; then
          * (prod s)^e == prod EM  <=>  A^e R^((c-1)(e-1)) == B  <=>  mont(pow(A R), kc[c-1]) == B.
          * 2c + e's ~18 multiplications for the whole batch instead of ~19 per token. */
@@ -1139,7 +1134,7 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
             }
         }
 #endif
-#ifdef JWT_CRYPTO_MB
+#ifdef CC_CRYPTO_MB
         if (rsa_cmb_usable(k)) {
             rs256_cmb(k, c, s, em, at, ok);
             continue;
@@ -1152,31 +1147,32 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
 /* ---------------------------------------------------------------------------------- EdDSA */
 #include "cc_ed25519.inc"
 
-jwt_pkey_t *jwt_pkey_ed25519(const uint8_t pub[32]) {
-    jwt_pkey_t *k = calloc(1, sizeof *k);
+cc_pkey_t *cc_pkey_ed25519(const uint8_t pub[32]) {
+    cc_pkey_t *k = calloc(1, sizeof *k);
     if (!k) return NULL;
     if (!(k->ed = (struct ed_key *)ed_key_new(pub))) {
         free(k);
         return NULL;
     }
-    k->alg = PK_ED25519, k->name = "EdDSA",
-    k->canon = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9"; /* {"alg":"EdDSA","typ":"JWT"} */
-    k->sig_bytes = 64, k->sig_chars = 86;
+    k->alg = PK_ED25519;
     return k;
 }
 
-/* ---------------------------------------------------------------------------------- front end */
-void jwt_pkey_free(jwt_pkey_t *k) {
+/* ---------------------------------------------------------------------------------- key teardown, verify */
+int cc_pkey_alg(const cc_pkey_t *k) { return k->alg; }
+int cc_pkey_sig_bytes(const cc_pkey_t *k) { return k->alg == PK_RS256 ? k->rsa.k : 64; }
+
+void cc_pkey_free(cc_pkey_t *k) {
     if (!k) return;
     free(k->ed);
-#ifdef JWT_OPENSSL
+#ifdef CC_OPENSSL
     if (k->alg == PK_RS256) rsa_ossl_free(&k->rsa);
 #endif
     free(k->tg), free(k);
 }
 
-void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
-                       const int *slen, uint8_t *ok) {
+void cc_verify_batch(const cc_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
+                     const int *slen, uint8_t *ok) {
     if (k->alg == PK_ES256) es256_raw(k, n, msg, len, sig, slen, ok);
     else if (k->alg == PK_ED25519) ed25519_raw((const ed_key_t *)k->ed, n, msg, len, sig, slen, ok);
     else rs256_raw(k, n, msg, len, sig, slen, ok);

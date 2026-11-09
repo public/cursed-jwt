@@ -6,8 +6,41 @@
  * crypto/src/cc_pk.c. */
 #include "jwt.h"
 
+#ifndef JWT_EXTERNAL_CRYPTO
 /* cursed-crypto, compiled into this translation unit: a one-file build inlines exactly as before */
 #include "../crypto/src/cursed_crypto.c"
+/* cursed-jwt's internal names from before cursed-crypto had its own, for code that #includes this file and reaches
+ * into it (contrib/envoy's filter does); -DJWT_NO_OLD_INTERNALS leaves them out */
+#ifndef JWT_NO_OLD_INTERNALS
+#define JWT_INLINE   CC_INLINE
+#define JWT_LOAD_FN  CC_LOAD_FN
+#define JWT_STORE_FN CC_STORE_FN
+#define JWT_TL_XOR3  CC_TL_XOR3
+#define JWT_TL_CH    CC_TL_CH
+#define JWT_TL_MAJ   CC_TL_MAJ
+#define hmac_impl    cc__hmac_impl
+#define jwt_cpu      cc_cpu
+#if defined(CC_X86)
+#define JWT_X86          1
+#define JWT_BEGIN_AVX2   CC_BEGIN_AVX2
+#define JWT_BEGIN_AVX512 CC_BEGIN_AVX512
+#define JWT_END_TARGET   CC_END_TARGET
+#endif
+#if defined(CC_HAVE_NEON)
+#define JWT_HAVE_NEON 1
+#endif
+#if defined(CC_ARM_SHA2)
+#define JWT_ARM_SHA2   1
+#define JWT_BEGIN_SHA2 CC_BEGIN_SHA2
+#define JWT_END_SHA2   CC_END_SHA2
+#endif
+#endif
+#else
+/* -DJWT_EXTERNAL_CRYPTO: the JWT layer alone (the Makefile's libcursedjwt.a), linked against cursed-crypto built as
+ * its own unit (crypto/src/cursed_crypto.c, libcursedcrypto.a).  Only per-batch calls cross that boundary. */
+#include "../crypto/src/cc_internal.h"
+#define cc_cpu cc_cpu_features
+#endif
 
 /* ======================================================================================
  * 3. base64url
@@ -28,7 +61,7 @@ static const uint8_t b64u_tab[256]
                                      B16(128), B16(144), B16(160), B16(176), B16(192), B16(208), B16(224), B16(240) };
 
 /* checks the length class and the canonical-zero trailing bits; decodes the final < 4 chars */
-JWT_INLINE int b64u_tail(uint8_t *dst, const char *src, int r) {
+CC_INLINE int b64u_tail(uint8_t *dst, const char *src, int r) {
     const uint8_t *s = (const uint8_t *)src;
     uint32_t a, b, c;
     switch (r) {
@@ -63,11 +96,11 @@ int jwt_b64url_decode_scalar(uint8_t *dst, const char *src, int n) {
     return t < 0 ? -1 : o + t;
 }
 
-#if defined(JWT_HAVE_NEON)
+#if defined(CC_HAVE_NEON)
 /* 64 chars -> 48 bytes: vld4 de-interleaves the 4 sextets of every quantum into 4 registers,
  * vqtbl4/vqtbx4 translate through a 128-byte table, vst3 re-interleaves the 3 output bytes.
  * Table misses give 0xFF; bytes >= 0x80 index nothing and are caught by OR-ing in the input. */
-JWT_INLINE uint8x16_t neon_b64_64(const uint8_t *src, uint8_t *dst, uint8x16x4_t lo, uint8x16x4_t hi) {
+CC_INLINE uint8x16_t neon_b64_64(const uint8_t *src, uint8_t *dst, uint8x16x4_t lo, uint8x16x4_t hi) {
     const uint8x16_t x40 = vdupq_n_u8(0x40);
 #define NEON_XLAT(v) vqtbx4q_u8(vqtbl4q_u8(lo, v), hi, veorq_u8(v, x40))
     uint8x16x4_t c = vld4q_u8(src);
@@ -101,11 +134,11 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
 }
-#elif defined(JWT_X86)
-JWT_BEGIN_AVX2
+#elif defined(CC_X86)
+CC_BEGIN_AVX2
 /* 32 chars -> 24 bytes (Muła/Lemire packing; base64url translation via range compares).
  * Stores 32 bytes per block: dst needs the 32 bytes of slack jwt.h asks for. */
-JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
+CC_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
 #define RNG(v, lo, hi)                                                                                                 \
     _mm256_and_si256(_mm256_cmpgt_epi8(v, _mm256_set1_epi8((lo) - 1)), _mm256_cmpgt_epi8(_mm256_set1_epi8((hi) + 1), v))
     __m256i v = _mm256_loadu_si256((const __m256i *)src);
@@ -143,7 +176,7 @@ static int b64url_decode_avx2(uint8_t *dst, const char *src, int n) {
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
 }
-JWT_END_TARGET
+CC_END_TARGET
 /* AVX-512 VBMI, 64 chars -> 48 bytes per step (the approach of Muła and Lemire, "Base64 encoding and decoding at
  * almost the speed of a memory copy", SPE 2020; the packing as in simdutf's icelake kernel).  Used only on CPUs
  * where 512-bit vectors cost no clock speed (FAST_ZMM, i.e. AMD Zen 4 / 5).
@@ -191,17 +224,17 @@ static int b64url_decode_resolve(uint8_t *dst, const char *src, int n);
 static int (*b64url_impl)(uint8_t *, const char *, int) = b64url_decode_resolve;
 static int b64u_pick_vbmi(void) {
     /* AVX512VL as well, so that JWT_CPU_MASK can take AVX-512 away on its own */
-    const unsigned need = JWT_CPU_VBMI | JWT_CPU_FAST_ZMM | JWT_CPU_AVX512VL;
-    return (jwt_cpu() & need) == need;
+    const unsigned need = CC_CPU_VBMI | CC_CPU_FAST_ZMM | CC_CPU_AVX512VL;
+    return (cc_cpu() & need) == need;
 }
 static int b64url_decode_resolve(uint8_t *dst, const char *src, int n) {
-    int (*f)(uint8_t *, const char *, int) = b64u_pick_vbmi()           ? b64url_decode_vbmi
-                                             : jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2
-                                                                        : jwt_b64url_decode_scalar;
-    JWT_STORE_FN(b64url_impl, f);
+    int (*f)(uint8_t *, const char *, int) = b64u_pick_vbmi()         ? b64url_decode_vbmi
+                                             : cc_cpu() & CC_CPU_AVX2 ? b64url_decode_avx2
+                                                                      : jwt_b64url_decode_scalar;
+    CC_STORE_FN(b64url_impl, f);
     return f(dst, src, n);
 }
-int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return JWT_LOAD_FN(b64url_impl)(dst, src, n); }
+int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return CC_LOAD_FN(b64url_impl)(dst, src, n); }
 #else
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_decode_scalar(dst, src, n); }
 #endif
@@ -221,7 +254,7 @@ typedef struct {
     const uint8_t *p, *e;
 } jcur_t;
 
-JWT_INLINE void jws(jcur_t *c) {
+CC_INLINE void jws(jcur_t *c) {
     while (c->p < c->e && (*c->p == ' ' || *c->p == '\t' || *c->p == '\n' || *c->p == '\r')) c->p++;
 }
 
@@ -252,7 +285,7 @@ static const uint8_t jstop[256] = { JC16(0),   JC16(16),  JC16(32),  JC16(48),  
                                     JC16(96),  JC16(112), JC16(128), JC16(144), JC16(160), JC16(176),
                                     JC16(192), JC16(208), JC16(224), JC16(240) };
 
-JWT_INLINE int jstr(jcur_t *c, const uint8_t **s, int *n, int *esc) {
+CC_INLINE int jstr(jcur_t *c, const uint8_t **s, int *n, int *esc) {
     const uint8_t *p = c->p, *e = c->e;
     if (p >= e || *p != '"') return 0;
     *s = ++p;
@@ -356,7 +389,7 @@ static int junescape(uint8_t *dst, int cap, const uint8_t *s, int n) {
 
 /* A JSON number at c->p: validates the grammar and returns its span.  *isint is set when it is a
  * plain integer of <= 18 digits (value via jint); nothing is computed for numbers we skip. */
-JWT_INLINE int jnum(jcur_t *c, const uint8_t **s, int *n, int *isint) {
+CC_INLINE int jnum(jcur_t *c, const uint8_t **s, int *n, int *isint) {
     const uint8_t *p = c->p, *e = c->e, *d;
     int simple = 1;
     *s = p;
@@ -386,7 +419,7 @@ JWT_INLINE int jnum(jcur_t *c, const uint8_t **s, int *n, int *isint) {
 }
 
 /* 8 ASCII digits -> value, SWAR (three multiplies instead of an 8-long multiply-add chain) */
-JWT_INLINE uint64_t swar8(uint64_t x) { /* x = 8 digits, first digit in the low byte */
+CC_INLINE uint64_t swar8(uint64_t x) { /* x = 8 digits, first digit in the low byte */
     x -= 0x3030303030303030ull;
     x = x * 10 + (x >> 8);
     x = ((x & 0x000000FF000000FFull) * (100 + (1000000ull << 32)) +
@@ -507,7 +540,7 @@ static int jskip(jcur_t *c, int depth) {
 
 /* key -> small id; keys are unescaped first when needed */
 enum { K_OTHER, K_SUB, K_USERNAME, K_EXP, K_NBF, K_ALG };
-JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
+CC_INLINE int jkey(const uint8_t *s, int n, int esc) {
     uint8_t buf[16];
     if (esc) {
         n = junescape(buf, sizeof buf, s, n);
@@ -528,7 +561,7 @@ JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
 
 /* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256").  Inlined: the RS256 / ES256 path
  * shares it, and as a called function it would cost HS256 a call per token. */
-JWT_INLINE int header_ok(const uint8_t *h, int n, const char *want) {
+CC_INLINE int header_ok(const uint8_t *h, int n, const char *want) {
     jcur_t c = { h, h + n };
     const uint8_t *s;
     int len, esc, alg = 0;
@@ -568,7 +601,7 @@ JWT_INLINE int header_ok(const uint8_t *h, int n, const char *want) {
 }
 
 /* "sub": digits only (leading zeros allowed), 1 <= value <= INT64_MAX */
-JWT_INLINE int sub_value(const uint8_t *s, int len, int64_t *uid) {
+CC_INLINE int sub_value(const uint8_t *s, int len, int64_t *uid) {
     int64_t v = 0;
     if (len <= 0) return 0;
     for (int i = 0; i < len; i++) {
@@ -582,7 +615,7 @@ JWT_INLINE int sub_value(const uint8_t *s, int len, int64_t *uid) {
 
 /* Payload claims -> result.  Precedence: malformed/expired/not-yet-valid -> INVALID, then
  * sub/username problems -> BAD_PAYLOAD. */
-JWT_INLINE int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
+CC_INLINE int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
     jcur_t c = { pl, pl + n };
     const uint8_t *s;
     int len, esc, seen = 0, bad = 0, isint;
@@ -677,20 +710,20 @@ JWT_INLINE int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_re
  * ====================================================================================== */
 
 /* leading ASCII digits in p[0..7] (SWAR: borrows/carries only travel towards later bytes) */
-JWT_INLINE int jdigits8(const uint8_t *p) {
+CC_INLINE int jdigits8(const uint8_t *p) {
     uint64_t x;
     memcpy(&x, p, 8);
     uint64_t nd = ((x - 0x3030303030303030ull) | (x + 0x4646464646464646ull)) & 0x8080808080808080ull;
     return nd ? __builtin_ctzll(nd) >> 3 : 8;
 }
-JWT_INLINE int jdigits(const uint8_t *p, int max) {
+CC_INLINE int jdigits(const uint8_t *p, int max) {
     int n = 0, d;
     do n += d = jdigits8(p + n);
     while (d == 8 && n < max);
     return n;
 }
 /* offset of the first '"', '\\', control or non-ASCII byte */
-JWT_INLINE int jstrspan(const uint8_t *p, int max) {
+CC_INLINE int jstrspan(const uint8_t *p, int max) {
     int i = 0;
 #if defined(__SSE2__)
     for (; i < max; i += 16) {
@@ -701,7 +734,7 @@ JWT_INLINE int jstrspan(const uint8_t *p, int max) {
         int m = _mm_movemask_epi8(st);
         if (m) return i + __builtin_ctz(m);
     }
-#elif defined(JWT_HAVE_NEON)
+#elif defined(CC_HAVE_NEON)
     for (; i < max; i += 16) {
         uint8x16_t v = vld1q_u8(p + i);
         uint8x16_t st = vorrq_u8(vorrq_u8(vceqq_u8(v, vdupq_n_u8('"')), vceqq_u8(v, vdupq_n_u8('\\'))),
@@ -717,7 +750,7 @@ JWT_INLINE int jstrspan(const uint8_t *p, int max) {
 }
 #define JLIT(p, s) (!memcmp((p), (s), sizeof(s) - 1))
 
-JWT_INLINE int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
+CC_INLINE int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result_t *r) {
     const uint8_t *p = pl, *e = pl + n;
     if (n < 44 || !JLIT(p, "{\"sub\":\"")) return -1;
     p += 8;
@@ -754,7 +787,7 @@ static const char canon_hdr[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"; /* {"alg
 
 /* Payload of a token whose signature checked out: base64url-decode, JSON, claims -> r->status.  Inlined for the
  * same reason as header_ok. */
-JWT_INLINE void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
+CC_INLINE void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
     uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
     int pn = jwt_b64url_decode(pb, (const char *)p64, n64);
     if (pn < 0) return;
@@ -805,12 +838,8 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
         hmac(k, c, msg, mlen, mac);
         int good[CH], ng = 0;
         for (int j = 0; j < c; j++) {
-            uint32_t diff = 0; /* constant time over the 32 bytes */
-            for (int w = 0; w < 8; w++) diff |= mac[j][w] ^ want[j][w];
-#if defined(__GNUC__)
-            __asm__("" : "+r"(diff)); /* opaque to the optimiser: no early exit, only the verdict branches */
-#endif
-            if (!diff) good[ng++] = j;
+            /* constant time over the 32 bytes: no early exit, only the verdict branches */
+            if (!cc_mac_diff8(mac[j], want[j])) good[ng++] = j;
         }
         for (int g = 0; g < ng; g++) {
             int j = good[g];
@@ -821,46 +850,84 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
 
 void jwt_verify_batch_scalar(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                              jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_scalar);
+    verify_impl(k, n, tok, len, now, out, cc_hmac_sha256_scalar);
 }
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
 void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
+    verify_impl(k, n, tok, len, now, out, cc_hmac_sha256_neon);
 }
 #endif
-#if defined(JWT_ARM_SHA2)
+#if defined(CC_ARM_SHA2)
 void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_sha2);
+    verify_impl(k, n, tok, len, now, out, cc_hmac_sha256_sha2);
 }
 #endif
-#if defined(JWT_X86)
+#if defined(CC_X86)
 void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx2);
+    verify_impl(k, n, tok, len, now, out, cc_hmac_sha256_avx2);
 }
 void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                              jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx512);
+    verify_impl(k, n, tok, len, now, out, cc_hmac_sha256_avx512);
 }
 #endif
 
 /* at load time: pick the base64url decoder once, before any call */
 __attribute__((constructor)) static void jwt_b64_resolve(void) {
-#if defined(JWT_X86)
-    JWT_STORE_FN(b64url_impl, b64u_pick_vbmi()           ? b64url_decode_vbmi
-                              : jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2
-                                                         : jwt_b64url_decode_scalar);
+#if defined(CC_X86)
+    CC_STORE_FN(b64url_impl, b64u_pick_vbmi()         ? b64url_decode_vbmi
+                             : cc_cpu() & CC_CPU_AVX2 ? b64url_decode_avx2
+                                                      : jwt_b64url_decode_scalar);
 #endif
 }
 
 void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                       jwt_result_t *out) {
-    verify_impl(k, n, tok, len, now, out, JWT_LOAD_FN(hmac_impl));
+    verify_impl(k, n, tok, len, now, out, CC_LOAD_FN(cc__hmac_impl));
 }
 
-#ifndef JWT_NO_PK /* RS256 / ES256 / EdDSA; -DJWT_NO_PK leaves them out */
+#ifndef CC_NO_PK /* RS256 / ES256 / EdDSA; -DJWT_NO_PK (or -DCC_NO_PK) leaves them out */
+/* a JWS public key: cursed-crypto's key plus what the token format needs (the "alg" name, the canonical header, the
+ * signature's length in bytes and in base64url characters) */
+struct jwt_pkey {
+    cc_pkey_t *cc;
+    const char *name, *canon;
+    int sig_bytes, sig_chars;
+};
+static jwt_pkey_t *jwt_pkey_wrap(cc_pkey_t *c) {
+    if (!c) return NULL;
+    jwt_pkey_t *k = calloc(1, sizeof *k);
+    if (!k) {
+        cc_pkey_free(c);
+        return NULL;
+    }
+    k->cc = c;
+    switch (cc_pkey_alg(c)) {
+        case CC_PK_ES256: k->name = "ES256", k->canon = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9"; break;
+        case CC_PK_ED25519: k->name = "EdDSA", k->canon = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9"; break;
+        default: k->name = "RS256", k->canon = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"; break;
+    } /* the canonical headers are {"alg":"<name>","typ":"JWT"} */
+    k->sig_bytes = cc_pkey_sig_bytes(c), k->sig_chars = (k->sig_bytes * 4 + 2) / 3;
+    return k;
+}
+jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]) { return jwt_pkey_wrap(cc_pkey_es256(x, y)); }
+jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen) {
+    return jwt_pkey_wrap(cc_pkey_rs256(n, nlen, e, elen));
+}
+jwt_pkey_t *jwt_pkey_ed25519(const uint8_t pub[32]) { return jwt_pkey_wrap(cc_pkey_ed25519(pub)); }
+void jwt_pkey_free(jwt_pkey_t *k) {
+    if (!k) return;
+    cc_pkey_free(k->cc);
+    free(k);
+}
+void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
+                       const int *slen, uint8_t *ok) {
+    cc_verify_batch(k->cc, n, msg, len, sig, slen, ok);
+}
+
 void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, const int *len, int64_t now,
                          jwt_result_t *out) {
     enum { CH = 16 };
@@ -894,7 +961,7 @@ void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, con
             msg[c] = (const uint8_t *)t, mlen[c] = (int)(d2 - t), idx[c] = i, poff[c] = hl + 1;
             c++;
         }
-        jwt_pk_verify_raw(k, c, msg, mlen, sp, sl, ok);
+        cc_verify_batch(k->cc, c, msg, mlen, sp, sl, ok);
         for (int j = 0; j < c; j++)
             if (ok[j]) claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
     }

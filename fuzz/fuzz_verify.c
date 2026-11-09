@@ -24,7 +24,7 @@ static const struct {
 } fz_engines[] = {
     { jwt_verify_batch, 0 },
     { jwt_verify_batch_scalar, 0 },
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
     { jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)

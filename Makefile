@@ -1,5 +1,5 @@
 # cursed-jwt
-#   make              build/libcursedjwt.a + build/verify (the library has no dependencies)
+#   make              build/libcursedjwt.a + build/libcursedcrypto.a + build/verify (no dependencies; see Libraries)
 #   make test         differential test vs OpenSSL (needs libcrypto: Homebrew openssl@3 / libssl-dev)
 #   make test-quick   the same with fewer random iterations (CI)
 #   make test-vectors + RFC 4231, NIST CAVP, Wycheproof, RFC 7515 and pyca/cryptography vectors (network)
@@ -51,12 +51,12 @@ endif
 CFLAGS ?= -O3
 WARN := -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function
 INC := -Iinclude -Isrc -Itests
-SRC := src/jwt.c include/jwt.h $(wildcard crypto/src/*.c crypto/src/*.h crypto/src/*.inc crypto/src/fiat/*.c) $(SHAOBJ)
+SRC := src/jwt.c include/jwt.h crypto/include/cursed_crypto.h $(wildcard crypto/src/*.c crypto/src/*.h crypto/src/*.inc crypto/src/fiat/*.c) $(SHAOBJ)
 SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TEST_SECRET := cursed-jwt-test-secret
 NTOKENS ?= 20000
 
-all: $(B)/libcursedjwt.a $(B)/verify
+all: $(B)/libcursedjwt.a $(B)/libcursedcrypto.a $(B)/verify
 
 $(B):
 	mkdir -p $(B)
@@ -72,7 +72,19 @@ $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
-$(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
+# Libraries: cursed-crypto (crypto/) and the JWT layer (src/jwt.c) are compiled as separate units, no LTO:
+#   build/libcursedcrypto.a  cursed-crypto alone (crypto/include/cursed_crypto.h)
+#   build/libcursedjwt.a     the JWT layer (-DJWT_EXTERNAL_CRYPTO) plus the same cursed-crypto objects, so linking it
+#                            on its own works as before; linking both is fine too (the linker takes each object once)
+# build/jwt.o is everything as one unit (src/jwt.c #includes crypto/src/cursed_crypto.c), as the tests and the
+# contrib modules build it.
+$(B)/cursed_crypto.o: $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -c crypto/src/cursed_crypto.c -o $@
+$(B)/jwt_layer.o: $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -DJWT_EXTERNAL_CRYPTO -c src/jwt.c -o $@
+$(B)/libcursedcrypto.a: $(B)/cursed_crypto.o $(SHAOBJ)
+	rm -f $@ && ar rcs $@ $^
+$(B)/libcursedjwt.a: $(B)/jwt_layer.o $(B)/cursed_crypto.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
 $(B)/verify: examples/verify.c $(B)/libcursedjwt.a
 	$(CC) $(CFLAGS) $(WARN) -Iinclude $< $(B)/libcursedjwt.a -o $@

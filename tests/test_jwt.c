@@ -38,10 +38,10 @@ static inline uint32_t tl_emu(uint32_t a, uint32_t b, uint32_t c, int imm) {
 #define VXOR(a, b)     ((a) ^ (b))
 #define VSHR(x, n)     ((x) >> (n))
 #define VROR(x, n)     ROR32(x, n)
-#define VXOR3(a, b, c) tl_emu(a, b, c, JWT_TL_XOR3)
-#define VCH(e, f, g)   tl_emu(e, f, g, JWT_TL_CH)
-#define VMAJ(a, b, c)  tl_emu(a, b, c, JWT_TL_MAJ)
-#define VSEL(m, x, y)  tl_emu(m, x, y, JWT_TL_CH)
+#define VXOR3(a, b, c) tl_emu(a, b, c, CC_TL_XOR3)
+#define VCH(e, f, g)   tl_emu(e, f, g, CC_TL_CH)
+#define VMAJ(a, b, c)  tl_emu(a, b, c, CC_TL_MAJ)
+#define VSEL(m, x, y)  tl_emu(m, x, y, CC_TL_CH)
 #define VMASK(arr)     ((arr)[0])
 #define MB_LOAD16(ptr, w)                                                                                              \
     do {                                                                                                               \
@@ -134,7 +134,7 @@ typedef struct {
 
 static const engine_t all_engines[] = {
     { "scalar", jwt_hmac_scalar, jwt_verify_batch_scalar, 0 },
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
     { "neon4", jwt_hmac_neon, jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)
@@ -163,7 +163,7 @@ static const engine_t all_engines[] = {
     { "ossl-ssse3", hmac_ossl_ssse3, NULL, 0 },
     { "ossl-x86", hmac_ossl_x86, NULL, 0 },
 #endif
-    { "tlemu", jwt_hmac_tlemu, NULL, 0 },
+    { "tlemu", cc_hmac_sha256_tlemu, NULL, 0 },
     { "default", NULL, jwt_verify_batch, 0 },
 };
 static engine_t engines[sizeof all_engines / sizeof all_engines[0]];
@@ -220,9 +220,9 @@ static uint32_t rnd(void) {
 static void test_ternlog_immediates(void) {
     for (int i = 0; i < 1000; i++) {
         uint32_t a = rnd() ^ rnd() << 16, b = rnd() ^ rnd() << 16, c = rnd() ^ rnd() << 16;
-        CHECK(tl_emu(a, b, c, JWT_TL_XOR3) == (a ^ b ^ c), "xor3");
-        CHECK(tl_emu(a, b, c, JWT_TL_CH) == ((a & b) | (~a & c)), "ch");
-        CHECK(tl_emu(a, b, c, JWT_TL_MAJ) == ((a & b) ^ (a & c) ^ (b & c)), "maj");
+        CHECK(tl_emu(a, b, c, CC_TL_XOR3) == (a ^ b ^ c), "xor3");
+        CHECK(tl_emu(a, b, c, CC_TL_CH) == ((a & b) | (~a & c)), "ch");
+        CHECK(tl_emu(a, b, c, CC_TL_MAJ) == ((a & b) ^ (a & c) ^ (b & c)), "maj");
     }
 }
 
@@ -265,7 +265,7 @@ static void test_b64(void) {
     CHECK(jwt_b64url_decode(a, "QUI", 3) == 2, "QUI");
     CHECK(jwt_b64url_decode(a, "QUJ", 3) < 0, "non-canonical QUJ");
     CHECK(jwt_b64url_decode(a, "QQ==", 4) < 0, "padding");
-#if defined(JWT_X86)
+#if defined(CC_X86)
     /* The VBMI decoder is dispatched only on VBMI && FAST_ZMM (AMD Zen 4/5), so neither the loop above nor the
      * fuzzer reaches it on Intel. Test it directly wherever VBMI exists, against the scalar decoder, over every
      * length 0..1024 with adversarial content (needs >= 16 readable bytes past n, like the real decode buffers). */
@@ -397,7 +397,7 @@ static void test_sha256_raw(void) {
     } se[] = {
         { "scalar", jwt_sha256_scalar, 0 },
         { "default", jwt_sha256_batch, 0 },
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
         { "neon4", jwt_sha256_neon, 0 },
 #endif
 #if defined(__aarch64__)

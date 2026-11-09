@@ -14,7 +14,7 @@ static const struct {
 } all_shim[] = {
     { "default", jwt_verify_batch, 0 },
     { "scalar", jwt_verify_batch_scalar, 0 },
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
     { "neon", jwt_verify_batch_neon, 0 },
 #endif
 #if defined(__aarch64__)

@@ -13,11 +13,11 @@
 #include "fiat/curve25519_64.c"
 #include "fiat/curve25519_scalar_64.c"
 
-#ifndef JWT_ED_W
-#define JWT_ED_W 7 /* comb window: 37 rows x 64 points x 120 B = 284 KB per base point */
+#ifndef CC_ED_W
+#define CC_ED_W 7 /* comb window: 37 rows x 64 points x 120 B = 284 KB per base point */
 #endif
-#define ED_NW ((254 + JWT_ED_W - 1) / JWT_ED_W)
-#define ED_H  (1 << (JWT_ED_W - 1))
+#define ED_NW ((254 + CC_ED_W - 1) / CC_ED_W)
+#define ED_H  (1 << (CC_ED_W - 1))
 
 typedef uint64_t fe25_t[5]; /* fiat's unsaturated 5 x 51-bit limbs */
 typedef struct {
@@ -26,18 +26,18 @@ typedef struct {
 typedef struct {
     fe25_t ypx, ymx, xy2d; /* y + x, y - x, 2 d x y of an affine point ("Niels" form) */
 } ed_niels;
-#if defined(JWT_S2N) && defined(__x86_64__)
+#if defined(CC_S2N) && defined(__x86_64__)
 /* -DJWT_S2N on x86-64: the comb additions run on s2n-bignum's formally verified edwards25519_pepadd (BMI2 + ADX) or
  * edwards25519_pepadd_alt (plain mul / adc, any x86-64): extended projective += precomputed affine, 7M, with every
  * coordinate fully reduced mod p in 4 x 64-bit limbs.  Tables are stored in its (y - x, y + x, 2dxy) order; the
  * accumulated point goes back to fiat's limbs once, for the batched inversion and the encoding. */
-#define JWT_ED_S2N 1
+#define CC_ED_S2N 1
 typedef uint64_t ed_pp4[12];
 void edwards25519_pepadd(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
 void edwards25519_pepadd_alt(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
 #endif
 typedef struct ed_key {
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
     ed_pp4 tb[ED_NW][ED_H], ta[ED_NW][ED_H]; /* B and -A */
 #else
     ed_niels tb[ED_NW][ED_H], ta[ED_NW][ED_H]; /* B and -A */
@@ -175,7 +175,7 @@ static int ed_decode(ed_p3 *P, const uint8_t s[32]) {
     return 1;
 }
 
-#ifndef JWT_ED_S2N /* (with s2n-bignum on x86-64, edwards25519_pepadd does these) */
+#ifndef CC_ED_S2N /* (with s2n-bignum on x86-64, edwards25519_pepadd does these) */
 /* P += Q (Niels), ref10's ge_madd: 7M.  Only 2Z is carried (it is an add / sub input); every other sum feeds a
  * multiplication. */
 static void ed_madd(ed_p3 *P, const ed_niels *q) {
@@ -296,10 +296,10 @@ static void sc_reduce512(uint64_t k[4], const uint8_t h[64]) {
 static void ed_recode(int16_t d[ED_NW], const uint64_t u[4]) {
     int carry = 0;
     for (int w = 0; w < ED_NW; w++) {
-        int bit = w * JWT_ED_W, li = bit >> 6, sh = bit & 63;
+        int bit = w * CC_ED_W, li = bit >> 6, sh = bit & 63;
         uint64_t v = li < 4 ? u[li] >> sh : 0;
-        if (sh + JWT_ED_W > 64 && li + 1 < 4) v |= u[li + 1] << (64 - sh);
-        int c = (int)(v & ((1u << JWT_ED_W) - 1)) + carry;
+        if (sh + CC_ED_W > 64 && li + 1 < 4) v |= u[li + 1] << (64 - sh);
+        int c = (int)(v & ((1u << CC_ED_W) - 1)) + carry;
         if (c > ED_H) d[w] = (int16_t)(c - 2 * ED_H), carry = 1;
         else d[w] = (int16_t)c, carry = 0;
     }
@@ -366,7 +366,7 @@ static void sha512_ram(uint8_t out[64], const uint8_t *p1, const uint8_t *p2, co
         for (int j = 0; j < 8; j++) out[8 * i + j] = (uint8_t)(st[i] >> (56 - 8 * j));
 }
 
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
 static void ed_fe_to4(uint64_t o[4], const fe25_t a) { /* canonical, little-endian limbs (x86-64 is little-endian) */
     fiat_25519_to_bytes((uint8_t *)o, a);
 }
@@ -407,7 +407,7 @@ static ed_key_t *ed_key_new(const uint8_t pub[32]) {
     if (!k) return NULL;
     memcpy(k->a, pub, 32);
     f_neg(A.X, A.X), f_neg(A.T, A.T); /* -A */
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
     if (!ed_table4(k->tb, &B) || !ed_table4(k->ta, &A)) {
         free(k);
         return NULL;
@@ -421,7 +421,7 @@ static ed_key_t *ed_key_new(const uint8_t pub[32]) {
 static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                         const int *slen, uint8_t *ok) {
     enum { CH = 32 };
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
     void (*pepadd)(uint64_t *, const uint64_t *, const uint64_t *) =
         s2n_ok() ? edwards25519_pepadd : edwards25519_pepadd_alt;
     const int r43 = ed_r43_ok();
@@ -441,7 +441,7 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
             int16_t ds[ED_NW], dk[ED_NW];
             ed_recode(ds, s), ed_recode(dk, kk);
             ed_p3 *P = &R[c];
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
             if (r43) {
                 ed_comb_r43(k, ds, dk, P);
                 at[c++] = t;

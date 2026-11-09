@@ -197,7 +197,7 @@ int main(int argc, char **argv) {
     printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive");
 #endif
     printf("\n");
-    printf("P-256 comb window W=%d (%d windows, %zu KB of tables per ES256 key)\n", JWT_P256_W, P256_NW,
+    printf("P-256 comb window W=%d (%d windows, %zu KB of tables per ES256 key)\n", CC_P256_W, P256_NW,
            sizeof(p256_aff_t[P256_NW][P256_H]) * 2 / 1024);
     for (int i = 0; i < ns; i++) bench_set(&sets[i]);
     return 0;

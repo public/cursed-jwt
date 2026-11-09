@@ -99,7 +99,7 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
     int el = 0;
     for (int i = 7; i >= 0; i--)
         if ((e >> (8 * i)) || el) eb[el++] = (uint8_t)(e >> (8 * i));
-    jwt_pkey_t *pk = jwt_pkey_rs256(nb, 256, eb, (size_t)el);
+    cc_pkey_t *pk = cc_pkey_rs256(nb, 256, eb, (size_t)el);
     if (!pk) {
         fails++;
         fprintf(stderr, "FAIL key setup %s\n", name);
@@ -110,7 +110,7 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
 #ifdef JWT_RSAZ8
     if (((uintptr_t)k->n52x8 | (uintptr_t)k->rr52x8 | (uintptr_t)k->k0x8) & 63) {
         fails++, fprintf(stderr, "FAIL key %s: eight-lane constants not 64-byte aligned\n", name);
-        jwt_pkey_free(pk);
+        cc_pkey_free(pk);
         return;
     }
 #endif
@@ -121,7 +121,7 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
     if (!k->ifma) {
         fails++;
         fprintf(stderr, "FAIL key %s did not take the IFMA path\n", name);
-        jwt_pkey_free(pk);
+        cc_pkey_free(pk);
         return;
     }
     mont_ops_t mo = mont_for(k);
@@ -156,7 +156,7 @@ static void one_key(const BIGNUM *bn, unsigned long e, int nrand, BN_CTX *ctx, c
         CASE("random");
     }
     BN_free(be), BN_free(s), BN_free(t);
-    jwt_pkey_free(pk);
+    cc_pkey_free(pk);
 }
 
 static BIGNUM *gen_n(unsigned long e) {

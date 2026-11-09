@@ -80,7 +80,7 @@ static void EC(p256_madd)(p256_jac_t *p, const fe_t qx, const fe_t qy) {
     memcpy(p->x, t, 32);
 }
 
-JWT_INLINE void EC(p256_add_digit)(p256_jac_t *acc, const p256_aff_t *row, int d) {
+CC_INLINE void EC(p256_add_digit)(p256_jac_t *acc, const p256_aff_t *row, int d) {
     if (!d) return;
     if (d > 0) {
         EC(p256_madd)(acc, row[d - 1].x, row[d - 1].y);
@@ -92,13 +92,13 @@ JWT_INLINE void EC(p256_add_digit)(p256_jac_t *acc, const p256_aff_t *row, int d
 }
 
 /* the point additions and the x-coordinate check for c tokens whose digits are recoded */
-static void EC(es_points)(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
+static void EC(es_points)(const cc_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_t (*d2)[P256_NW], uint64_t (*r)[4],
                           const int *at, uint8_t *ok) {
-    /* the point additions, JWT_ES_ILV tokens in lockstep: each token's 66 additions are one serial chain,
+    /* the point additions, CC_ES_ILV tokens in lockstep: each token's 66 additions are one serial chain,
      * so running several side by side lets the core overlap their multiplications */
-    for (int i0 = 0; i0 < c; i0 += JWT_ES_ILV) {
-        int ni = c - i0 < JWT_ES_ILV ? c - i0 : JWT_ES_ILV;
-        p256_jac_t acc[JWT_ES_ILV];
+    for (int i0 = 0; i0 < c; i0 += CC_ES_ILV) {
+        int ni = c - i0 < CC_ES_ILV ? c - i0 : CC_ES_ILV;
+        p256_jac_t acc[CC_ES_ILV];
         for (int q = 0; q < ni; q++) acc[q].inf = 1;
         for (int j = 0; j < P256_NW; j++) {
             for (int q = 0; q < ni; q++) EC(p256_add_digit)(&acc[q], k->tg[j], d1[i0 + q][j]);

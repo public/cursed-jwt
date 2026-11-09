@@ -67,7 +67,7 @@ were measured, and the caveats, are under [Benchmarks](#benchmarks).
 
 ```bash
 git clone https://github.com/public/cursed-jwt.git && cd cursed-jwt
-make                   # build/libcursedjwt.a and build/verify; needs only a C compiler
+make                   # build/libcursedjwt.a, build/libcursedcrypto.a, build/verify; needs only a C compiler
 make test              # every engine on this CPU vs OpenSSL and the claim rules (needs libcrypto and python3)
 make example-check     # the example program accepts a generated token and rejects a tampered one
 ```
@@ -79,6 +79,7 @@ The tests need OpenSSL's libcrypto as the reference: on macOS `brew install open
 
 - [Using it](#using-it)
 - [Claim semantics](#claim-semantics)
+- [The crypto on its own](#the-crypto-on-its-own)
 - [How it works](#how-it-works)
 - [Building](#building)
 - [Testing](#testing)
@@ -154,6 +155,38 @@ and the JSON parser in `src/jwt.c` as building blocks.
 For RS256/ES256/EdDSA the signature length is 342 (RSA-2048) or 86 (ES256, EdDSA) characters instead of 43. `alg` must name the
 key's algorithm; the rest is identical.
 
+## The crypto on its own
+
+The SHA-256 / HMAC engines, the CPU dispatch and RS256 / ES256 / Ed25519 verification are a library of their own,
+cursed-crypto, in `crypto/`, with its own header (`crypto/include/cursed_crypto.h`, prefix `cc_`) and
+`build/libcursedcrypto.a`. The JWT layer (base64url, JSON, claims, the token front ends) only calls it.
+
+```c
+#include "cursed_crypto.h"     // link build/libcursedcrypto.a
+
+cc_hmac_key_t k;
+cc_hmac_key_init(&k, secret, secret_len);           // constant time in the key
+uint8_t mac[16][32], ok[16];
+cc_hmac_sha256_bytes(&k, n, msgs, lens, mac);        // n messages, one batched pass on the best engine
+int good = cc_hmac_sha256_verify(&k, n, msgs, lens, (const uint8_t (*)[32])tags, ok); // constant-time compare
+
+cc_pkey_t *pk = cc_pkey_es256(x, y);                  // or cc_pkey_rs256 / cc_pkey_ed25519; per-key tables
+cc_verify_batch(pk, n, msgs, lens, sigs, sig_lens, ok); // raw signatures, hashed inside, batched
+cc_pkey_free(pk);
+```
+
+- **Timing contract.** Everything that touches an HMAC key (key setup, every engine, `cc_tag_eq32`,
+  `cc_hmac_sha256_verify`) is constant time, checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`. Signature
+  verification is variable time: all of its inputs are public, as in every other library's verify.
+- **No speed lost by the split.** Calls cross the boundary once per batch, not per block or field operation, and the
+  HS256 front end calls the dispatched engine through the same pointer either way. `src/jwt.c` still `#include`s
+  `crypto/src/cursed_crypto.c`, so building `src/jwt.c` alone gives one translation unit, exactly as before;
+  `-DJWT_EXTERNAL_CRYPTO` builds the JWT layer alone, as `build/libcursedjwt.a` does.
+- **cursed-jwt's names stay.** `jwt_key_t`, `jwt_key_init`, `jwt_hmac_*`, `jwt_sha256_*`, `JWT_CPU_*`,
+  `jwt_cpu_features` and `jwt_engine` are the cursed-crypto ones under their old names (ELF aliases, wrappers
+  elsewhere); `CC_CPU_MASK` / `CC_CPU_FORCE_ZMM` and the `JWT_` spellings both work, and so do both spellings of the
+  build flags (`-DCC_S2N` or `-DJWT_S2N`, and so on).
+
 ## How it works
 
 - **Multi-buffer HMAC.**
@@ -195,7 +228,9 @@ key's algorithm; the rest is identical.
 
 ## Building
 
-The library needs only a C compiler, and no `-march`. `make` builds `build/libcursedjwt.a` and `build/verify`.
+The library needs only a C compiler, and no `-march`. `make` builds `build/libcursedjwt.a`, `build/libcursedcrypto.a`
+and `build/verify`. `libcursedjwt.a` carries the cursed-crypto objects too, so linking it alone still works; to compile
+the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/cursed_crypto.c` (the crypto alone).
 
 **One binary runs on any CPU of its architecture.**
 - **What's in it.** It is compiled for the baseline ISA (x86-64, ARMv8-A) and carries every engine that
@@ -271,7 +306,7 @@ The library needs only a C compiler, and no `-march`. `make` builds `build/libcu
 **Targets:**
 
 ```bash
-make              # build/libcursedjwt.a, build/verify
+make              # build/libcursedjwt.a, build/libcursedcrypto.a, build/verify
 make test         # every engine vs OpenSSL + the claim rules (~6 s)
 make test-quick   # fewer random iterations (CI)
 make test-vectors # + RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography vectors (network)
