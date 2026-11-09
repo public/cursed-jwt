@@ -690,7 +690,7 @@ static void lanes_x16(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint
         for (int j = 0; j < 8; j++) mac[l][j] = st[j][l];
 }
 void jwt_hmac_x16(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
-    x2_drive(lanes_x16, lanes_avx512, k, n, msg, len, mac);
+    zmm_drive(lanes_x16, lanes_avx512, k, n, msg, len, mac);
 }
 #endif
 JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
