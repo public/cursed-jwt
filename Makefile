@@ -1,5 +1,6 @@
 # cursed-jwt
 #   make              build/libcursedjwt.a + build/libcursedcrypto.a + build/verify (no dependencies; see Libraries)
+#   make JCC=1        the same, for Intel Skylake .. Cascade Lake only (JCC-erratum-safe code; see JCC below)
 #   make test         differential test vs OpenSSL (needs libcrypto: Homebrew openssl@3 / libssl-dev)
 #   make test-quick   the same with fewer random iterations (CI)
 #   make test-vectors + RFC 4231, NIST CAVP, Wycheproof, RFC 7515 and pyca/cryptography vectors (network)
@@ -22,6 +23,7 @@
 #   make format       apply the formatters; make hooks installs the pre-commit check (.githooks/)
 # Engines are picked at run time from the CPU; ARCHFLAGS only changes the baseline (see README.md, Building).
 CC ?= cc
+comma := ,
 PYTHON ?= python3
 B := build
 UNAME_M := $(shell uname -m)
@@ -49,6 +51,15 @@ SSLINC := -I$(SSLDIR)/include
 SSLLIB := -L$(SSLDIR)/lib
 endif
 CFLAGS ?= -O3
+# JCC=1: keep every branch off 32-byte boundaries (assembler padding), C and assembly alike.  Intel's microcode fix
+# for the JCC erratum (Skylake through Cascade Lake / Cooper Lake) stalls branches that cross or end on one; on those
+# CPUs this makes full HS256 verify up to 17% faster (Cascade Lake, realistic tokens, batch 16), while on AMD Zen 4 /
+# Zen 5 it costs 2-7% there.  The crypto itself doesn't move either way (README.md, Building).  For Intel-only builds.
+ifeq ($(JCC),1)
+JCCFLAG ?= $(if $(shell $(CC) --version 2>/dev/null | grep -i clang),-mbranches-within-32B-boundaries,-Wa$(comma)-mbranches-within-32B-boundaries)
+override CFLAGS += $(JCCFLAG)
+ASJCC := $(JCCFLAG)
+endif
 WARN := -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function
 INC := -Iinclude -Isrc -Itests
 SRC := src/jwt.c include/jwt.h crypto/include/cursed_crypto.h $(wildcard crypto/src/*.c crypto/src/*.h crypto/src/*.inc crypto/src/fiat/*.c) $(SHAOBJ)
@@ -63,15 +74,15 @@ $(B):
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
 $(B)/sha256_x86_64_ossl.o: crypto/src/sha256_x86_64_ossl.S | $(B)
-	$(CC) -c $< -o $@
+	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
-	$(CC) -c $< -o $@
+	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_x16_avx512.o: crypto/src/sha256_x16_avx512.S | $(B)
-	$(CC) -c $< -o $@
+	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
-	$(CC) -c $< -o $@
+	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
-	$(CC) -c $< -o $@
+	$(CC) $(ASJCC) -c $< -o $@
 # Libraries: cursed-crypto (crypto/) and the JWT layer (src/jwt.c) are compiled as separate units, no LTO:
 #   build/libcursedcrypto.a  cursed-crypto alone (crypto/include/cursed_crypto.h)
 #   build/libcursedjwt.a     the JWT layer (-DJWT_EXTERNAL_CRYPTO) plus the same cursed-crypto objects, so linking it
@@ -239,7 +250,7 @@ S2N := -DJWT_S2N $(B)/libs2n.a
 $(B)/libs2n.a: scripts/fetch-s2n-bignum.sh | $(B)
 	./scripts/fetch-s2n-bignum.sh
 	mkdir -p $(B)/s2n
-	for f in $(S2N_FILES); do n=$${f#*/}; $(CC) -c -DS2N_BN_HIDE_SYMBOLS=1 -D$$n=cc_s2n_$$n \
+	for f in $(S2N_FILES); do n=$${f#*/}; $(CC) $(ASJCC) -c -DS2N_BN_HIDE_SYMBOLS=1 -D$$n=cc_s2n_$$n \
 	  -Ithird_party/s2n-bignum/include third_party/s2n-bignum/$(S2N_ARCH)/$$f.S -o $(B)/s2n/$$n.o || exit 1; done
 	rm -f $@ && ar rcs $@ $(addprefix $(B)/s2n/,$(addsuffix .o,$(notdir $(S2N_FILES))))
 # -DJWT_OPENSSL: RSA arithmetic through libcrypto's BN_mod_exp_mont / BN_mod_mul_montgomery (OpenSSL's asm);
