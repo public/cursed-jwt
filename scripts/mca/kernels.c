@@ -24,20 +24,20 @@
 
 K k_empty(void *s, void *w) { MCA("empty", ((uint32_t *)s)[0] ^= ((uint32_t *)w)[0]); } // call overhead (kbench.c)
 K k_x1_scalar(void *s, void *w) { MCA("x1_scalar", compress_scalar((uint32_t *)s, (uint32_t *)w)); }
-#if defined(JWT_X86)
-JWT_BEGIN_AVX2
+#if defined(CC_X86)
+CC_BEGIN_AVX2
 K k_x8_avx2(void *s, void *w) { MCA("x8_avx2", compress_avx2((__m256i *)s, (__m256i *)w)); }
-JWT_END_TARGET
-JWT_BEGIN_AVX512
+CC_END_TARGET
+CC_BEGIN_AVX512
 K k_x8_avx512(void *s, void *w) { MCA("x8_avx512", compress_avx512((__m256i *)s, (__m256i *)w)); }
 K k_x16_zmm(void *s, void *w) { MCA("x16_zmm", compress_zmm((__m512i *)s, (__m512i *)w)); }
-JWT_END_TARGET
+CC_END_TARGET
 #endif
-#if defined(JWT_HAVE_NEON)
+#if defined(CC_HAVE_NEON)
 K k_x4_neon(void *s, void *w) { MCA("x4_neon", compress_neon((uint32x4_t *)s, (uint32x4_t *)w)); }
 #endif
-#if defined(JWT_ARM_SHA2)
-JWT_BEGIN_SHA2
+#if defined(CC_ARM_SHA2)
+CC_BEGIN_SHA2
 // S interleaved streams: st0[S], st1[S] in s; m[S][4] in w
 #define KCE(S)                                                                                                         \
     K k_x##S##_sha2(void *s, void *w) {                                                                                \
@@ -47,5 +47,5 @@ JWT_BEGIN_SHA2
 KCE(1)
 KCE(2)
 KCE(4)
-JWT_END_SHA2
+CC_END_SHA2
 #endif

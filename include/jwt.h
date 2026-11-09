@@ -22,6 +22,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* the crypto is cursed-crypto (crypto/include/cursed_crypto.h): its own header, found next to this one when
+ * installed, else in this source tree */
+#if defined(__has_include)
+#if __has_include("cursed_crypto.h")
+#include "cursed_crypto.h"
+#else
+#include "../crypto/include/cursed_crypto.h"
+#endif
+#else
+#include "../crypto/include/cursed_crypto.h"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,10 +53,7 @@ enum {
 #define JWT_TOKEN_MAX 8192 /* longer tokens -> JWT_INVALID (an HTTP header limit is lower anyway) */
 #endif
 
-typedef struct {
-    uint32_t ih[8]; /* SHA-256 state after compressing (key ^ ipad) */
-    uint32_t oh[8]; /* SHA-256 state after compressing (key ^ opad) */
-} jwt_key_t;
+typedef cc_hmac_key_t jwt_key_t; /* the HS256 secret's HMAC ipad / opad midstates */
 
 typedef struct {
     uint8_t status;          /* JWT_OK / JWT_INVALID / JWT_BAD_PAYLOAD */
@@ -70,19 +79,19 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
  * with: SHA-NI on AMD, then AVX-512VL, then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.
  * The engine-specific entry points below exist for tests and benchmarks; call one only if jwt_cpu_features() has
  * its bit. */
-enum {
-    JWT_CPU_AVX2 = 1,
-    JWT_CPU_AVX512VL = 2,
-    JWT_CPU_BMI2_ADX = 4,
-    JWT_CPU_SHANI = 8,
-    JWT_CPU_IFMA = 16,
-    JWT_CPU_SHA2 = 32,
-    JWT_CPU_SHA512 = 64,
-    JWT_CPU_FAST_ZMM = 128,   /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */
-    JWT_CPU_FAST_SHANI = 256, /* SHA-NI that beats the vector engines (AMD Zen): the 4-stream SHA-NI engine */
-    JWT_CPU_FULL_ZMM = 512,   /* full-width 512-bit execution (Zen 5 server/desktop): zmm for groups of 11+ */
-    JWT_CPU_VBMI = 1024,      /* AVX-512 VBMI (vpermi2b / vpermb): the zmm base64url decoder, with FAST_ZMM */
-    JWT_CPU_ZMM_HMAC = 2048 /* Intel AVX-512 without SHA-NI: zmm (x16) HMAC for groups of 9+; mask it to stay on ymm */
+enum { /* the CC_CPU_* bits of cursed_crypto.h */
+       JWT_CPU_AVX2 = CC_CPU_AVX2,
+       JWT_CPU_AVX512VL = CC_CPU_AVX512VL,
+       JWT_CPU_BMI2_ADX = CC_CPU_BMI2_ADX,
+       JWT_CPU_SHANI = CC_CPU_SHANI,
+       JWT_CPU_IFMA = CC_CPU_IFMA,
+       JWT_CPU_SHA2 = CC_CPU_SHA2,
+       JWT_CPU_SHA512 = CC_CPU_SHA512,
+       JWT_CPU_FAST_ZMM = CC_CPU_FAST_ZMM,
+       JWT_CPU_FAST_SHANI = CC_CPU_FAST_SHANI,
+       JWT_CPU_FULL_ZMM = CC_CPU_FULL_ZMM,
+       JWT_CPU_VBMI = CC_CPU_VBMI,
+       JWT_CPU_ZMM_HMAC = CC_CPU_ZMM_HMAC
 };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
 const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "shani", "avx512vl", "avx2", ... */
@@ -109,7 +118,7 @@ void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, 
 
 /* Raw HMAC-SHA256 tags of n messages, engine-specific (exposed for tests/benchmarks).
  * mac[i] receives the 8 big-endian-interpreted state words (i.e. word j = bytes 4j..4j+3). */
-typedef void jwt_hmac_fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]);
+typedef cc_hmac_fn jwt_hmac_fn;
 jwt_hmac_fn jwt_hmac_scalar;
 #if defined(__aarch64__) || defined(_M_ARM64)
 jwt_hmac_fn jwt_hmac_neon;
@@ -158,7 +167,7 @@ void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, co
 
 /* Plain SHA-256 of n messages through the same multi-buffer engines (the RS256 / ES256 signing inputs).
  * dig[i] receives the 8 big-endian-interpreted state words.  jwt_sha256_batch picks the default engine. */
-typedef void jwt_sha256_fn(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]);
+typedef cc_sha256_fn jwt_sha256_fn;
 jwt_sha256_fn jwt_sha256_batch, jwt_sha256_scalar;
 #if defined(__aarch64__) || defined(_M_ARM64)
 jwt_sha256_fn jwt_sha256_neon;

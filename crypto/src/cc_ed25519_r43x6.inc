@@ -436,9 +436,7 @@ fd_r43x6_quad_mul_fast( fd_r43x6_t * _z03, fd_r43x6_t * _z14, fd_r43x6_t * _z25,
  * coordinates in each), so the 4 multiplications of each step of the mixed addition run as one quad multiply.
  * The comb tables stay in cc_ed25519.inc's canonical 4 x 64-bit (y - x, y + x, 2dxy) form, shared with the
  * s2n-bignum path; each looked-up entry is split into 43-bit limbs in registers (AVX-512F only, no VBMI). */
-static int ed_r43_ok(void) {
-    return (jwt_cpu() & (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM)) == (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM);
-}
+static int ed_r43_ok(void) { return (cc_cpu() & (CC_CPU_IFMA | CC_CPU_FAST_ZMM)) == (CC_CPU_IFMA | CC_CPU_FAST_ZMM); }
 /* a canonical 255-bit element (4 x 64-bit limbs) -> radix 2^43 in lanes 0..5 (lanes 6, 7 zero) */
 static inline wwl_t ed_r43_from4(const uint64_t v[4]) {
     __m512i w = _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i *)v));

@@ -64,7 +64,7 @@ static const hengine_t all_hengines[] = {
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
     { "ossl-asm-1stream", jwt_hmac_ossl, 0 },
 #endif
-#ifdef JWT_HAVE_NEON
+#ifdef CC_HAVE_NEON
     { "neon-4lane", jwt_hmac_neon, 0 },
 #endif
 #if defined(__aarch64__)

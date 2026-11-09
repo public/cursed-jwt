@@ -165,7 +165,7 @@ static void test_arith(void) {
             fiat_p256_sub(y, a, b), bignum_sub_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
         }
 #endif
-#ifdef JWT_S2N_ALT
+#ifdef CC_S2N_ALT
         { /* the ADX-free kernels run on any x86-64 */
             uint64_t z[4];
             fiat_p256_mul(y, a, b), bignum_montmul_p256_alt(z, a, b), bad += memcmp(z, y, 32) != 0;
@@ -187,7 +187,7 @@ static void test_arith(void) {
     else { /* RSA-2048 Montgomery: s2n-bignum kernels vs the C ones */ uint8_t nb[256], e3[3] = { 1, 0, 1 };
         for (int i = 0; i < 256; i++) nb[i] = (uint8_t)rnd();
         nb[0] |= 0x80, nb[255] |= 1;
-        jwt_pkey_t *pk = jwt_pkey_rs256(nb, 256, e3, 3);
+        cc_pkey_t *pk = cc_pkey_rs256(nb, 256, e3, 3);
         uint64_t u[32], v[32], w1[32], w2[32];
         int rb = 0;
         for (int it = 0; it < 20000; it++) {
@@ -198,17 +198,17 @@ static void test_arith(void) {
             mont_sqr_s2n(w1, u, &pk->rsa), mont_sqr_32(w2, u, &pk->rsa), rb += memcmp(w1, w2, 256) != 0;
         }
         CHECK(!rb, "RSA-2048 Montgomery: %d s2n-bignum / C mismatches", rb);
-        jwt_pkey_free(pk);
+        cc_pkey_free(pk);
         printf("  s2n-bignum (-DJWT_S2N): P-256 field ops and RSA-2048 mont mul/sqr cross-checked\n");
     }
 #endif
-#ifdef JWT_S2N_ALT
+#ifdef CC_S2N_ALT
     printf("  s2n-bignum P-256 _alt mul/sqr (ADX-free) cross-checked against fiat-crypto\n");
 #endif
     printf("  P-256 fe_mul/sqr/add/sub (selected and C) vs fiat-crypto, sc_inv: %d random + edge inputs\n", n);
 }
 
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
 /* the radix-2^43 glue of cc_ed25519_r43x6.inc: ed_r43_canon against fiat-crypto on random and extreme limbs, and
  * ed_r43_from4 -> ed_r43_canon round trips (the latter on AVX-512 IFMA CPUs only) */
 static void test_r43(void) {
@@ -321,7 +321,7 @@ static void test_es8_field(void) {
     CHECK(!bad && !range, "es8 field ops: %d mismatches, %d results out of range", bad, range);
 }
 /* the scalar comb (cc_pk_ec.inc's chain) for one lane, as plain integers */
-static int comb_c(const jwt_pkey_t *k, const int16_t *d1, const int16_t *d2, uint64_t x[4], uint64_t y[4],
+static int comb_c(const cc_pkey_t *k, const int16_t *d1, const int16_t *d2, uint64_t x[4], uint64_t y[4],
                   uint64_t z[4]) {
     p256_jac_t acc;
     acc.inf = 1;
@@ -341,7 +341,7 @@ static void rand_digits(int16_t *d, int mode) {
         d[j] = (int16_t)v;
     }
 }
-static void test_es8_comb(const jwt_pkey_t *k, const char *what, int same) {
+static void test_es8_comb(const cc_pkey_t *k, const char *what, int same) {
     int bad = 0, n = 300, redo_seen = 0;
     for (int it = 0; it < n; it++) {
         int16_t d1[8][P256_NW], d2[8][P256_NW];
@@ -393,14 +393,14 @@ static void test_es8_comb(const jwt_pkey_t *k, const char *what, int same) {
            redo_seen);
 }
 static void test_es8(void) {
-    if (!(jwt_cpu() & JWT_CPU_IFMA)) {
+    if (!(cc_cpu() & JWT_CPU_IFMA)) {
         printf("  es8 (-DJWT_ES8): skipped, this CPU lacks AVX-512 IFMA\n");
         return;
     }
     test_es8_field();
     uint8_t gx[32], gy[32];
     memcpy(gx, P256_GX, 32), memcpy(gy, P256_GY, 32);
-    jwt_pkey_t *kg = jwt_pkey_es256(gx, gy); /* Q = G */
+    cc_pkey_t *kg = cc_pkey_es256(gx, gy); /* Q = G */
     test_es8_comb(kg, "Q = G, exceptional additions", 1);
     /* Q = 5G, from G's own table */
     uint64_t qx[4], qy[4];
@@ -408,12 +408,12 @@ static void test_es8(void) {
     fiat_p256_from_montgomery(qx, kg->tg[0][4].x), fiat_p256_from_montgomery(qy, kg->tg[0][4].y);
     for (int i = 0; i < 32; i++)
         bx[i] = (uint8_t)(qx[3 - i / 8] >> (56 - 8 * (i % 8))), by[i] = (uint8_t)(qy[3 - i / 8] >> (56 - 8 * (i % 8)));
-    jwt_pkey_t *k5 = jwt_pkey_es256(bx, by);
+    cc_pkey_t *k5 = cc_pkey_es256(bx, by);
     CHECK(k5 != NULL, "es8: 5G rejected as a key");
     if (k5) test_es8_comb(k5, "Q = 5G", 0);
     printf("  es8 (-DJWT_ES8): %s; field ops vs fiat-crypto on 20000 x 8 random + edge lanes\n",
            kg->es8 ? "ACTIVE for batches" : "built, but batches stay scalar (no FAST_ZMM: set JWT_CPU_FORCE_ZMM=1)");
-    jwt_pkey_free(kg), jwt_pkey_free(k5);
+    cc_pkey_free(kg), cc_pkey_free(k5);
 }
 /* batches of 8 and 16 valid ES256 signatures with one of them broken, in every lane position */
 static void es8_lanes(const jwt_pkey_t *k, rv_t *v, int n) {
@@ -455,20 +455,20 @@ int main(int argc, char **argv) {
            cmb_ok() ? "ACTIVE" : "inactive, CPU lacks IFMA (fallback paths run)");
 #endif
 #ifdef JWT_S2N
-#ifdef JWT_S2N_ALT
+#ifdef CC_S2N_ALT
     printf(", s2n-bignum: %s",
            s2n_ok() ? "active" : "P-256 on the ADX-free _alt kernels, RSA on the fallback (CPU lacks BMI2/ADX)");
 #else
     printf(", s2n-bignum: %s", s2n_ok() ? "active" : "inactive, CPU lacks BMI2/ADX");
 #endif
 #endif
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
     if (ed_r43_ok()) printf(", EdDSA additions: Firedancer r43x6 (AVX-512 IFMA)");
     else printf(", EdDSA additions: s2n-bignum edwards25519_pepadd%s", s2n_ok() ? "" : "_alt");
 #endif
     printf("\n");
     test_arith();
-#ifdef JWT_ED_S2N
+#ifdef CC_ED_S2N
     test_r43();
 #endif
 #ifdef JWT_ES8
