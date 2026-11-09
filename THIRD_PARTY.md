@@ -8,8 +8,8 @@
   - Generated from OpenSSL 3.6.0 (commit `7b371d8`) `crypto/sha/asm/sha512-x86_64.pl` by
     `scripts/extract-openssl-sha256.sh`, which fetches the perlasm sources pinned and SHA-256-checked.
   - **Modifications:**
-    - symbols renamed: `sha256_block_data_order*` → `jwt_ossl_sha256_block*` (hidden), `OPENSSL_ia32cap_P` →
-      `jwt_ossl_ia32cap_P`, the latter filled by `src/jwt.c` from CPUID;
+    - symbols renamed: `sha256_block_data_order*` → `cc_ossl_sha256_block*` (hidden), `OPENSSL_ia32cap_P` →
+      `cc_ossl_ia32cap_P`, the latter filled by `src/jwt.c` from CPUID;
     - a `.note.GNU-stack` section added;
     - nothing else.
   - Used on x86-64 Linux for HS256 batch 1 and the lanes left over by vector groups (`-DJWT_OSSL_SHA256`, set by the
@@ -23,7 +23,7 @@
   - **Modifications:**
     - the same register plan, rounds, message schedule, transpose and load pipelining, emitted by a Python generator;
     - the input is a block-major array of block pointers instead of ipsec-mb's lane state structure, and a second entry
-      point (`jwt_sha256_x16_rows`) takes one block already transposed, for the HMAC outer block;
+      point (`cc_sha256_x16_rows`) takes one block already transposed, for the HMAC outer block;
     - the round constants and masks are local to the file; no SAFE_DATA clearing, no Windows ABI.
   - Used on x86-64 Linux by the `x16` HMAC engine (`-DJWT_SHANI_MB`, set by the Makefile there).
 

@@ -203,7 +203,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **What it is.** The ES256 comb additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane
   P-256 field arithmetic (`ifma_arith_p256.c` / `ifma_arith_m256.c`, cryptography-primitives @ 316ce55, Apache-2.0,
   fetched pinned by `scripts/fetch-crypto-mb-rsa.sh`). `crypto/src/cmb_ec/es8.c` #includes them unchanged and builds into
-  `build/libcmbec.a`; only its `jwt_es8_*` symbols stay global.
+  `build/libcmbec.a`; only its `cc_es8_*` symbols stay global.
   - Not `mbx_nistp256_ecdsa_verify_mb8` itself: that has no per-key precompute and needs ~5,000 field multiplies
     per token, against our ~730.
 - **How it works:**

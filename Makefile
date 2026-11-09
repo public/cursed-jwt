@@ -127,9 +127,10 @@ test-vectors: $(B)/test_jwt $(B)/tokens.json $(B)/hmac_vectors.txt
 
 test: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	./$(B)/test_jwt $(B)/tokens.json
-# the libraries' exported symbols are all cc_* / jwt_* (scripts/check-symbols.sh)
+# the libraries' exported symbols: libcursedcrypto.a only cc_*, libcursedjwt.a cc_* / jwt_* (scripts/check-symbols.sh)
 check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
-	./scripts/check-symbols.sh $^
+	./scripts/check-symbols.sh --cc-only $(B)/libcursedcrypto.a
+	./scripts/check-symbols.sh $(B)/libcursedjwt.a
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
@@ -285,15 +286,15 @@ $(B)/libcmbrsa.a: scripts/fetch-crypto-mb-rsa.sh crypto/src/cmb_rsa/cmb_rsa_glue
 	$(CC) -O2 -c crypto/src/cmb_rsa/cmb_rsa_glue.c -o $(B)/cmbrsa/cmb_rsa_glue.o
 	ld -r $(B)/cmbrsa/ifma_*.o $(B)/cmbrsa/cmb_rsa_glue.o -o $(B)/cmbrsa/cmbrsa.o
 	# one global, renamed so it never clashes with Intel's own libcrypto_mb: everything else local
-	objcopy --redefine-sym EXP52x40_pub65537_mb8=jwt_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
-	objcopy -w --keep-global-symbol=jwt_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
+	objcopy --redefine-sym EXP52x40_pub65537_mb8=cc_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
+	objcopy -w --keep-global-symbol=cc_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
 	rm -f $@ && ar rcs $@ $(B)/cmbrsa/cmbrsa.o
 RSAZ8 := -DJWT_RSAZ8 $(B)/libcmbrsa.a
 $(eval $(call PK_BACKEND,_rsaz8,$(RSAZ) $(RSAZ8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a))
 $(B)/test_rsaz8: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(RSAZ8) $(FAST) -o $@
 # -DJWT_ES8: ES256 batches 8 tokens at a time through crypto_mb's 8-lane P-256 field arithmetic under our comb tables
-# (crypto/src/cmb_ec/es8.c #includes the two fetched files; every symbol but jwt_es8_* is made local).  Used only where zmm
+# (crypto/src/cmb_ec/es8.c #includes the two fetched files; every symbol but cc_es8_* is made local).  Used only where zmm
 # costs no clock speed (FAST_ZMM: AMD Zen 4 / 5) and the CPU has IFMA.  pk-test-es8 / pk-bench-es8 = rsaz8 plus it.
 CMB_INC := -Ithird_party/crypto-mb-rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include
 $(B)/libcmbec.a: scripts/fetch-crypto-mb-rsa.sh crypto/src/cmb_ec/es8.c | $(B)
@@ -301,7 +302,7 @@ $(B)/libcmbec.a: scripts/fetch-crypto-mb-rsa.sh crypto/src/cmb_ec/es8.c | $(B)
 	mkdir -p $(B)/cmbec
 	$(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq $(CMB_INC) -c crypto/src/cmb_ec/es8.c \
 	  -o $(B)/cmbec/es8.o
-	objcopy -w --keep-global-symbol='jwt_es8_*' $(B)/cmbec/es8.o
+	objcopy -w --keep-global-symbol='cc_es8_*' $(B)/cmbec/es8.o
 	rm -f $@ && ar rcs $@ $(B)/cmbec/es8.o
 ES8 := -DJWT_ES8 $(B)/libcmbec.a
 $(eval $(call PK_BACKEND,_es8,$(RSAZ) $(RSAZ8) $(ES8) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a $(B)/libcmbec.a))

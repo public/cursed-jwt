@@ -259,10 +259,10 @@ static void test_r43(void) {
 #ifdef JWT_ES8
 /* -DJWT_ES8 (crypto/src/cmb_ec/es8.c): crypto_mb's 8-lane field operations and the 8-lane comb against fiat-crypto and the
  * scalar code, on random and edge inputs, and 8-lane batches with one bad signature in each lane position */
-void jwt_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8], const int16_t *const d2[8],
-                  uint64_t x[8][4], uint64_t y[8][4], uint64_t z[8][4], unsigned *inf);
-unsigned jwt_es8_fe(int op, uint64_t o[8][4], uint64_t ohi[8], const uint64_t a[8][4], const uint64_t b[8][4],
-                    const uint64_t ahi[8], const uint64_t bhi[8]);
+void cc_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8], const int16_t *const d2[8],
+                 uint64_t x[8][4], uint64_t y[8][4], uint64_t z[8][4], unsigned *inf);
+unsigned cc_es8_fe(int op, uint64_t o[8][4], uint64_t ohi[8], const uint64_t a[8][4], const uint64_t b[8][4],
+                   const uint64_t ahi[8], const uint64_t bhi[8]);
 static const uint64_t P256_2P[5] = { 0xfffffffffffffffe, 0x00000001ffffffff, 0, 0xfffffffe00000002, 1 };
 /* x in [0, 2p) as (4 limbs, bit 256): x mod p */
 static void mod_p(uint64_t o[4], const uint64_t x[4], uint64_t hi) {
@@ -294,8 +294,7 @@ static void test_es8_field(void) {
         for (int op = 0; op <= 6; op++) {
             if (op == 5) /* to260 takes fiat-domain values < p */
                 for (int l = 0; l < 8; l++) rand_below(a[l], P256_P), ah[l] = 0;
-            range +=
-                __builtin_popcount(jwt_es8_fe(op, o, oh, (const uint64_t(*)[4])a, (const uint64_t(*)[4])b, ah, bh));
+            range += __builtin_popcount(cc_es8_fe(op, o, oh, (const uint64_t(*)[4])a, (const uint64_t(*)[4])b, ah, bh));
             for (int l = 0; l < 8; l++) {
                 uint64_t x[4], y[4], want[4], got[4];
                 mod_p(x, a[l], ah[l]), mod_p(y, b[l], bh[l]);
@@ -354,7 +353,7 @@ static void test_es8_comb(const cc_pkey_t *k, const char *what, int same) {
         }
         uint64_t x[8][4], y[8][4], z[8][4];
         unsigned inf;
-        jwt_es8_comb(k->tg, k->tq, P256_NW, P256_H, p1, p2, x, y, z, &inf);
+        cc_es8_comb(k->tg, k->tq, P256_NW, P256_H, p1, p2, x, y, z, &inf);
         for (int l = 0; l < 8; l++) {
             uint64_t cx[4], cy[4], cz[4];
             int cinf = comb_c(k, d1[l], d2[l], cx, cy, cz);

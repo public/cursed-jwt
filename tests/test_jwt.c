@@ -108,15 +108,15 @@ static char *fmt(const char *f, ...) {
 }
 
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
-/* OpenSSL's extracted block function dispatches on jwt_ossl_ia32cap_P: run each path the CPU has, by masking the
+/* OpenSSL's extracted block function dispatches on cc_ossl_ia32cap_P: run each path the CPU has, by masking the
  * capability word to that path's bits (shaext only where SHA-NI exists; otherwise it falls through to the next). */
 #define OSSL_PATH(fn, m0, m1, m2)                                                                                      \
     static void fn(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t(*mac)[8]) {          \
         unsigned sv[4];                                                                                                \
-        memcpy(sv, jwt_ossl_ia32cap_P, sizeof sv);                                                                     \
-        jwt_ossl_ia32cap_P[0] &= (m0), jwt_ossl_ia32cap_P[1] &= (m1), jwt_ossl_ia32cap_P[2] &= (m2);                   \
+        memcpy(sv, cc_ossl_ia32cap_P, sizeof sv);                                                                      \
+        cc_ossl_ia32cap_P[0] &= (m0), cc_ossl_ia32cap_P[1] &= (m1), cc_ossl_ia32cap_P[2] &= (m2);                      \
         jwt_hmac_ossl(k, n, msg, len, mac);                                                                            \
-        memcpy(jwt_ossl_ia32cap_P, sv, sizeof sv);                                                                     \
+        memcpy(cc_ossl_ia32cap_P, sv, sizeof sv);                                                                      \
     }
 OSSL_PATH(hmac_ossl_shaext, ~0u, ~0u, 1u << 29)
 OSSL_PATH(hmac_ossl_avx2, ~0u, ~0u, 1u << 8 | 1u << 5 | 1u << 3)
@@ -914,9 +914,9 @@ int main(int argc, char **argv) {
     printf("\n");
 #if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
     printf("  OpenSSL sha256 paths this CPU can run: shaext %d, avx2+bmi2 %d, avx %d, ssse3 %d, x86-64 1\n",
-           !!(jwt_ossl_ia32cap_P[2] & 1u << 29), (jwt_ossl_ia32cap_P[2] & 0x128) == 0x128,
-           (jwt_ossl_ia32cap_P[0] >> 30 & 1) && (jwt_ossl_ia32cap_P[1] & (1u << 28 | 1u << 9)) == (1u << 28 | 1u << 9),
-           !!(jwt_ossl_ia32cap_P[1] & 1u << 9));
+           !!(cc_ossl_ia32cap_P[2] & 1u << 29), (cc_ossl_ia32cap_P[2] & 0x128) == 0x128,
+           (cc_ossl_ia32cap_P[0] >> 30 & 1) && (cc_ossl_ia32cap_P[1] & (1u << 28 | 1u << 9)) == (1u << 28 | 1u << 9),
+           !!(cc_ossl_ia32cap_P[1] & 1u << 9));
 #endif
     test_ternlog_immediates();
     test_b64();

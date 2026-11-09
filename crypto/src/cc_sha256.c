@@ -215,17 +215,17 @@ static const cc_hmac_key_t sha_iv_key = {
 /* ---- single-stream x86-64: OpenSSL's sha256_block_data_order, extracted (crypto/src/sha256_x86_64_ossl.S) ----
  * Batch 1 and the lanes a vector group leaves over run one message at a time, where OpenSSL's hand-scheduled
  * AVX2+BMI2 code (2 blocks interleaved, rorx) beats the compiled scalar template: 763 vs 1,015 ns per HMAC on a
- * Xeon Platinum 8260.  It dispatches on jwt_ossl_ia32cap_P, laid out like OpenSSL's OPENSSL_ia32cap_P for the bits
+ * Xeon Platinum 8260.  It dispatches on cc_ossl_ia32cap_P, laid out like OpenSSL's OPENSSL_ia32cap_P for the bits
  * that code reads: word 0 bit 30 "Intel CPU", word 1 = CPUID.1:ECX (SSSE3, AVX), word 2 = CPUID.7.0:EBX (BMI1,
  * AVX2, BMI2, SHA).  AVX and AVX2 are cleared unless the OS saves ymm state (XCR0). */
 #include <cpuid.h>
-void jwt_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
+void cc_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
 #endif
 #if (defined(CC_OSSL_SHA256) || defined(CC_OSSL_MONT)) && defined(__x86_64__) && defined(__ELF__)
 /* the capability word OpenSSL's extracted asm dispatches on (SHA-256 above; bn_mul_mont reads word 2's BMI2 + ADX) */
 #include <cpuid.h>
-__attribute__((visibility("hidden"))) unsigned int jwt_ossl_ia32cap_P[4];
-__attribute__((constructor)) static void jwt_ossl_cap_init(void) {
+__attribute__((visibility("hidden"))) unsigned int cc_ossl_ia32cap_P[4];
+__attribute__((constructor)) static void cc_ossl_cap_init(void) {
     unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0;
     if (__get_cpuid(0, &a, &b, &c, &d) && b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e) w0 |= 1u << 30;
     if (__get_cpuid(1, &a, &b, &c, &d)) w1 = c;
@@ -237,7 +237,7 @@ __attribute__((constructor)) static void jwt_ossl_cap_init(void) {
         ymm = (lo & 6) == 6;
     }
     if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5);
-    jwt_ossl_ia32cap_P[0] = w0, jwt_ossl_ia32cap_P[1] = w1, jwt_ossl_ia32cap_P[2] = w2;
+    cc_ossl_ia32cap_P[0] = w0, cc_ossl_ia32cap_P[1] = w1, cc_ossl_ia32cap_P[2] = w2;
 }
 #endif
 #if defined(CC_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
@@ -245,18 +245,18 @@ static void hmac1_scalar(const cc_hmac_key_t *k, const hplan_t *p, uint32_t mac[
     uint32_t st[8];
     uint8_t ob[64] = { 0 };
     memcpy(st, k->ih, 32);
-    if (p->nf) jwt_ossl_sha256_block(st, p->m, (size_t)p->nf);
-    jwt_ossl_sha256_block(st, p->tail, (size_t)(p->nb - p->nf));
+    if (p->nf) cc_ossl_sha256_block(st, p->m, (size_t)p->nf);
+    cc_ossl_sha256_block(st, p->tail, (size_t)(p->nb - p->nf));
     for (int i = 0; i < 8; i++)
         ob[4 * i] = st[i] >> 24, ob[4 * i + 1] = st[i] >> 16, ob[4 * i + 2] = st[i] >> 8, ob[4 * i + 3] = st[i];
     ob[32] = 0x80, ob[62] = ((64 + 32) * 8) >> 8, ob[63] = (uint8_t)((64 + 32) * 8);
     memcpy(mac, k->oh, 32);
-    jwt_ossl_sha256_block(mac, ob, 1);
+    cc_ossl_sha256_block(mac, ob, 1);
 }
 static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
     memcpy(dig, sha_iv_key.ih, 32);
-    if (p->nf) jwt_ossl_sha256_block(dig, p->m, (size_t)p->nf);
-    jwt_ossl_sha256_block(dig, p->tail, (size_t)(p->nb - p->nf));
+    if (p->nf) cc_ossl_sha256_block(dig, p->m, (size_t)p->nf);
+    cc_ossl_sha256_block(dig, p->tail, (size_t)(p->nb - p->nf));
 }
 /* every message one at a time through the extracted block function (tests, benchmarks) */
 void cc_hmac_sha256_ossl(const cc_hmac_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
@@ -584,8 +584,8 @@ void cc_hmac_sha256_zmm(const cc_hmac_key_t *k, int n, const uint8_t *const *msg
  * ipsec-mb's sha256_x16_avx512 (BSD-3-Clause): the schedule in zmm16-31, the next block's rows loaded during rounds
  * 48-63.  st[j] holds state word j of the 16 lanes; blk is nb * 16 block pointers, block-major; _rows takes one block
  * already transposed (w[t] = word t of every lane). */
-void jwt_sha256_x16(uint32_t st[8][16], const uint8_t *const *blk, size_t nb);
-void jwt_sha256_x16_rows(uint32_t st[8][16], const uint32_t w[16][16]);
+void cc_sha256_x16(uint32_t st[8][16], const uint8_t *const *blk, size_t nb);
+void cc_sha256_x16_rows(uint32_t st[8][16], const uint32_t w[16][16]);
 static void lanes_x16(const cc_hmac_key_t *k, int nl, const hplan_t *const *pl, uint32_t (*mac)[8]) {
     enum { CB = 16 }; /* blocks per kernel call */
     uint32_t st[8][16] __attribute__((aligned(64))), w[16][16] __attribute__((aligned(64)));
@@ -602,7 +602,7 @@ static void lanes_x16(const cc_hmac_key_t *k, int nl, const hplan_t *const *pl, 
             int c = maxnb - b0 < CB ? maxnb - b0 : CB;
             for (int b = 0; b < c; b++)
                 for (int l = 0; l < 16; l++) blk[16 * b + l] = l < nl ? hplan_block(pl[l], b0 + b) : zero_block;
-            jwt_sha256_x16(st, blk, (size_t)c);
+            cc_sha256_x16(st, blk, (size_t)c);
         }
     } else { /* block by block; lanes that ran out keep their state */
         for (int b = 0; b < maxnb; b++) {
@@ -614,7 +614,7 @@ static void lanes_x16(const cc_hmac_key_t *k, int nl, const hplan_t *const *pl, 
                 blk[l] = on ? hplan_block(pl[l], b) : zero_block;
             }
             for (int i = 0; i < 8; i++) old[i] = _mm512_load_si512(st[i]);
-            jwt_sha256_x16(st, blk, 1);
+            cc_sha256_x16(st, blk, 1);
             for (int i = 0; i < 8; i++)
                 _mm512_store_si512(st[i], _mm512_mask_blend_epi32(live, old[i], _mm512_load_si512(st[i])));
         }
@@ -625,7 +625,7 @@ static void lanes_x16(const cc_hmac_key_t *k, int nl, const hplan_t *const *pl, 
     for (int i = 9; i < 15; i++) _mm512_store_si512(w[i], _mm512_setzero_si512());
     _mm512_store_si512(w[15], _mm512_set1_epi32((64 + 32) * 8));
     for (int i = 0; i < 8; i++) _mm512_store_si512(st[i], _mm512_set1_epi32((int)k->oh[i]));
-    jwt_sha256_x16_rows(st, (const uint32_t(*)[16])w);
+    cc_sha256_x16_rows(st, (const uint32_t(*)[16])w);
     for (int l = 0; l < nl; l++)
         for (int j = 0; j < 8; j++) mac[l][j] = st[j][l];
 }
@@ -877,11 +877,11 @@ void cc_hmac_sha256_shani_4(const cc_hmac_key_t *k, int n, const uint8_t *const 
 
 #if defined(CC_SHANI_MB) && defined(__ELF__)
 /* ---- SHA-NI multi-stream assembly: generated 3/4-stream kernels (crypto/src/sha256_shani_mb.S, scripts/gen-shani-mb.py)
- * jwt_shani_mbS keeps all 2S state registers resident and the older message groups in a stack ring, so nothing on a
+ * cc_shani_mbS keeps all 2S state registers resident and the older message groups in a stack ring, so nothing on a
  * stream's dependency chain goes through memory (the compiled ni_compress spills the state at S = 4: ~1,070 stack
  * accesses per 960 sha256rnds2).  st is ABEF / CDGH per stream; blk is nb * S block pointers, block-major. */
-void jwt_shani_mb3(__m128i *st, const uint8_t *const *blk, size_t nb);
-void jwt_shani_mb4(__m128i *st, const uint8_t *const *blk, size_t nb);
+void cc_shani_mb3(__m128i *st, const uint8_t *const *blk, size_t nb);
+void cc_shani_mb4(__m128i *st, const uint8_t *const *blk, size_t nb);
 
 /* the outer block of HMAC: the inner digest (big-endian), 0x80, zeros, the bit length 768 */
 CC_INLINE void hmac_outer_block(const uint32_t d[8], uint8_t ob[64]) {
@@ -892,10 +892,10 @@ CC_INLINE void hmac_outer_block(const uint32_t d[8], uint8_t ob[64]) {
     _mm_storeu_si128((__m128i *)(ob + 48), _mm_set_epi32(0x00030000, 0, 0, 0)); /* ob[62] = 0x03: 768 bits */
 }
 CC_INLINE void mb_blocks(int S, __m128i *st, const uint8_t *const *blk, size_t nb) {
-    if (S == 4) jwt_shani_mb4(st, blk, nb);
-    else jwt_shani_mb3(st, blk, nb);
+    if (S == 4) cc_shani_mb4(st, blk, nb);
+    else cc_shani_mb3(st, blk, nb);
 }
-/* S = 3 or 4 plans with identical nb, through jwt_shani_mbS */
+/* S = 3 or 4 plans with identical nb, through cc_shani_mbS */
 CC_INLINE void mb_hmac(int S, const cc_hmac_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
     enum { CB = 16 }; /* blocks per kernel call: the pointer array stays small for long messages */
     const uint8_t *blk[CB * 4];

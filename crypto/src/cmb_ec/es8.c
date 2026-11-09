@@ -15,7 +15,7 @@
  * is a lane still at infinity.  Honest tokens never get there; crafted ones only cost themselves a scalar verify.
  *
  * Build: -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq; the Makefile then makes every symbol
- * but jwt_es8_* local, so crypto_mb's own names can't clash with a crypto_mb linked next to it. */
+ * but cc_es8_* local, so crypto_mb's own names can't clash with a crypto_mb linked next to it. */
 #include <stdint.h>
 #include <string.h>
 
@@ -164,8 +164,8 @@ static void plain(uint64_t o[8][4], const U64 a[5]) {
 /* Lane l verifies (d1[l], d2[l], r[l]): R = sum of the comb entries, accept iff X == r Z^2 (mod p).  *good gets the
  * accepted lanes; *redo the lanes the caller must redo with the scalar code (an exceptional addition, or R at
  * infinity).  The r + n candidate (only when r + n < p) is the caller's too. */
-void jwt_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8],
-                    const int16_t *const d2[8], const uint64_t r[8][4], unsigned *good, unsigned *redo) {
+void cc_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8],
+                   const int16_t *const d2[8], const uint64_t r[8][4], unsigned *good, unsigned *redo) {
     acc8_t a;
     comb8(&a, tg, tq, nw, h, d1, d2);
     __ALIGN64 U64 z2[5], rm[5], t[5], x[5], z[5];
@@ -183,8 +183,8 @@ void jwt_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t
 
 /* tests (tests/test_pk.c): the same additions, returning the accumulators as plain integers < p, and the field
  * operations one by one on plain integers (a, b < 2^256 here, in [0, 2p) where the operation requires it) */
-void jwt_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8], const int16_t *const d2[8],
-                  uint64_t x[8][4], uint64_t y[8][4], uint64_t z[8][4], unsigned *inf) {
+void cc_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8], const int16_t *const d2[8],
+                 uint64_t x[8][4], uint64_t y[8][4], uint64_t z[8][4], unsigned *inf) {
     acc8_t a;
     comb8(&a, tg, tq, nw, h, d1, d2);
     plain(x, a.x), plain(y, a.y), plain(z, a.z);
@@ -193,8 +193,8 @@ void jwt_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *
 /* op: 0 a b R^-1, 1 a^2 R^-1, 2 a + b, 3 a - b, 4 -a (all mod p, in [0, 2p)), 5 to260 (a = v 2^256 < p: v 2^260),
  * 6 reduce ([0, 2p) -> [0, p)); results as raw integers (not reduced).  Returns a lane mask of results that are
  * out of range (>= 2p, or a digit >= 2^52). */
-unsigned jwt_es8_fe(int op, uint64_t o[8][4], uint64_t ohi[8], const uint64_t a[8][4], const uint64_t b[8][4],
-                    const uint64_t ahi[8], const uint64_t bhi[8]) {
+unsigned cc_es8_fe(int op, uint64_t o[8][4], uint64_t ohi[8], const uint64_t a[8][4], const uint64_t b[8][4],
+                   const uint64_t ahi[8], const uint64_t bhi[8]) {
     __ALIGN64 U64 va[5], vb[5], vr[5];
     to52(va, a), to52(vb, b);
     /* bit 256 (values in [2^256, 2p)) goes in digit 4 */

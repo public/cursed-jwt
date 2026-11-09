@@ -9,18 +9,18 @@
 
 
 
-.globl	jwt_ossl_bn_mul_mont_gather5
-.hidden	jwt_ossl_bn_mul_mont_gather5
-.type	jwt_ossl_bn_mul_mont_gather5,@function
+.globl	cc_ossl_bn_mul_mont_gather5
+.hidden	cc_ossl_bn_mul_mont_gather5
+.type	cc_ossl_bn_mul_mont_gather5,@function
 .align	64
-jwt_ossl_bn_mul_mont_gather5:
+cc_ossl_bn_mul_mont_gather5:
 .cfi_startproc	
 	movl	%r9d,%r9d
 	movq	%rsp,%rax
 .cfi_def_cfa_register	%rax
 	testl	$7,%r9d
 	jnz	.Lmul_enter
-	movl	jwt_ossl_ia32cap_P+8(%rip),%r11d
+	movl	cc_ossl_ia32cap_P+8(%rip),%r11d
 	jmp	.Lmul4x_enter
 
 .align	16
@@ -448,7 +448,7 @@ jwt_ossl_bn_mul_mont_gather5:
 .Lmul_epilogue:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_mul_mont_gather5,.-jwt_ossl_bn_mul_mont_gather5
+.size	cc_ossl_bn_mul_mont_gather5,.-cc_ossl_bn_mul_mont_gather5
 .type	bn_mul4x_mont_gather5,@function
 .align	32
 bn_mul4x_mont_gather5:
@@ -1082,15 +1082,15 @@ mul4x_internal:
 	jmp	.Lsqr4x_sub_entry
 .cfi_endproc	
 .size	mul4x_internal,.-mul4x_internal
-.globl	jwt_ossl_bn_power5
-.hidden	jwt_ossl_bn_power5
-.type	jwt_ossl_bn_power5,@function
+.globl	cc_ossl_bn_power5
+.hidden	cc_ossl_bn_power5
+.type	cc_ossl_bn_power5,@function
 .align	32
-jwt_ossl_bn_power5:
+cc_ossl_bn_power5:
 .cfi_startproc	
 	movq	%rsp,%rax
 .cfi_def_cfa_register	%rax
-	movl	jwt_ossl_ia32cap_P+8(%rip),%r11d
+	movl	cc_ossl_ia32cap_P+8(%rip),%r11d
 	andl	$0x80108,%r11d
 	cmpl	$0x80108,%r11d
 	je	.Lpowerx5_enter
@@ -1216,14 +1216,14 @@ jwt_ossl_bn_power5:
 .Lpower5_epilogue:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_power5,.-jwt_ossl_bn_power5
+.size	cc_ossl_bn_power5,.-cc_ossl_bn_power5
 
-.globl	jwt_ossl_bn_sqr8x_internal
-.hidden	jwt_ossl_bn_sqr8x_internal
-.hidden	jwt_ossl_bn_sqr8x_internal
-.type	jwt_ossl_bn_sqr8x_internal,@function
+.globl	cc_ossl_bn_sqr8x_internal
+.hidden	cc_ossl_bn_sqr8x_internal
+.hidden	cc_ossl_bn_sqr8x_internal
+.type	cc_ossl_bn_sqr8x_internal,@function
 .align	32
-jwt_ossl_bn_sqr8x_internal:
+cc_ossl_bn_sqr8x_internal:
 __bn_sqr8x_internal:
 .cfi_startproc	
 
@@ -2001,7 +2001,7 @@ __bn_sqr8x_reduction:
 	jb	.L8x_reduction_loop
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_sqr8x_internal,.-jwt_ossl_bn_sqr8x_internal
+.size	cc_ossl_bn_sqr8x_internal,.-cc_ossl_bn_sqr8x_internal
 .type	__bn_post4x_internal,@function
 .align	32
 __bn_post4x_internal:
@@ -2728,12 +2728,12 @@ bn_powerx5:
 .cfi_endproc	
 .size	bn_powerx5,.-bn_powerx5
 
-.globl	jwt_ossl_bn_sqrx8x_internal
-.hidden	jwt_ossl_bn_sqrx8x_internal
-.hidden	jwt_ossl_bn_sqrx8x_internal
-.type	jwt_ossl_bn_sqrx8x_internal,@function
+.globl	cc_ossl_bn_sqrx8x_internal
+.hidden	cc_ossl_bn_sqrx8x_internal
+.hidden	cc_ossl_bn_sqrx8x_internal
+.type	cc_ossl_bn_sqrx8x_internal,@function
 .align	32
-jwt_ossl_bn_sqrx8x_internal:
+cc_ossl_bn_sqrx8x_internal:
 __bn_sqrx8x_internal:
 .cfi_startproc	
 
@@ -3348,7 +3348,7 @@ __bn_sqrx8x_reduction:
 	jb	.Lsqrx8x_reduction_loop
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_sqrx8x_internal,.-jwt_ossl_bn_sqrx8x_internal
+.size	cc_ossl_bn_sqrx8x_internal,.-cc_ossl_bn_sqrx8x_internal
 .align	32
 __bn_postx4x_internal:
 .cfi_startproc	
@@ -3401,11 +3401,11 @@ __bn_postx4x_internal:
 	.byte	0xf3,0xc3
 .cfi_endproc	
 .size	__bn_postx4x_internal,.-__bn_postx4x_internal
-.globl	jwt_ossl_bn_get_bits5
-.hidden	jwt_ossl_bn_get_bits5
-.type	jwt_ossl_bn_get_bits5,@function
+.globl	cc_ossl_bn_get_bits5
+.hidden	cc_ossl_bn_get_bits5
+.type	cc_ossl_bn_get_bits5,@function
 .align	16
-jwt_ossl_bn_get_bits5:
+cc_ossl_bn_get_bits5:
 .cfi_startproc	
 	leaq	0(%rdi),%r10
 	leaq	1(%rdi),%r11
@@ -3421,13 +3421,13 @@ jwt_ossl_bn_get_bits5:
 	andl	$31,%eax
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_get_bits5,.-jwt_ossl_bn_get_bits5
+.size	cc_ossl_bn_get_bits5,.-cc_ossl_bn_get_bits5
 
-.globl	jwt_ossl_bn_scatter5
-.hidden	jwt_ossl_bn_scatter5
-.type	jwt_ossl_bn_scatter5,@function
+.globl	cc_ossl_bn_scatter5
+.hidden	cc_ossl_bn_scatter5
+.type	cc_ossl_bn_scatter5,@function
 .align	16
-jwt_ossl_bn_scatter5:
+cc_ossl_bn_scatter5:
 .cfi_startproc	
 	cmpl	$0,%esi
 	jz	.Lscatter_epilogue
@@ -3442,13 +3442,13 @@ jwt_ossl_bn_scatter5:
 .Lscatter_epilogue:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_scatter5,.-jwt_ossl_bn_scatter5
+.size	cc_ossl_bn_scatter5,.-cc_ossl_bn_scatter5
 
-.globl	jwt_ossl_bn_gather5
-.hidden	jwt_ossl_bn_gather5
-.type	jwt_ossl_bn_gather5,@function
+.globl	cc_ossl_bn_gather5
+.hidden	cc_ossl_bn_gather5
+.type	cc_ossl_bn_gather5,@function
 .align	32
-jwt_ossl_bn_gather5:
+cc_ossl_bn_gather5:
 .LSEH_begin_bn_gather5:
 .cfi_startproc	
 
@@ -3609,7 +3609,7 @@ jwt_ossl_bn_gather5:
 	.byte	0xf3,0xc3
 .LSEH_end_bn_gather5:
 .cfi_endproc	
-.size	jwt_ossl_bn_gather5,.-jwt_ossl_bn_gather5
+.size	cc_ossl_bn_gather5,.-cc_ossl_bn_gather5
 .section	.rodata
 .align	64
 .Linc:

@@ -8,13 +8,13 @@
 .text	
 
 
-.globl	jwt_ossl_sha256_block
-.hidden	jwt_ossl_sha256_block
-.type	jwt_ossl_sha256_block,@function
+.globl	cc_ossl_sha256_block
+.hidden	cc_ossl_sha256_block
+.type	cc_ossl_sha256_block,@function
 .align	16
-jwt_ossl_sha256_block:
+cc_ossl_sha256_block:
 .cfi_startproc	
-	leaq	jwt_ossl_ia32cap_P(%rip),%r10
+	leaq	cc_ossl_ia32cap_P(%rip),%r10
 	movq	0(%r10),%r9
 	movl	8(%r10),%r11d
 	testl	$536870912,%r11d
@@ -1734,7 +1734,7 @@ jwt_ossl_sha256_block:
 .Lepilogue:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_sha256_block,.-jwt_ossl_sha256_block
+.size	cc_ossl_sha256_block,.-cc_ossl_sha256_block
 .section	.rodata
 .align	64
 .type	K256,@object
@@ -1780,9 +1780,9 @@ K256:
 .long	0xffffffff,0xffffffff,0x03020100,0x0b0a0908
 .byte	83,72,65,50,53,54,32,98,108,111,99,107,32,116,114,97,110,115,102,111,114,109,32,102,111,114,32,120,56,54,95,54,52,44,32,67,82,89,80,84,79,71,65,77,83,32,98,121,32,60,104,116,116,112,115,58,47,47,103,105,116,104,117,98,46,99,111,109,47,100,111,116,45,97,115,109,62,0
 .previous	
-.type	jwt_ossl_sha256_block_shaext,@function
+.type	cc_ossl_sha256_block_shaext,@function
 .align	64
-jwt_ossl_sha256_block_shaext:
+cc_ossl_sha256_block_shaext:
 _shaext_shortcut:
 .cfi_startproc	
 	leaq	K256+128(%rip),%rcx
@@ -1988,10 +1988,10 @@ _shaext_shortcut:
 	movdqu	%xmm2,16(%rdi)
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_sha256_block_shaext,.-jwt_ossl_sha256_block_shaext
-.type	jwt_ossl_sha256_block_ssse3,@function
+.size	cc_ossl_sha256_block_shaext,.-cc_ossl_sha256_block_shaext
+.type	cc_ossl_sha256_block_ssse3,@function
 .align	64
-jwt_ossl_sha256_block_ssse3:
+cc_ossl_sha256_block_ssse3:
 .cfi_startproc	
 .Lssse3_shortcut:
 	movq	%rsp,%rax
@@ -3101,10 +3101,10 @@ jwt_ossl_sha256_block_ssse3:
 .Lepilogue_ssse3:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_sha256_block_ssse3,.-jwt_ossl_sha256_block_ssse3
-.type	jwt_ossl_sha256_block_avx,@function
+.size	cc_ossl_sha256_block_ssse3,.-cc_ossl_sha256_block_ssse3
+.type	cc_ossl_sha256_block_avx,@function
 .align	64
-jwt_ossl_sha256_block_avx:
+cc_ossl_sha256_block_avx:
 .cfi_startproc	
 .Lavx_shortcut:
 	movq	%rsp,%rax
@@ -4176,10 +4176,10 @@ jwt_ossl_sha256_block_avx:
 .Lepilogue_avx:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_sha256_block_avx,.-jwt_ossl_sha256_block_avx
-.type	jwt_ossl_sha256_block_avx2,@function
+.size	cc_ossl_sha256_block_avx,.-cc_ossl_sha256_block_avx
+.type	cc_ossl_sha256_block_avx2,@function
 .align	64
-jwt_ossl_sha256_block_avx2:
+cc_ossl_sha256_block_avx2:
 .cfi_startproc	
 .Lavx2_shortcut:
 	movq	%rsp,%rax
@@ -5462,7 +5462,7 @@ jwt_ossl_sha256_block_avx2:
 .Lepilogue_avx2:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_sha256_block_avx2,.-jwt_ossl_sha256_block_avx2
+.size	cc_ossl_sha256_block_avx2,.-cc_ossl_sha256_block_avx2
 	.section ".note.gnu.property", "a"
 	.p2align 3
 	.long 1f - 0f

@@ -9,11 +9,11 @@
 
 
 
-.globl	jwt_ossl_bn_mul_mont
-.hidden	jwt_ossl_bn_mul_mont
-.type	jwt_ossl_bn_mul_mont,@function
+.globl	cc_ossl_bn_mul_mont
+.hidden	cc_ossl_bn_mul_mont
+.type	cc_ossl_bn_mul_mont,@function
 .align	16
-jwt_ossl_bn_mul_mont:
+cc_ossl_bn_mul_mont:
 .cfi_startproc	
 	movl	%r9d,%r9d
 	movq	%rsp,%rax
@@ -22,7 +22,7 @@ jwt_ossl_bn_mul_mont:
 	jnz	.Lmul_enter
 	cmpl	$8,%r9d
 	jb	.Lmul_enter
-	movl	jwt_ossl_ia32cap_P+8(%rip),%r11d
+	movl	cc_ossl_ia32cap_P+8(%rip),%r11d
 	cmpq	%rsi,%rdx
 	jne	.Lmul4x_enter
 	testl	$7,%r9d
@@ -262,7 +262,7 @@ jwt_ossl_bn_mul_mont:
 .Lmul_epilogue:
 	.byte	0xf3,0xc3
 .cfi_endproc	
-.size	jwt_ossl_bn_mul_mont,.-jwt_ossl_bn_mul_mont
+.size	cc_ossl_bn_mul_mont,.-cc_ossl_bn_mul_mont
 .type	bn_mul4x_mont,@function
 .align	16
 bn_mul4x_mont:
@@ -781,12 +781,12 @@ bn_sqr8x_mont:
 	pxor	%xmm0,%xmm0
 .byte	102,72,15,110,207
 .byte	102,73,15,110,218
-	movl	jwt_ossl_ia32cap_P+8(%rip),%eax
+	movl	cc_ossl_ia32cap_P+8(%rip),%eax
 	andl	$0x80100,%eax
 	cmpl	$0x80100,%eax
 	jne	.Lsqr8x_nox
 
-	call	jwt_ossl_bn_sqrx8x_internal
+	call	cc_ossl_bn_sqrx8x_internal
 
 
 
@@ -800,7 +800,7 @@ bn_sqr8x_mont:
 
 .align	32
 .Lsqr8x_nox:
-	call	jwt_ossl_bn_sqr8x_internal
+	call	cc_ossl_bn_sqr8x_internal
 
 
 

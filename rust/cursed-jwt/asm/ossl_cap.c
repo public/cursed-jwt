@@ -1,7 +1,7 @@
 /* ossl_cap.c: the capability word OpenSSL's extracted SHA-256 block function (sha256_x86_64_ossl.S, assembled with
  * its symbols renamed to cjwt_rs_*) dispatches on, laid out like OPENSSL_ia32cap_P for the bits it reads: word 0 bit
  * 30 "Intel CPU", word 1 = CPUID.1:ECX (SSSE3, AVX), word 2 = CPUID.7.0:EBX (BMI1, AVX2, BMI2, SHA).  AVX and AVX2
- * are cleared unless the OS saves ymm state (XCR0).  The same code as jwt_ossl_cap_init in src/jwt.c.  Hidden, so the
+ * are cleared unless the OS saves ymm state (XCR0).  The same code as cc_ossl_cap_init in src/jwt.c.  Hidden, so the
  * assembly's PC-relative reference also links into shared objects. */
 #include <cpuid.h>
 
