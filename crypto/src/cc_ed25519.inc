@@ -33,8 +33,8 @@ typedef struct {
  * accumulated point goes back to fiat's limbs once, for the batched inversion and the encoding. */
 #define CC_ED_S2N 1
 typedef uint64_t ed_pp4[12];
-void edwards25519_pepadd(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
-void edwards25519_pepadd_alt(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
+void cc_s2n_edwards25519_pepadd(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
+void cc_s2n_edwards25519_pepadd_alt(uint64_t p3[16], const uint64_t p1[16], const uint64_t p2[12]);
 #endif
 typedef struct ed_key {
 #ifdef CC_ED_S2N
@@ -423,7 +423,7 @@ static void ed25519_raw(const ed_key_t *k, int n, const uint8_t *const *msg, con
     enum { CH = 32 };
 #ifdef CC_ED_S2N
     void (*pepadd)(uint64_t *, const uint64_t *, const uint64_t *) =
-        s2n_ok() ? edwards25519_pepadd : edwards25519_pepadd_alt;
+        s2n_ok() ? cc_s2n_edwards25519_pepadd : cc_s2n_edwards25519_pepadd_alt;
     const int r43 = ed_r43_ok();
 #endif
     for (int base = 0; base < n; base += CH) {

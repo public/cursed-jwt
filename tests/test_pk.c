@@ -159,17 +159,17 @@ static void test_arith(void) {
 #ifdef JWT_S2N
         if (s2n_ok()) {
             uint64_t z[4];
-            fiat_p256_mul(y, a, b), bignum_montmul_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
-            fiat_p256_square(y, a), bignum_montsqr_p256(z, a), bad += memcmp(z, y, 32) != 0;
-            fiat_p256_add(y, a, b), bignum_add_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
-            fiat_p256_sub(y, a, b), bignum_sub_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_mul(y, a, b), cc_s2n_bignum_montmul_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_square(y, a), cc_s2n_bignum_montsqr_p256(z, a), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_add(y, a, b), cc_s2n_bignum_add_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_sub(y, a, b), cc_s2n_bignum_sub_p256(z, a, b), bad += memcmp(z, y, 32) != 0;
         }
 #endif
 #ifdef CC_S2N_ALT
         { /* the ADX-free kernels run on any x86-64 */
             uint64_t z[4];
-            fiat_p256_mul(y, a, b), bignum_montmul_p256_alt(z, a, b), bad += memcmp(z, y, 32) != 0;
-            fiat_p256_square(y, a), bignum_montsqr_p256_alt(z, a), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_mul(y, a, b), cc_s2n_bignum_montmul_p256_alt(z, a, b), bad += memcmp(z, y, 32) != 0;
+            fiat_p256_square(y, a), cc_s2n_bignum_montsqr_p256_alt(z, a), bad += memcmp(z, y, 32) != 0;
         }
 #endif
         rand_below(a, P256_N);

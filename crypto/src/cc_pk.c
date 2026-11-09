@@ -212,10 +212,10 @@ CC_INLINE void fe_mul_c(fe_t o, const fe_t a, const fe_t b) {
  * multiply / square and modular add / sub for p_256.  Same domain and contracts as the C versions above, which
  * tests/test_pk.c still cross-checks against fiat-crypto alongside these.  On x86-64 they need BMI2 + ADX, so they
  * are used only when the CPU has them (s2n_ok); everything falls back to the C. */
-void bignum_montmul_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
-void bignum_montsqr_p256(uint64_t z[4], const uint64_t x[4]);
-void bignum_add_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
-void bignum_sub_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void cc_s2n_bignum_montmul_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void cc_s2n_bignum_montsqr_p256(uint64_t z[4], const uint64_t x[4]);
+void cc_s2n_bignum_add_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void cc_s2n_bignum_sub_p256(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
 static int s2n_ok(void) {
 #if defined(__x86_64__)
     return (cc_cpu() & CC_CPU_BMI2_ADX) != 0;
@@ -228,8 +228,8 @@ static int s2n_ok(void) {
  * s2n-bignum's _alt multiply / square, which use plain mul / adc and are verified like the others; its add / sub
  * need neither extension */
 #define CC_S2N_ALT 1
-void bignum_montmul_p256_alt(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
-void bignum_montsqr_p256_alt(uint64_t z[4], const uint64_t x[4]);
+void cc_s2n_bignum_montmul_p256_alt(uint64_t z[4], const uint64_t x[4], const uint64_t y[4]);
+void cc_s2n_bignum_montsqr_p256_alt(uint64_t z[4], const uint64_t x[4]);
 #endif
 #endif
 /* the C field operations, for everything outside the per-token point arithmetic */
@@ -260,18 +260,18 @@ static void fe_inv(fe_t o, const fe_t a) {
 #undef fe_sqr
 #undef fe_add
 #undef fe_sub
-#define fe_mul(o, a, b) bignum_montmul_p256(o, a, b)
-#define fe_sqr(o, a)    bignum_montsqr_p256(o, a)
-#define fe_add(o, a, b) bignum_add_p256(o, a, b)
-#define fe_sub(o, a, b) bignum_sub_p256(o, a, b)
+#define fe_mul(o, a, b) cc_s2n_bignum_montmul_p256(o, a, b)
+#define fe_sqr(o, a)    cc_s2n_bignum_montsqr_p256(o, a)
+#define fe_add(o, a, b) cc_s2n_bignum_add_p256(o, a, b)
+#define fe_sub(o, a, b) cc_s2n_bignum_sub_p256(o, a, b)
 #define EC(name)        name##_s2n
 #include "cc_pk_ec.inc"
 #undef EC
 #ifdef CC_S2N_ALT
 #undef fe_mul
 #undef fe_sqr
-#define fe_mul(o, a, b) bignum_montmul_p256_alt(o, a, b)
-#define fe_sqr(o, a)    bignum_montsqr_p256_alt(o, a)
+#define fe_mul(o, a, b) cc_s2n_bignum_montmul_p256_alt(o, a, b)
+#define fe_sqr(o, a)    cc_s2n_bignum_montsqr_p256_alt(o, a)
 #define EC(name)        name##_s2na
 #include "cc_pk_ec.inc"
 #undef EC
@@ -654,19 +654,19 @@ static void mont_sqr_any(uint64_t *r, const uint64_t *a, const rsa_key_t *k) { m
 /* -DJWT_S2N, 2048-bit moduli: s2n-bignum's Karatsuba product / square (bignum_kmul_32_64, bignum_ksqr_32_64) and
  * its 8-limb-blocked Montgomery reduction (bignum_emontredc_8n), as AWS-LC uses them for RSA-2048.  emontredc
  * leaves z + q n = 2^2048 (c 2^2048 + hi): hi plus carry c is the unreduced result, < 2n. */
-void bignum_kmul_32_64(uint64_t z[64], const uint64_t x[32], const uint64_t y[32], uint64_t t[96]);
-void bignum_ksqr_32_64(uint64_t z[64], const uint64_t x[32], uint64_t t[72]);
-uint64_t bignum_emontredc_8n(uint64_t k, uint64_t *z, const uint64_t *m, uint64_t w);
+void cc_s2n_bignum_kmul_32_64(uint64_t z[64], const uint64_t x[32], const uint64_t y[32], uint64_t t[96]);
+void cc_s2n_bignum_ksqr_32_64(uint64_t z[64], const uint64_t x[32], uint64_t t[72]);
+uint64_t cc_s2n_bignum_emontredc_8n(uint64_t k, uint64_t *z, const uint64_t *m, uint64_t w);
 static void mont_mul_s2n(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
     uint64_t z[64], t[96];
-    bignum_kmul_32_64(z, a, b, t);
-    uint64_t c = bignum_emontredc_8n(32, z, k->n, k->n0);
+    cc_s2n_bignum_kmul_32_64(z, a, b, t);
+    uint64_t c = cc_s2n_bignum_emontredc_8n(32, z, k->n, k->n0);
     mont_fin(r, z + 32, c, k->n, 32);
 }
 static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
     uint64_t z[64], t[72];
-    bignum_ksqr_32_64(z, a, t);
-    uint64_t c = bignum_emontredc_8n(32, z, k->n, k->n0);
+    cc_s2n_bignum_ksqr_32_64(z, a, t);
+    uint64_t c = cc_s2n_bignum_emontredc_8n(32, z, k->n, k->n0);
     mont_fin(r, z + 32, c, k->n, 32);
 }
 #endif
