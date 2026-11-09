@@ -18,7 +18,7 @@ IMG=cursed-jwt-test:$ARCH
 docker build -q --platform linux/$ARCH -t $IMG ci >/dev/null
 docker run --rm --platform linux/$ARCH --cpuset-cpus "${DOCKER_CPUS:-8-13}" -v "$PWD":/src:ro -v "$PWD/$OUT":/out $IMG sh -c "
   set -e; cd /src
-  case \$(uname -m) in x86_64) A='-march=haswell -DJWT_OSSL_SHA256'; S=src/sha256_x86_64_ossl.S;; *) A='-march=armv8.2-a+crypto+sha3'; S=;; esac
+  case \$(uname -m) in x86_64) A='-march=haswell -DJWT_OSSL_SHA256'; S=crypto/src/sha256_x86_64_ossl.S;; *) A='-march=armv8.2-a+crypto+sha3'; S=;; esac
   F=\"-O1 -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -w -Iinclude -Isrc -Itests \$A\"
   PK=''
   clang \$F fuzz/fuzz_verify.c \$S -lcrypto -o /tmp/verify

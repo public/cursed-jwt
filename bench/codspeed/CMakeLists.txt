@@ -28,8 +28,8 @@ add_library(cursedjwt STATIC ${ROOT}/src/jwt.c)
 target_include_directories(cursedjwt PUBLIC ${ROOT}/include PRIVATE ${ROOT}/src)
 target_compile_options(cursedjwt PRIVATE -O3 -g)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_sources(cursedjwt PRIVATE ${ROOT}/src/sha256_x86_64_ossl.S ${ROOT}/src/sha256_shani_mb.S
-                                   ${ROOT}/src/sha256_x16_avx512.S)
+  target_sources(cursedjwt PRIVATE ${ROOT}/crypto/src/sha256_x86_64_ossl.S ${ROOT}/crypto/src/sha256_shani_mb.S
+                                   ${ROOT}/crypto/src/sha256_x16_avx512.S)
   target_compile_definitions(cursedjwt PUBLIC JWT_OSSL_SHA256 JWT_SHANI_MB)
 endif()
 

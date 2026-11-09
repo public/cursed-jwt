@@ -40,7 +40,7 @@ fi
 git() { command git -c safe.directory='*' "$@"; }
 pick() { # tracked first-party files matching the globs; with --staged, only staged ones
   local all
-  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party|src/fiat)/' || true)
+  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party|crypto/src/fiat)/' || true)
   if [ "${LINT_STAGED:-$staged}" = 1 ]; then
     [ -n "${LINT_FILES:-}" ] || return 0
     grep -xF -f <(tr ' ' '\n' <<<"$LINT_FILES") <<<"$all" || true

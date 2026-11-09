@@ -24,7 +24,8 @@ ifeq ($(ARCH),x86_64)
 CJFLAGS += -DJWT_OSSL_SHA256
 CJOBJS += $(ROOT)/$(RB)/sha256_x86_64_ossl.o
 endif
-CJSRC := cjwt_envoy.c cjwt_envoy.h $(wildcard $(ROOT)/src/*.c $(ROOT)/src/*.inc $(ROOT)/include/*.h)
+CJSRC := cjwt_envoy.c cjwt_envoy.h $(wildcard $(ROOT)/src/*.c $(ROOT)/crypto/src/*.c $(ROOT)/crypto/src/*.h $(ROOT)/crypto/src/*.inc \
+  $(ROOT)/include/*.h)
 ABI := third_party/envoy/source/extensions/dynamic_modules/abi/abi.h
 ENVOY_SRC := $(addprefix third_party/envoy/source/common/jwt/,check_audience.cc jwks.cc jwt.cc status.cc struct_utils.cc verify.cc)
 ENVOY_INC := -I. -Ibench/shim -Ithird_party/envoy -I$(P)/include -I$(P)/bssl/include

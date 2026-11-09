@@ -1,5 +1,5 @@
 //! On x86-64 Linux with the `asm` feature: assemble OpenSSL's extracted SHA-256 block function (the C library's
-//! `src/sha256_x86_64_ossl.S`, symbols renamed so both libraries can link into one program) for single messages,
+//! `crypto/src/sha256_x86_64_ossl.S`, symbols renamed so both libraries can link into one program) for single messages,
 //! where it beats compiled code by ~30% on a Cascade Lake.  Everything else is Rust.
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(cjwt_ossl)");

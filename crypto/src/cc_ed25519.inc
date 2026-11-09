@@ -1,4 +1,4 @@
-/* jwt_ed25519.inc — EdDSA (Ed25519, RFC 8032; JWS "alg":"EdDSA", RFC 8037) verification, #included by jwt_pk.inc.
+/* cc_ed25519.inc — EdDSA (Ed25519, RFC 8032; JWS "alg":"EdDSA", RFC 8037) verification, #included by cc_pk.c.
  *
  * The ES256 design again: a verifier keeps its public keys, so key setup builds signed-digit comb tables of
  * k * 2^(W j) for the base point B and for -A, and a verify is
@@ -391,7 +391,7 @@ static void ed_neg4(uint64_t o[12], const uint64_t q[12]) {
         o[8 + j] = z ? (uint64_t)d : 0, bw = (uint64_t)(d >> 64) & 1;
     }
 }
-#include "jwt_ed25519_r43x6.inc"
+#include "cc_ed25519_r43x6.inc"
 #endif
 
 /* ---- key setup and batch verification ---- */

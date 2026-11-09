@@ -1,4 +1,4 @@
-/* jwt_ed25519_r43x6.inc — AVX-512 IFMA field arithmetic for the EdDSA comb additions, #included by jwt_ed25519.inc
+/* cc_ed25519_r43x6.inc — AVX-512 IFMA field arithmetic for the EdDSA comb additions, #included by cc_ed25519.inc
  * on x86-64 with -DJWT_S2N.
  *
  * Everything between the "Firedancer" markers is copied from Firedancer (https://github.com/firedancer-io/firedancer,
@@ -434,7 +434,7 @@ fd_r43x6_quad_mul_fast( fd_r43x6_t * _z03, fd_r43x6_t * _z14, fd_r43x6_t * _z25,
 /* With AVX-512 IFMA on a CPU where zmm costs no clock speed (FAST_ZMM: AMD Zen 4 / 5), the comb additions run on
  * Firedancer's 4-way radix-2^43 field: P's X, Y, Z, T sit in three zmm registers (limbs i and i + 3 of all four
  * coordinates in each), so the 4 multiplications of each step of the mixed addition run as one quad multiply.
- * The comb tables stay in jwt_ed25519.inc's canonical 4 x 64-bit (y - x, y + x, 2dxy) form, shared with the
+ * The comb tables stay in cc_ed25519.inc's canonical 4 x 64-bit (y - x, y + x, 2dxy) form, shared with the
  * s2n-bignum path; each looked-up entry is split into 43-bit limbs in registers (AVX-512F only, no VBMI). */
 static int ed_r43_ok(void) {
     return (jwt_cpu() & (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM)) == (JWT_CPU_IFMA | JWT_CPU_FAST_ZMM);

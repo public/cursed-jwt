@@ -1,11 +1,11 @@
 #!/bin/sh
-# fetch-fiat.sh: re-fetches the vendored src/fiat/ (fiat-crypto's generated P-256 and curve25519 field and scalar
+# fetch-fiat.sh: re-fetches the vendored crypto/src/fiat/ (fiat-crypto's generated P-256 and curve25519 field and scalar
 # arithmetic; formally verified; MIT / Apache-2.0 / BSD-1-Clause, used under MIT) and checks each file against its
 # pinned SHA-256. The files are committed; run this to verify them or to move to a new pin.
 # github.com/mit-plv/fiat-crypto @ 1e721c6
 set -e
 cd "$(dirname "$0")/.."
-D=src/fiat
+D=crypto/src/fiat
 mkdir -p $D
 C=1e721c6f18c43b90922e7bc57fd64848e5cff2be
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }

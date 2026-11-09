@@ -52,7 +52,7 @@ static inline uint32_t tl_emu(uint32_t a, uint32_t b, uint32_t c, int imm) {
         for (int i_ = 0; i_ < 8; i_++) (out)[0][i_] = (s)[i_];                                                         \
     } while (0)
 #define MB_MIN_LANES 1
-#include "jwt_mb.inc"
+#include "../crypto/src/cc_mb.inc"
 
 /* ---- helpers ---- */
 static void ossl_hmac(const uint8_t *m, int n, uint32_t out[8]) {

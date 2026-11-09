@@ -1,4 +1,5 @@
-/* jwt_pk.inc — RS256, ES256 (and, via jwt_ed25519.inc, EdDSA) verification, #included by jwt.c unless -DJWT_NO_PK.
+/* cc_pk.c — RS256, ES256 (and, via cc_ed25519.inc, EdDSA) verification, #included by cursed_crypto.c unless
+ * -DJWT_NO_PK.
  *
  * Neither algorithm batches the way HMAC does: one P-256 or RSA-2048 verify is 10-100x the cost of the whole
  * HS256 pipeline, and SIMD across tokens needs 52-bit multipliers (AVX-512 IFMA) that Cascade Lake lacks.
@@ -83,9 +84,9 @@ struct jwt_pkey {
     rsa_key_t rsa;
     p256_aff_t (*tg)[P256_H], (*tq)[P256_H]; /* ES256: P256_NW rows each, one allocation */
     uint64_t qx[4], qy[4];                   /* ES256: the public point, plain little-endian limbs */
-    struct ed_key *ed;                       /* EdDSA: comb tables for B and -A (jwt_ed25519.inc) */
+    struct ed_key *ed;                       /* EdDSA: comb tables for B and -A (cc_ed25519.inc) */
 #ifdef JWT_ES8
-    int es8; /* ES256: batches go 8 tokens at a time through src/cmb_ec/es8.c (IFMA, and FAST_ZMM: AMD Zen 4 / 5) */
+    int es8; /* ES256: batches go 8 tokens at a time through crypto/src/cmb_ec/es8.c (IFMA, and FAST_ZMM: AMD Zen 4 / 5) */
 #endif
 };
 
@@ -255,7 +256,7 @@ static void fe_inv(fe_t o, const fe_t a) {
 }
 
 #define EC(name) name##_c
-#include "jwt_pk_ec.inc"
+#include "cc_pk_ec.inc"
 #undef EC
 #ifdef JWT_S2N
 #undef fe_mul
@@ -267,7 +268,7 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define fe_add(o, a, b) bignum_add_p256(o, a, b)
 #define fe_sub(o, a, b) bignum_sub_p256(o, a, b)
 #define EC(name)        name##_s2n
-#include "jwt_pk_ec.inc"
+#include "cc_pk_ec.inc"
 #undef EC
 #ifdef JWT_S2N_ALT
 #undef fe_mul
@@ -275,7 +276,7 @@ static void fe_inv(fe_t o, const fe_t a) {
 #define fe_mul(o, a, b) bignum_montmul_p256_alt(o, a, b)
 #define fe_sqr(o, a)    bignum_montsqr_p256_alt(o, a)
 #define EC(name)        name##_s2na
-#include "jwt_pk_ec.inc"
+#include "cc_pk_ec.inc"
 #undef EC
 #endif
 #undef fe_mul
@@ -304,7 +305,7 @@ static void es_points(const jwt_pkey_t *k, int c, int16_t (*d1)[P256_NW], int16_
 
 #ifdef JWT_ES8
 /* -DJWT_ES8: the same additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane P-256 field
- * arithmetic (src/cmb_ec/es8.c, built into build/libcmbec.a).  Each lane gathers its own entries of the tables above.
+ * arithmetic (crypto/src/cmb_ec/es8.c, built into build/libcmbec.a).  Each lane gathers its own entries of the tables above.
  * Lanes es8.c can't finish (an exceptional addition, R at infinity) and the rare r + n < p second candidate are
  * redone here by the scalar code, so the results are the scalar code's. */
 void jwt_es8_points(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8],
@@ -674,7 +675,7 @@ static void mont_sqr_s2n(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
 }
 #endif
 #if defined(JWT_OSSL_MONT) && defined(__x86_64__) && defined(__ELF__)
-/* -DJWT_OSSL_MONT (x86-64 Linux, on by default): OpenSSL's bn_mul_mont, extracted (src/bn_mont*_x86_64_ossl.S): 4-way
+/* -DJWT_OSSL_MONT (x86-64 Linux, on by default): OpenSSL's bn_mul_mont, extracted (crypto/src/bn_mont*_x86_64_ossl.S): 4-way
  * multiply and 8-way squaring, with mulx/adcx/adox paths it takes only when the CPU has BMI2 + ADX.  Called directly,
  * without libcrypto's BN layer.  It is the fastest kernel measured on x86-64 CPUs and VMs without ADX, and for
  * moduli s2n-bignum has no fixed kernel for (3072, 4096).  Results are fully reduced; in-place calls are allowed
@@ -1149,7 +1150,7 @@ static void rs256_raw(const jwt_pkey_t *pk, int n, const uint8_t *const *msg, co
 }
 
 /* ---------------------------------------------------------------------------------- EdDSA */
-#include "jwt_ed25519.inc"
+#include "cc_ed25519.inc"
 
 jwt_pkey_t *jwt_pkey_ed25519(const uint8_t pub[32]) {
     jwt_pkey_t *k = calloc(1, sizeof *k);
@@ -1179,43 +1180,4 @@ void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, co
     if (k->alg == PK_ES256) es256_raw(k, n, msg, len, sig, slen, ok);
     else if (k->alg == PK_ED25519) ed25519_raw((const ed_key_t *)k->ed, n, msg, len, sig, slen, ok);
     else rs256_raw(k, n, msg, len, sig, slen, ok);
-}
-
-void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, const int *len, int64_t now,
-                         jwt_result_t *out) {
-    enum { CH = 16 };
-    const uint8_t *msg[CH], *sp[CH];
-    int mlen[CH], idx[CH], poff[CH], sl[CH];
-    uint8_t sb[CH][512 + 64], ok[CH];
-    jnow_t jn;
-    jnow_init(&jn, now);
-    for (int base = 0; base < n; base += CH) {
-        int m = n - base < CH ? n - base : CH, c = 0;
-        for (int i = 0; i < m; i++) {
-            jwt_result_t *r = &out[base + i];
-            const char *t = tok[base + i];
-            int L = len[base + i];
-            r->status = JWT_INVALID, r->username_escape = 0, r->username_len = 0, r->uid = 0;
-            r->username = r->ubuf, r->ubuf[0] = 0;
-            if (L <= 0 || L > JWT_TOKEN_MAX) continue;
-            const char *d1 = memchr(t, '.', L);
-            if (!d1) continue;
-            const char *d2 = memchr(d1 + 1, '.', L - (d1 + 1 - t));
-            if (!d2 || t + L - (d2 + 1) != k->sig_chars) continue;
-            int hl = (int)(d1 - t), pl = (int)(d2 - d1 - 1);
-            if (hl == 0 || pl == 0) continue;
-            if (!(hl == 36 && !memcmp(t, k->canon, 36))) {
-                uint8_t hb[JWT_TOKEN_MAX * 3 / 4 + 64];
-                int hn = jwt_b64url_decode(hb, t, hl);
-                if (hn < 0 || !header_ok(hb, hn, k->name)) continue;
-            }
-            if (jwt_b64url_decode(sb[c], d2 + 1, k->sig_chars) != k->sig_bytes) continue;
-            sp[c] = sb[c], sl[c] = k->sig_bytes;
-            msg[c] = (const uint8_t *)t, mlen[c] = (int)(d2 - t), idx[c] = i, poff[c] = hl + 1;
-            c++;
-        }
-        jwt_pk_verify_raw(k, c, msg, mlen, sp, sl, ok);
-        for (int j = 0; j < c; j++)
-            if (ok[j]) claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
-    }
 }

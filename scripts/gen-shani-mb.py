@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""gen-shani-mb.py: generate src/sha256_shani_mb.S, cursed-jwt's hand-scheduled multi-stream SHA-NI kernels.
+"""gen-shani-mb.py: generate crypto/src/sha256_shani_mb.S, cursed-jwt's hand-scheduled multi-stream SHA-NI kernels.
 
-    python3 scripts/gen-shani-mb.py > src/sha256_shani_mb.S
+    python3 scripts/gen-shani-mb.py > crypto/src/sha256_shani_mb.S
 
 Emits jwt_shani_mb3 and jwt_shani_mb4 (S = 3, 4 independent streams; the code takes any S <= 4):
 
