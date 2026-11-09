@@ -15,8 +15,8 @@ fn main() {
         cc::Build::new()
             .file("asm/sha256_x86_64_ossl.S")
             .file("asm/ossl_cap.c")
-            .define("jwt_ossl_sha256_block", "cjwt_rs_sha256_block")
-            .define("jwt_ossl_ia32cap_P", "cjwt_rs_ia32cap_P")
+            .define("cc_ossl_sha256_block", "cjwt_rs_sha256_block")
+            .define("cc_ossl_ia32cap_P", "cjwt_rs_ia32cap_P")
             .opt_level(2)
             .compile("cjwt_ossl");
         println!("cargo:rustc-cfg=cjwt_ossl");

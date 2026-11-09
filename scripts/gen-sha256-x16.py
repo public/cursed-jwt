@@ -11,8 +11,8 @@ bytes each), so a block costs one 16 x 16 transpose (32 vshufps + 16 vpermi2q) a
 is nb * 16 block pointers, block-major (cursed-jwt's HMAC plans are not contiguous), and a second entry point takes
 one block already transposed and in host order (the HMAC outer block, built from the inner state rows).
 
-    void jwt_sha256_x16(uint32_t st[8][16], const uint8_t *const *blk, size_t nb);  nb >= 1
-    void jwt_sha256_x16_rows(uint32_t st[8][16], const uint32_t w[16][16]);         one block
+    void cc_sha256_x16(uint32_t st[8][16], const uint8_t *const *blk, size_t nb);  nb >= 1
+    void cc_sha256_x16_rows(uint32_t st[8][16], const uint32_t w[16][16]);         one block
 
 st[j] is state word j of the 16 lanes (64-byte aligned rows), updated in place; w[t] is message word t of the 16
 lanes.  Plain Python 3, no dependencies; the output is committed.
@@ -188,7 +188,7 @@ class Gen:
 
 
 def blocks(g):
-    name = "jwt_sha256_x16"
+    name = "cc_sha256_x16"
     g.prologue(name)
     for j in range(16):  # the first block's rows
         g.load_row(j, 0)
@@ -218,7 +218,7 @@ def blocks(g):
 
 
 def rows(g):
-    name = "jwt_sha256_x16_rows"
+    name = "cc_sha256_x16_rows"
     g.prologue(name)
     for j in range(16):
         g.e("vmovdqu32\t%d(%%rsi),%s" % (64 * j, z(W[j])))

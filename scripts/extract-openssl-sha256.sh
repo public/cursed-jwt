@@ -3,9 +3,9 @@
 #
 # The source is OpenSSL 3.6.0 (Apache-2.0), commit 7b371d8.  The two perlasm files are fetched pinned and
 # SHA-256-checked into third_party/openssl-perlasm (git-ignored), then generated for ELF (Linux) and adapted:
-#   - sha256_block_data_order* becomes jwt_ossl_sha256_block* and is marked .hidden, so it never clashes with a
+#   - sha256_block_data_order* becomes cc_ossl_sha256_block* and is marked .hidden, so it never clashes with a
 #     libcrypto linked into the same program;
-#   - OPENSSL_ia32cap_P becomes jwt_ossl_ia32cap_P, which src/jwt.c fills from CPUID with the bits the
+#   - OPENSSL_ia32cap_P becomes cc_ossl_ia32cap_P, which src/jwt.c fills from CPUID with the bits the
 #     dispatcher reads (SHA-NI, AVX2+BMI1+BMI2, AVX, SSSE3).
 # The output is committed, so building needs neither perl nor the network; this script only reproduces it.
 # Needs perl and a C compiler for the assembler-version probe ($CC, default cc).
@@ -42,8 +42,8 @@ CC=${CC:-cc} perl $D/sha512-x86_64.pl elf $D/sha256-x86_64.S # "256" in the outp
  * Written by Andy Polyakov for the OpenSSL project.
  * Licensed under the Apache License 2.0; see THIRD_PARTY.md and https://www.openssl.org/source/license.html */
 EOF
-  sed -e 's/sha256_block_data_order/jwt_ossl_sha256_block/g' -e 's/OPENSSL_ia32cap_P/jwt_ossl_ia32cap_P/g' \
-    -e 's/^\(\.globl[[:space:]]*jwt_ossl_sha256_block\)$/\1\n.hidden	jwt_ossl_sha256_block/' $D/sha256-x86_64.S
+  sed -e 's/sha256_block_data_order/cc_ossl_sha256_block/g' -e 's/OPENSSL_ia32cap_P/cc_ossl_ia32cap_P/g' \
+    -e 's/^\(\.globl[[:space:]]*cc_ossl_sha256_block\)$/\1\n.hidden	cc_ossl_sha256_block/' $D/sha256-x86_64.S
   printf '\n.section .note.GNU-stack,"",@progbits\n' # no executable stack (the elf flavour omits it)
 } >$OUT
 echo "$OUT: $(wc -l <$OUT) lines"

@@ -1,8 +1,8 @@
-/* cc_jwt_names.inc — cursed-jwt's original names for the crypto entry points (jwt_key_init, jwt_hmac_*,
- * jwt_sha256_*, jwt_cpu_features, jwt_engine), still exported for existing callers: on ELF as aliases of the cc_
- * functions (the same code, the same address), elsewhere as one-line wrappers.  #included by cursed_crypto.c;
- * -DCC_NO_JWT_NAMES leaves them out. */
-#if defined(__ELF__)
+/* jwt_crypto_names.inc — cursed-jwt's original names for the crypto entry points (jwt_key_init, jwt_hmac_*,
+ * jwt_sha256_*, jwt_cpu_features, jwt_engine), part of jwt.h's API and so of the JWT layer: cursed-crypto itself
+ * exports only cc_ names.  #included by jwt.c.  In the one-unit build (ELF) they are aliases of the cc_ functions,
+ * the same code at the same address; with -DJWT_EXTERNAL_CRYPTO, or off ELF, one-line wrappers. */
+#if defined(__ELF__) && !defined(JWT_EXTERNAL_CRYPTO)
 #define CC_JWT_ALIAS(old, new) extern __typeof__(new) old __attribute__((alias(#new)));
 #define CC_JWT_HMAC(e)         CC_JWT_ALIAS(jwt_hmac_##e, cc_hmac_sha256_##e)
 #define CC_JWT_SHA(e)          CC_JWT_ALIAS(jwt_sha256_##e, cc_sha256_##e)

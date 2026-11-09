@@ -41,6 +41,7 @@
 #include "../crypto/src/cc_internal.h"
 #define cc_cpu cc_cpu_features
 #endif
+#include "jwt_crypto_names.inc" /* jwt_key_init, jwt_hmac_*, jwt_sha256_*, jwt_cpu_features, jwt_engine */
 
 /* ======================================================================================
  * 3. base64url

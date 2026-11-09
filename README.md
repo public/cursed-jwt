@@ -183,9 +183,10 @@ cc_pkey_free(pk);
   `crypto/src/cursed_crypto.c`, so building `src/jwt.c` alone gives one translation unit, exactly as before;
   `-DJWT_EXTERNAL_CRYPTO` builds the JWT layer alone, as `build/libcursedjwt.a` does.
 - **cursed-jwt's names stay.** `jwt_key_t`, `jwt_key_init`, `jwt_hmac_*`, `jwt_sha256_*`, `JWT_CPU_*`,
-  `jwt_cpu_features` and `jwt_engine` are the cursed-crypto ones under their old names (ELF aliases, wrappers
-  elsewhere); `CC_CPU_MASK` / `CC_CPU_FORCE_ZMM` and the `JWT_` spellings both work, and so do both spellings of the
-  build flags (`-DCC_S2N` or `-DJWT_S2N`, and so on).
+  `jwt_cpu_features` and `jwt_engine` are the cursed-crypto ones under their old names. They belong to the JWT layer
+  (`jwt.h`): aliases in the one-unit build on ELF, one-line wrappers in `libcursedjwt.a` and elsewhere.
+  `libcursedcrypto.a` exports only `cc_*` names (`make check-symbols`). `CC_CPU_MASK` / `CC_CPU_FORCE_ZMM` and the
+  `JWT_` spellings both work, and so do both spellings of the build flags (`-DCC_S2N` or `-DJWT_S2N`, and so on).
 
 ## How it works
 

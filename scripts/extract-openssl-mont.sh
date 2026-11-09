@@ -6,9 +6,9 @@
 # The source is OpenSSL 3.6.0 (Apache-2.0), commit 7b371d8, the same pin as extract-openssl-sha256.sh.  The perlasm
 # files are fetched pinned and SHA-256-checked into third_party/openssl-perlasm (git-ignored), generated for ELF
 # (Linux) and adapted:
-#   - every global bn_* symbol becomes jwt_ossl_bn_* and is marked .hidden, so it never clashes with a libcrypto
+#   - every global bn_* symbol becomes cc_ossl_bn_* and is marked .hidden, so it never clashes with a libcrypto
 #     linked into the same program;
-#   - OPENSSL_ia32cap_P becomes jwt_ossl_ia32cap_P, which src/jwt.c already fills from CPUID; the code reads
+#   - OPENSSL_ia32cap_P becomes cc_ossl_ia32cap_P, which src/jwt.c already fills from CPUID; the code reads
 #     word 2 (CPUID.7.0:EBX) for BMI2 + ADX and takes its mulx/adcx/adox paths only when both are present.
 # The output is committed, so building needs neither perl nor the network; this script only reproduces it.
 # Needs perl and a C compiler for the assembler-version probe ($CC, default cc).
@@ -48,8 +48,8 @@ gen() { # perlasm-output output.S source-name
  * Written by Andy Polyakov for the OpenSSL project.
  * Licensed under the Apache License 2.0; see THIRD_PARTY.md and https://www.openssl.org/source/license.html */
 HDR
-    sed -E -e "s/\\b($SYMS)\\b/jwt_ossl_\\1/g" -e 's/OPENSSL_ia32cap_P/jwt_ossl_ia32cap_P/g' "$1" |
-      awk '{ print } /^\.globl[[:space:]]+jwt_ossl_/ && !seen[$2]++ { print ".hidden\t" $2 }'
+    sed -E -e "s/\\b($SYMS)\\b/cc_ossl_\\1/g" -e 's/OPENSSL_ia32cap_P/cc_ossl_ia32cap_P/g' "$1" |
+      awk '{ print } /^\.globl[[:space:]]+cc_ossl_/ && !seen[$2]++ { print ".hidden\t" $2 }'
     printf '\n.section .note.GNU-stack,"",@progbits\n' # no executable stack (the elf flavour omits it)
   } >"$2"
   echo "$2: $(wc -l <"$2") lines"

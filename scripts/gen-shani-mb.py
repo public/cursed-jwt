@@ -3,9 +3,9 @@
 
     python3 scripts/gen-shani-mb.py > crypto/src/sha256_shani_mb.S
 
-Emits jwt_shani_mb3 and jwt_shani_mb4 (S = 3, 4 independent streams; the code takes any S <= 4):
+Emits cc_shani_mb3 and cc_shani_mb4 (S = 3, 4 independent streams; the code takes any S <= 4):
 
-    void jwt_shani_mbS(__m128i st[2 * S], const uint8_t *const *blk, size_t nb);
+    void cc_shani_mbS(__m128i st[2 * S], const uint8_t *const *blk, size_t nb);
 
 st[2s], st[2s + 1] are stream s's state as ABEF / CDGH (the layout sha256rnds2 wants; src/jwt.c's ni_ld / ni_st
 convert), updated in place.  blk holds nb * S block pointers, block-major (blk[b * S + s] is stream s's block b,
@@ -65,7 +65,7 @@ def kernel(S, out):
     assert len(pool) >= 3
     ring = lambda s, j: "%d(%%rsp)" % (RING + 64 * s + 16 * (j & 3))
     e = out.append
-    name = "jwt_shani_mb%d" % S
+    name = "cc_shani_mb%d" % S
 
     e(".globl\t%s\n.hidden\t%s\n.type\t%s,@function\n.align\t32\n%s:\n.cfi_startproc" % ((name,) * 4))
     e("\tpushq\t%rbp\n.cfi_adjust_cfa_offset 8\n.cfi_offset %rbp,-16\n\tmovq\t%rsp,%rbp\n.cfi_def_cfa_register %rbp")
