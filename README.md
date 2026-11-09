@@ -255,6 +255,21 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
   extracted SHA-256 code, which dispatches itself (SHA-NI, AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile
   assembles `crypto/src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own
   program, do the same, or leave both out to get the compiled scalar code; `make OSSL_SHA=` builds without it.
+- **Intel Skylake through Cascade Lake / Cooper Lake: `make JCC=1`.** Intel's microcode fix for the JCC erratum
+  stalls any branch that crosses or ends on a 32-byte boundary. `JCC=1` has the assembler keep every branch off one
+  (`-Wa,-mbranches-within-32B-boundaries` with gcc, `-mbranches-within-32B-boundaries` with clang), in the C and the
+  assembly alike. Measured on main 63e076d, as a ratio to the default build (below 1 is faster; 15 interleaved rounds,
+  and a 48-byte placement shift of the default build as the noise control):
+
+  | | HS256 realistic b16 | HS256 realistic b1 | HS256 compact b16 | RS256 / ES256 / EdDSA | raw HMAC, b1–32 | placement control |
+  |---|---|---|---|---|---|---|
+  | Cascade Lake | **0.83** | **0.96** | **0.95** | 0.98–1.01 | 0.99–1.01 | 0.99–1.01 |
+  | AMD Genoa (Zen 4) | 1.07 | 1.04 | 1.00 | 1.00–1.01 | 0.99–1.01 | 0.96–1.01 |
+  | AMD Turin (Zen 5) | 1.03 | 1.02 | 1.02 | 1.00–1.01 | 1.00 | 0.98–1.00 |
+
+  The gain and the loss are both in the token front end's JSON code; the crypto doesn't move. A build that has to
+  run anywhere keeps the default. Use `JCC=1` when the binary is for those Intel generations only. Ice Lake and later,
+  and AMD, don't have the erratum.
 - **Inspecting and masking the choice.** `jwt_engine()` names the HS256 engine in use, and `jwt_cpu_features()`
   returns the detected `JWT_CPU_*` bits. The environment variable `JWT_CPU_MASK` masks features for tests and
   benchmarks: `JWT_CPU_MASK=0` runs everything on the fallbacks.
@@ -307,7 +322,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 **Targets:**
 
 ```bash
-make              # build/libcursedjwt.a, build/libcursedcrypto.a, build/verify
+make              # build/libcursedjwt.a, build/libcursedcrypto.a, build/verify (JCC=1: Intel Skylake..Cascade Lake builds)
 make test         # every engine vs OpenSSL + the claim rules (~6 s)
 make test-quick   # fewer random iterations (CI)
 make test-vectors # + RFC 4231, NIST CAVP, Wycheproof, RFC 7515, pyca/cryptography vectors (network)
