@@ -1,1 +1,1 @@
-../../../src/sha256_x86_64_ossl.S
+../../../crypto/src/sha256_x86_64_ossl.S

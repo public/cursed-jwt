@@ -209,7 +209,7 @@ static void test_arith(void) {
 }
 
 #ifdef JWT_ED_S2N
-/* the radix-2^43 glue of jwt_ed25519_r43x6.inc: ed_r43_canon against fiat-crypto on random and extreme limbs, and
+/* the radix-2^43 glue of cc_ed25519_r43x6.inc: ed_r43_canon against fiat-crypto on random and extreme limbs, and
  * ed_r43_from4 -> ed_r43_canon round trips (the latter on AVX-512 IFMA CPUs only) */
 static void test_r43(void) {
     int bad = 0, n = 20000;
@@ -257,7 +257,7 @@ static void test_r43(void) {
 #endif
 
 #ifdef JWT_ES8
-/* -DJWT_ES8 (src/cmb_ec/es8.c): crypto_mb's 8-lane field operations and the 8-lane comb against fiat-crypto and the
+/* -DJWT_ES8 (crypto/src/cmb_ec/es8.c): crypto_mb's 8-lane field operations and the 8-lane comb against fiat-crypto and the
  * scalar code, on random and edge inputs, and 8-lane batches with one bad signature in each lane position */
 void jwt_es8_comb(const void *tg, const void *tq, int nw, int h, const int16_t *const d1[8], const int16_t *const d2[8],
                   uint64_t x[8][4], uint64_t y[8][4], uint64_t z[8][4], unsigned *inf);
@@ -320,7 +320,7 @@ static void test_es8_field(void) {
     }
     CHECK(!bad && !range, "es8 field ops: %d mismatches, %d results out of range", bad, range);
 }
-/* the scalar comb (jwt_pk_ec.inc's chain) for one lane, as plain integers */
+/* the scalar comb (cc_pk_ec.inc's chain) for one lane, as plain integers */
 static int comb_c(const jwt_pkey_t *k, const int16_t *d1, const int16_t *d2, uint64_t x[4], uint64_t y[4],
                   uint64_t z[4]) {
     p256_jac_t acc;

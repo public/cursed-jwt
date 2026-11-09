@@ -5,16 +5,9 @@ use std::path::PathBuf;
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     let src = root.join("src");
-    for f in [
-        "jwt.c",
-        "jwt_mb.inc",
-        "jwt_pk.inc",
-        "jwt_pk_ec.inc",
-        "jwt_ed25519.inc",
-        "sha256_x86_64_ossl.S",
-    ] {
-        println!("cargo:rerun-if-changed={}", src.join(f).display());
-    }
+    let crypto = root.join("crypto/src");
+    println!("cargo:rerun-if-changed={}", src.join("jwt.c").display());
+    println!("cargo:rerun-if-changed={}", crypto.display());
     println!(
         "cargo:rerun-if-changed={}",
         root.join("include/jwt.h").display()
@@ -31,7 +24,7 @@ fn main() {
         .warnings(false);
     if ossl {
         b.define("JWT_OSSL_SHA256", None)
-            .file(src.join("sha256_x86_64_ossl.S"));
+            .file(crypto.join("sha256_x86_64_ossl.S"));
     }
     b.compile("cursedjwt");
 }

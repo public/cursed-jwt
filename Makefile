@@ -28,10 +28,10 @@ UNAME_M := $(shell uname -m)
 # No -march by default: the library is built for the baseline ISA and picks its engines at run time from the CPU
 # (CPUID / HWCAP).  ARCHFLAGS=-march=native still works; dispatch checks the CPU either way.
 ARCHFLAGS ?=
-# x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (src/sha256_x86_64_ossl.S,
-# ELF only), SHA-NI batches the generated 3/4-stream kernels (src/sha256_shani_mb.S) and zmm batches the generated
-# 16-lane kernel (src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB, and RSA uses OpenSSL's extracted bn_mul_mont
-# (src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.
+# x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (crypto/src/sha256_x86_64_ossl.S,
+# ELF only), SHA-NI batches the generated 3/4-stream kernels (crypto/src/sha256_shani_mb.S) and zmm batches the generated
+# 16-lane kernel (crypto/src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB, and RSA uses OpenSSL's extracted bn_mul_mont
+# (crypto/src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.
 # `make OSSL_SHA=` builds without either.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
@@ -51,7 +51,7 @@ endif
 CFLAGS ?= -O3
 WARN := -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-function
 INC := -Iinclude -Isrc -Itests
-SRC := src/jwt.c src/jwt_mb.inc include/jwt.h src/jwt_pk.inc src/jwt_pk_ec.inc src/jwt_ed25519.inc $(wildcard src/fiat/*.c) $(SHAOBJ)
+SRC := src/jwt.c include/jwt.h $(wildcard crypto/src/*.c crypto/src/*.h crypto/src/*.inc crypto/src/fiat/*.c) $(SHAOBJ)
 SAN := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TEST_SECRET := cursed-jwt-test-secret
 NTOKENS ?= 20000
@@ -62,15 +62,15 @@ $(B):
 	mkdir -p $(B)
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
-$(B)/sha256_x86_64_ossl.o: src/sha256_x86_64_ossl.S | $(B)
+$(B)/sha256_x86_64_ossl.o: crypto/src/sha256_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
-$(B)/sha256_shani_mb.o: src/sha256_shani_mb.S | $(B)
+$(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
 	$(CC) -c $< -o $@
-$(B)/sha256_x16_avx512.o: src/sha256_x16_avx512.S | $(B)
+$(B)/sha256_x16_avx512.o: crypto/src/sha256_x16_avx512.S | $(B)
 	$(CC) -c $< -o $@
-$(B)/bn_mont_x86_64_ossl.o: src/bn_mont_x86_64_ossl.S | $(B)
+$(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
-$(B)/bn_mont5_x86_64_ossl.o: src/bn_mont5_x86_64_ossl.S | $(B)
+$(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) -c $< -o $@
 $(B)/libcursedjwt.a: $(B)/jwt.o $(SHAOBJ)
 	rm -f $@ && ar rcs $@ $^
@@ -169,8 +169,8 @@ avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
 licence: bench/licence_probe.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(AVX512) $(WARN) $(INC) $< $(X86SHA) -o $(B)/licence_probe && ./$(B)/licence_probe
 
-# RS256 / ES256 / EdDSA (src/jwt_pk.inc, PK.md) are part of the default build; their field arithmetic is fiat-crypto's,
-# vendored in src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
+# RS256 / ES256 / EdDSA (crypto/src/cc_pk.c, PK.md) are part of the default build; their field arithmetic is fiat-crypto's,
+# vendored in crypto/src/fiat/ (scripts/fetch-fiat.sh re-checks it).  PK holds extra flags for these targets (none now).
 # Defined before any rule that lists $(PKSRC): make expands prerequisites as it reads them
 PK := $(X86MONT)
 # (rules that also link $(X86SHA), which carries the same objects, take $(filter-out $(MONTOBJ),$(PK)))
@@ -252,13 +252,13 @@ $(eval $(call PK_BACKEND,_rsaz,$(RSAZ) $(FAST),$(B)/libs2n.a $(B)/rsaz-4k-avx512
 CMBRSA_SRC := sources/ippcp/crypto_mb/src/rsa/ifma_exp52x40_65537_mb8.c \
   sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_amm52x40_mb8.c \
   sources/ippcp/crypto_mb/src/rsa/internal_avx512/ifma_ams52x40_diagonal_mb8.c
-$(B)/libcmbrsa.a: scripts/fetch-crypto-mb-rsa.sh src/cmb_rsa/cmb_rsa_glue.c src/cmb_rsa/internal/rsa/ifma_rsa_arith.h | $(B)
+$(B)/libcmbrsa.a: scripts/fetch-crypto-mb-rsa.sh crypto/src/cmb_rsa/cmb_rsa_glue.c crypto/src/cmb_rsa/internal/rsa/ifma_rsa_arith.h | $(B)
 	./scripts/fetch-crypto-mb-rsa.sh
 	mkdir -p $(B)/cmbrsa
 	for f in $(CMBRSA_SRC); do $(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq \
-	  -Isrc/cmb_rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include -c third_party/crypto-mb-rsa/$$f \
+	  -Icrypto/src/cmb_rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include -c third_party/crypto-mb-rsa/$$f \
 	  -o $(B)/cmbrsa/$$(basename $$f .c).o || exit 1; done
-	$(CC) -O2 -c src/cmb_rsa/cmb_rsa_glue.c -o $(B)/cmbrsa/cmb_rsa_glue.o
+	$(CC) -O2 -c crypto/src/cmb_rsa/cmb_rsa_glue.c -o $(B)/cmbrsa/cmb_rsa_glue.o
 	ld -r $(B)/cmbrsa/ifma_*.o $(B)/cmbrsa/cmb_rsa_glue.o -o $(B)/cmbrsa/cmbrsa.o
 	# one global, renamed so it never clashes with Intel's own libcrypto_mb: everything else local
 	objcopy --redefine-sym EXP52x40_pub65537_mb8=jwt_cmb_exp52x40_pub65537_mb8 $(B)/cmbrsa/cmbrsa.o
@@ -269,13 +269,13 @@ $(eval $(call PK_BACKEND,_rsaz8,$(RSAZ) $(RSAZ8) $(FAST),$(B)/libs2n.a $(B)/rsaz
 $(B)/test_rsaz8: tests/test_rsaz.c $(PKSRC) $(B)/libs2n.a $(B)/rsaz-4k-avx512.S $(B)/libcmbrsa.a | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(INC) $(SSLINC) $< $(RSAZ) $(RSAZ8) $(FAST) -o $@
 # -DJWT_ES8: ES256 batches 8 tokens at a time through crypto_mb's 8-lane P-256 field arithmetic under our comb tables
-# (src/cmb_ec/es8.c #includes the two fetched files; every symbol but jwt_es8_* is made local).  Used only where zmm
+# (crypto/src/cmb_ec/es8.c #includes the two fetched files; every symbol but jwt_es8_* is made local).  Used only where zmm
 # costs no clock speed (FAST_ZMM: AMD Zen 4 / 5) and the CPU has IFMA.  pk-test-es8 / pk-bench-es8 = rsaz8 plus it.
 CMB_INC := -Ithird_party/crypto-mb-rsa -Ithird_party/crypto-mb-rsa/sources/ippcp/crypto_mb/include
-$(B)/libcmbec.a: scripts/fetch-crypto-mb-rsa.sh src/cmb_ec/es8.c | $(B)
+$(B)/libcmbec.a: scripts/fetch-crypto-mb-rsa.sh crypto/src/cmb_ec/es8.c | $(B)
 	./scripts/fetch-crypto-mb-rsa.sh
 	mkdir -p $(B)/cmbec
-	$(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq $(CMB_INC) -c src/cmb_ec/es8.c \
+	$(CC) -O3 -D_MBX=2 -mavx512f -mavx512ifma -mavx512vl -mavx512bw -mavx512dq $(CMB_INC) -c crypto/src/cmb_ec/es8.c \
 	  -o $(B)/cmbec/es8.o
 	objcopy -w --keep-global-symbol='jwt_es8_*' $(B)/cmbec/es8.o
 	rm -f $@ && ar rcs $@ $(B)/cmbec/es8.o

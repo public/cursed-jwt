@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""gen-sha256-x16.py: generate src/sha256_x16_avx512.S, a 16-lane AVX-512 SHA-256 block kernel.
+"""gen-sha256-x16.py: generate crypto/src/sha256_x16_avx512.S, a 16-lane AVX-512 SHA-256 block kernel.
 
-    python3 scripts/gen-sha256-x16.py > src/sha256_x16_avx512.S
+    python3 scripts/gen-sha256-x16.py > crypto/src/sha256_x16_avx512.S
 
 A GAS port of Intel ipsec-mb's lib/avx512_t1/sha256_x16_avx512.asm with its transpose
 (lib/include/transpose_avx512.inc), v3.0.0 (75c6991), Copyright (c) 2017-2026 Intel Corporation, BSD-3-Clause (see

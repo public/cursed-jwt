@@ -5,7 +5,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **Targets:**
   - Apple M5 Pro: ARMv8 SHA2/SHA512 and NEON, no AVX-512 IFMA equivalent.
   - Xeon Platinum 8260 (Cascade Lake): AVX-512F/BW/VL/DQ, **no IFMA**, no SHA-NI, 1 vCPU KVM, OpenSSL 3.0.13.
-- **Code:** `src/jwt_pk.inc`, in the default build (`-DJWT_NO_PK` leaves it out), behind `jwt_verify_batch_pk` (same front end and claim
+- **Code:** `crypto/src/cc_pk.c`, in the default build (`-DJWT_NO_PK` leaves it out), behind `jwt_verify_batch_pk` (same front end and claim
   rules as `jwt_verify_batch`).
 - **Three arithmetic backends**, chosen at compile time:
   - portable C (the default; no dependencies beyond fiat-crypto's generated C);
@@ -158,7 +158,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 - **The choice is made at run time** from the CPU's features, so a build containing every backend runs on any
   machine:
   - `s2n_ok()`: on x86-64, s2n-bignum's kernels run only with BMI2 + ADX. The P-256 point arithmetic is compiled
-    three times (`src/jwt_pk_ec.inc`: with C, with s2n-bignum's field operations, and on x86-64 with its ADX-free
+    three times (`crypto/src/cc_pk_ec.inc`: with C, with s2n-bignum's field operations, and on x86-64 with its ADX-free
     `_alt` multiply / square), and one is picked per batch.
   - Some VMs hide BMI2/ADX from the guest; Vultr's Genoa and Cascade Lake guests do. There the `_alt` kernels
     replace fiat C. ES256 full verify (1 vCPU, gcc -O3, 7 interleaved rounds):
@@ -202,7 +202,7 @@ This covers asymmetric JWT algorithms. HS384/HS512 get a short note at the end.
 
 - **What it is.** The ES256 comb additions for 8 tokens at once, one per 64-bit zmm lane, on crypto_mb's 8-lane
   P-256 field arithmetic (`ifma_arith_p256.c` / `ifma_arith_m256.c`, cryptography-primitives @ 316ce55, Apache-2.0,
-  fetched pinned by `scripts/fetch-crypto-mb-rsa.sh`). `src/cmb_ec/es8.c` #includes them unchanged and builds into
+  fetched pinned by `scripts/fetch-crypto-mb-rsa.sh`). `crypto/src/cmb_ec/es8.c` #includes them unchanged and builds into
   `build/libcmbec.a`; only its `jwt_es8_*` symbols stay global.
   - Not `mbx_nistp256_ecdsa_verify_mb8` itself: that has no per-key precompute and needs ~5,000 field multiplies
     per token, against our ~730.
@@ -360,7 +360,7 @@ jwt_pkey_free(k);
     branching. That's fine for public data, but the code is deliberately not constant-time.
 - **Field arithmetic:**
   - fiat-crypto's generated `p256_64.c` / `p256_scalar_64.c` (formally verified, MIT), fetched by
-    vendored in `src/fiat/` (pinned and re-checked by `scripts/fetch-fiat.sh`), plus my `fe_mul`.
+    vendored in `crypto/src/fiat/` (pinned and re-checked by `scripts/fetch-fiat.sh`), plus my `fe_mul`.
   - `fe_mul` is a Montgomery CIOS that uses p's limb structure: −p⁻¹ ≡ 1 (mod 2⁶⁴), and p₂ = 0. Each round needs
     2 multiplications instead of 4.
   - `-DJWT_S2N` swaps in s2n-bignum's `bignum_montmul_p256`, `bignum_montsqr_p256`, `bignum_add_p256` and
@@ -394,7 +394,7 @@ jwt_pkey_free(k);
     4. all the Z of the chunk inverted together (Montgomery's trick + the ref10 addition chain);
     5. accept iff the encoding of the result equals R byte for byte.
   - Field arithmetic is fiat-crypto's `curve25519_64.c` and `curve25519_scalar_64.c` (MIT), fetched by
-    vendored in `src/fiat/` like the P-256 files. `JWT_ED_W` sets the window.
+    vendored in `crypto/src/fiat/` like the P-256 files. `JWT_ED_W` sets the window.
 - **Screening (`-DJWT_RSA_SCREEN`):**
   - A = ∏ sᵢ and B = ∏ EMᵢ, each by chained Montgomery products of the raw values, so both carry R^−(c−1).
   - Accept the whole batch iff mont(pow(A·R, e), K_c) = B, where K_c = R^((c−1)(e−1)) mod n is precomputed per
@@ -465,7 +465,7 @@ The sources, all fetched by `scripts/fetch-vectors.sh` with pinned SHA-256s:
 ## HS384 / HS512
 
 - **The method carries over directly.**
-  - The multi-buffer template (`src/jwt_mb.inc`) generalises to 64-bit words, with 128-byte blocks and 80 rounds:
+  - The multi-buffer template (`crypto/src/cc_mb.inc`) generalises to 64-bit words, with 128-byte blocks and 80 rounds:
     - ymm AVX-512VL ×4 lanes using `vprorq`/`vpternlogq`;
     - AVX2 ×4;
     - the ARMv8.2 SHA512 instructions on the M5 (`vsha512hq_u64` etc., `__ARM_FEATURE_SHA512` is defined), with

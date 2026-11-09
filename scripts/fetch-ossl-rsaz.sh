@@ -2,7 +2,7 @@
 # fetch-ossl-rsaz.sh: OpenSSL's AVX-512 IFMA almost-Montgomery multiplication for 2048-bit moduli
 # (ossl_rsaz_amm52x40_x1_ifma256, crypto/bn/asm/rsaz-4k-avx512.pl; Intel's contribution, Apache-2.0) into
 # third_party/openssl-rsaz (git-ignored), each file checked against a pinned SHA-256, then translated by OpenSSL's own
-# perlasm translator into build/rsaz-4k-avx512.S.  Only the -DJWT_RSAZ build uses it (src/jwt_pk.inc, PK.md).
+# perlasm translator into build/rsaz-4k-avx512.S.  Only the -DJWT_RSAZ build uses it (crypto/src/cc_pk.c, PK.md).
 # Every global ossl_* symbol becomes jwt_ossl_* and is marked .hidden, as in scripts/extract-openssl-mont.sh, so a
 # program that also links libcrypto statically (which defines the same ossl_rsaz_* names) links cleanly.
 #   github.com/openssl/openssl @ openssl-4.1.0 (2f4e3a5)

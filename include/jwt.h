@@ -13,7 +13,7 @@
  *   AArch64                        -> NEON 4-lane multi-buffer
  *   anything else                  -> portable scalar
  * Batch 1 and leftover lanes run one message at a time; on x86-64 Linux with -DJWT_OSSL_SHA256 (the Makefile's
- * default there) that is OpenSSL's extracted sha256 block function, src/sha256_x86_64_ossl.S (link it too).
+ * default there) that is OpenSSL's extracted sha256 block function, crypto/src/sha256_x86_64_ossl.S (link it too).
  * Every engine that the target can run is also exported for tests/benchmarks.
  */
 #ifndef JWT_H
@@ -125,7 +125,7 @@ jwt_hmac_fn jwt_hmac_avx2;
 jwt_hmac_fn jwt_hmac_shani_1, jwt_hmac_shani_2, jwt_hmac_shani_4; /* SHA-NI, 1 / 2 / 4 interleaved streams */
 #endif
 #if defined(JWT_SHANI_MB) && defined(__x86_64__) && defined(__ELF__)
-/* In assembly (link src/sha256_shani_mb.S and src/sha256_x16_avx512.S; the Makefile's default on x86-64 Linux):
+/* In assembly (link crypto/src/sha256_shani_mb.S and crypto/src/sha256_x16_avx512.S; the Makefile's default on x86-64 Linux):
  * shani_4r = 4 hand-scheduled SHA-NI streams, the default on Zen; x16 = 16 lanes of zmm, a port of Intel ipsec-mb's
  * sha256_x16_avx512 (needs JWT_CPU_AVX512VL), the zmm engine wherever it is built; shani_x16 = x16 for groups of 11+
  * and shani_4r for the rest, the default on Zen 5 (JWT_CPU_FULL_ZMM; needs SHANI and AVX512VL) */

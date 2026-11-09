@@ -1,7 +1,7 @@
 #!/bin/sh
 # build-crypto-mb.sh: fetch Intel's crypto_mb (intel/cryptography-primitives v2.3.0, Apache-2.0) at a pinned commit,
 # check the tarball's SHA-256, and build its static library into third_party/crypto-mb/ (git-ignored), for the
-# -DJWT_CRYPTO_MB build: 8-way AVX-512 IFMA ES256 verification and RSA public-key operations (src/jwt_pk.inc).
+# -DJWT_CRYPTO_MB build: 8-way AVX-512 IFMA ES256 verification and RSA public-key operations (crypto/src/cc_pk.c).
 #
 # Linux x86-64 only.  Needs CMake >= 3.18, NASM, Python 3, a C compiler (gcc >= 8.5 or clang >= 16) and OpenSSL
 # >= 3.5.5 *headers* (crypto_mb's CMake insists on them even though cursed-jwt uses only its non-OpenSSL API); point

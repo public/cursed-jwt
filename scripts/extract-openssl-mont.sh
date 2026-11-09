@@ -1,5 +1,5 @@
 #!/bin/sh
-# extract-openssl-mont.sh: regenerate src/bn_mont_x86_64_ossl.S and src/bn_mont5_x86_64_ossl.S, OpenSSL's x86-64
+# extract-openssl-mont.sh: regenerate crypto/src/bn_mont_x86_64_ossl.S and crypto/src/bn_mont5_x86_64_ossl.S, OpenSSL's x86-64
 # Montgomery multiplication (bn_mul_mont, and the 8-way squaring in x86_64-mont5 that it calls), vendored.  Two files,
 # because the two generated sources reuse the same local labels.
 #
@@ -54,5 +54,5 @@ HDR
   } >"$2"
   echo "$2: $(wc -l <"$2") lines"
 }
-gen $D/x86_64-mont.S src/bn_mont_x86_64_ossl.S x86_64-mont.pl
-gen $D/x86_64-mont5.S src/bn_mont5_x86_64_ossl.S x86_64-mont5.pl
+gen $D/x86_64-mont.S crypto/src/bn_mont_x86_64_ossl.S x86_64-mont.pl
+gen $D/x86_64-mont5.S crypto/src/bn_mont5_x86_64_ossl.S x86_64-mont5.pl

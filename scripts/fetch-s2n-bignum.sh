@@ -1,7 +1,7 @@
 #!/bin/sh
 # fetch-s2n-bignum.sh: AWS s2n-bignum's formally verified P-256 field and RSA-2048 Montgomery kernels (assembly) into
 # third_party/s2n-bignum (git-ignored), each file checked against a pinned SHA-256.  Licence: Apache-2.0 OR ISC OR
-# MIT-0 (used under MIT-0).  Only the -DJWT_PK -DJWT_S2N build uses them (src/jwt_pk.inc, PK.md).
+# MIT-0 (used under MIT-0).  Only the -DJWT_PK -DJWT_S2N build uses them (crypto/src/cc_pk.c, PK.md).
 #   github.com/awslabs/s2n-bignum @ 3306729
 # The x86 versions need BMI2 + ADX (mulx / adcx / adox), except the _alt P-256 multiply / square, which s2n-bignum
 # provides for x86-64 CPUs without them (plain mul / adc); the arm versions need plain ARMv8.

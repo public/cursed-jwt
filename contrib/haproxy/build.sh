@@ -51,7 +51,7 @@ if [ "$V" = cursed ]; then
   LOBJS="$L/jwt.o $L/jwt_cursed.o"
   if [ "$(uname -m)-$(uname -s)" = x86_64-Linux ]; then
     JDEFS="$JDEFS -DJWT_OSSL_SHA256"
-    "$CC" -c "$J/src/sha256_x86_64_ossl.S" -o "$L/sha256_x86_64_ossl.o"
+    "$CC" -c "$J/crypto/src/sha256_x86_64_ossl.S" -o "$L/sha256_x86_64_ossl.o"
     LOBJS="$LOBJS $L/sha256_x86_64_ossl.o"
   fi
   if [ "${S2N:-1}" = 1 ]; then

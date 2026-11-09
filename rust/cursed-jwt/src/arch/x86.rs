@@ -477,7 +477,7 @@ const MIN_LANES: usize = 2;
 const MIN_AVX2: usize = if cfg!(cjwt_ossl) { 3 } else { 2 };
 
 /// OpenSSL's sha256_block_data_order for x86-64 (SHA-NI, AVX2+BMI2, AVX, SSSE3 and plain x86-64 paths, chosen
-/// by its own capability word), assembled by build.rs from the C library's `src/sha256_x86_64_ossl.S`.
+/// by its own capability word), assembled by build.rs from the C library's `crypto/src/sha256_x86_64_ossl.S`.
 #[cfg(cjwt_ossl)]
 mod ossl {
     use crate::sha256::{Midstates, Plan};

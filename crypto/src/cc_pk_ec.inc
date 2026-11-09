@@ -1,4 +1,4 @@
-/* jwt_pk_ec.inc — the P-256 point arithmetic used per token, #included by jwt_pk.inc once per field backend:
+/* cc_pk_ec.inc — the P-256 point arithmetic used per token, #included by cc_pk.c once per field backend:
  * EC(name) names it, fe_mul / fe_sqr / fe_add / fe_sub are the field operations (portable C, or s2n-bignum's asm,
  * chosen at run time).  Key setup always uses the C instantiation. */
 

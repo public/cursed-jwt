@@ -3,10 +3,10 @@
 # public-key exponentiation with AVX-512 IFMA (EXP52x40_pub65537_mb8, ifma_amm52x40_mb8, AMS52x40_diagonal_mb8),
 # plus the five headers they read, into third_party/crypto-mb-rsa (git-ignored), each checked against a pinned
 # SHA-256.  Compiled on their own, without crypto_mb's build system or its OpenSSL dependency
-# (src/cmb_rsa/internal/rsa/ifma_rsa_arith.h stands in for the one header that needs OpenSSL).  Only the
-# -DJWT_RSAZ8 build uses them (src/jwt_pk.inc, PK.md).
+# (crypto/src/cmb_rsa/internal/rsa/ifma_rsa_arith.h stands in for the one header that needs OpenSSL).  Only the
+# -DJWT_RSAZ8 build uses them (crypto/src/cc_pk.c, PK.md).
 # Also crypto_mb's 8-lane P-256 field arithmetic (ifma_arith_p256.c / ifma_arith_m256.c and their header), which
-# src/cmb_ec/es8.c #includes for the -DJWT_ES8 build's 8-token ES256 comb additions.
+# crypto/src/cmb_ec/es8.c #includes for the -DJWT_ES8 build's 8-token ES256 comb additions.
 #   github.com/intel/cryptography-primitives @ 316ce55
 set -e
 cd "$(dirname "$0")/.."

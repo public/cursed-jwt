@@ -1,5 +1,5 @@
 #!/bin/sh
-# extract-openssl-sha256.sh: regenerate src/sha256_x86_64_ossl.S, OpenSSL's x86-64 SHA-256 block function, vendored.
+# extract-openssl-sha256.sh: regenerate crypto/src/sha256_x86_64_ossl.S, OpenSSL's x86-64 SHA-256 block function, vendored.
 #
 # The source is OpenSSL 3.6.0 (Apache-2.0), commit 7b371d8.  The two perlasm files are fetched pinned and
 # SHA-256-checked into third_party/openssl-perlasm (git-ignored), then generated for ELF (Linux) and adapted:
@@ -30,7 +30,7 @@ get() { # path-in-repo sha256
 }
 get crypto/sha/asm/sha512-x86_64.pl bd4b1466b0b79cdd03266bcebb86637422a56f507d9e1d4ff8589f5d5a44486b
 get crypto/perlasm/x86_64-xlate.pl 8305200de6f523fa6a7f64bf1889e1e5dda4e20bff58d61887608dd8edd3a9f8
-OUT=src/sha256_x86_64_ossl.S
+OUT=crypto/src/sha256_x86_64_ossl.S
 CC=${CC:-cc} perl $D/sha512-x86_64.pl elf $D/sha256-x86_64.S # "256" in the output name selects SHA-256
 {
   cat <<'EOF'

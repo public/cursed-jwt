@@ -1,4 +1,4 @@
-/* jwt_mb.inc — multi-buffer HMAC-SHA256 "template", #included by jwt.c once per ISA.
+/* cc_mb.inc — multi-buffer HMAC-SHA256 "template", #included by cc_sha256.c once per ISA.
  *
  * The includer defines:
  *   MB(name)             name mangler, e.g. name##_avx2

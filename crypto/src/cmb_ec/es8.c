@@ -5,8 +5,8 @@
  * zmm registers, almost-Montgomery multiplication with R = 2^260, values kept in [0, 2p).  Its two .c files are
  * #included below so that the compiler can inline them into the point code; nothing in them is changed.
  *
- * The point code is cursed-jwt's (src/jwt_pk_ec.inc), not crypto_mb's: the per-key signed-digit comb tables of
- * jwt_pk.inc (k 2^(8j) G and k 2^(8j) Q, k = 1..128, affine, 64-bit limbs in fiat-crypto's Montgomery domain, R = 2^256)
+ * The point code is cursed-jwt's (crypto/src/cc_pk_ec.inc), not crypto_mb's: the per-key signed-digit comb tables of
+ * cc_pk.c (k 2^(8j) G and k 2^(8j) Q, k = 1..128, affine, 64-bit limbs in fiat-crypto's Montgomery domain, R = 2^256)
  * are read in place.  Each lane gathers its own entry (the digits differ per token), and the entry is moved into
  * crypto_mb's domain on the way in: v 2^260 = 16 (v 2^256), one Solinas fold of the top 4 bits, no multiplication.
  * The addition is madd-2007-bl, as in the scalar code, 7M + 4S, with "at infinity" kept as a lane mask.  The
@@ -80,7 +80,7 @@ static inline __attribute__((always_inline)) void add_row(acc8_t *a, const uint6
         NEG(t5, qy);
         mask_mov_FE256_mb8(qy, qy, (__mmask8)ng, t5);
     }
-    /* madd-2007-bl: the same sequence as jwt_pk_ec.inc's p256_madd */
+    /* madd-2007-bl: the same sequence as cc_pk_ec.inc's p256_madd */
     U64 z1z1[5], u2[5], s2[5], h[5], r[5], hh[5], i[5], jj[5], v[5], x3[5], z3[5];
     SQR(z1z1, a->z);
     MUL(u2, qx, z1z1);
