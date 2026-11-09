@@ -234,21 +234,7 @@ extern "C" {
         len: *const c_int,
         mac: *mut [u32; 8],
     );
-    pub fn jwt_hmac_avx2x2(
-        k: *const jwt_key_t,
-        n: c_int,
-        msg: *const *const u8,
-        len: *const c_int,
-        mac: *mut [u32; 8],
-    );
     pub fn jwt_hmac_avx512(
-        k: *const jwt_key_t,
-        n: c_int,
-        msg: *const *const u8,
-        len: *const c_int,
-        mac: *mut [u32; 8],
-    );
-    pub fn jwt_hmac_avx512x2(
         k: *const jwt_key_t,
         n: c_int,
         msg: *const *const u8,
@@ -312,11 +298,9 @@ pub fn hmac_engines() -> Vec<(&'static str, hmac_fn)> {
     {
         if f & 1 != 0 {
             v.push(("avx2", jwt_hmac_avx2));
-            v.push(("avx2x2", jwt_hmac_avx2x2));
         }
         if f & 2 != 0 {
             v.push(("avx512vl", jwt_hmac_avx512));
-            v.push(("avx512x2", jwt_hmac_avx512x2));
             v.push(("zmm", jwt_hmac_zmm));
         }
         if f & 8 != 0 {

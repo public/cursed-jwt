@@ -25,7 +25,7 @@ $CC -O3 -w -march=x86-64 -Iinclude scripts/mca/kbench.c -o "$S/kb" || exit 1 # j
 cyc() { perf stat -x, -e cycles "$S/kb" "$1" "$N" "$2" 2>&1 >/dev/null | awk -F, '/cycles/{print $1}'; }
 for mode in chain indep; do
   base=$(cyc empty $mode)
-  for k in x1_scalar x8_avx2 x16_avx2x2 x8_avx512 x16_avx512x2 x16_zmm; do
+  for k in x1_scalar x8_avx2 x8_avx512 x16_zmm; do
     case "$k" in *avx512* | *zmm) grep -q avx512bw /proc/cpuinfo || continue ;; esac
     c=$(cyc "$k" $mode)
     [ -n "$c" ] && echo "$k $mode $(awk -v c="$c" -v b="$base" -v n="$N" 'BEGIN{printf "%.1f", (c - b) / n}')"

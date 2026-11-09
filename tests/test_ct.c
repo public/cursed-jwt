@@ -97,7 +97,6 @@ int main(int argc, char **argv) {
 #endif
 #if defined(__x86_64__)
             if (f & JWT_CPU_AVX2) bad += check_engine("avx2", jwt_hmac_avx2, secret, slen);
-            if (f & JWT_CPU_AVX2) bad += check_engine("avx2x2", jwt_hmac_avx2x2, secret, slen);
             if (f & JWT_CPU_SHANI) {
                 bad += check_engine("shani_1", jwt_hmac_shani_1, secret, slen);
                 bad += check_engine("shani_2", jwt_hmac_shani_2, secret, slen);
@@ -108,7 +107,6 @@ int main(int argc, char **argv) {
             }
             if (f & JWT_CPU_AVX512VL) {
                 bad += check_engine("avx512", jwt_hmac_avx512, secret, slen);
-                bad += check_engine("avx512x2", jwt_hmac_avx512x2, secret, slen);
                 bad += check_engine("zmm", jwt_hmac_zmm, secret, slen);
 #if defined(JWT_SHANI_MB) && defined(__ELF__)
                 bad += check_engine("x16", jwt_hmac_x16, secret, slen);

@@ -121,7 +121,7 @@ jwt_hmac_fn jwt_hmac_sha2, jwt_hmac_sha2_1, jwt_hmac_sha2_2; /* 4 interleaved st
 jwt_hmac_fn jwt_hmac_ossl; /* one message at a time, OpenSSL's extracted x86-64 block function (batch-1 path) */
 #endif
 #if defined(__x86_64__)
-jwt_hmac_fn jwt_hmac_avx2, jwt_hmac_avx2x2;                       /* x2: 16 lanes = two interleaved 8-lane groups */
+jwt_hmac_fn jwt_hmac_avx2;
 jwt_hmac_fn jwt_hmac_shani_1, jwt_hmac_shani_2, jwt_hmac_shani_4; /* SHA-NI, 1 / 2 / 4 interleaved streams */
 #endif
 #if defined(JWT_SHANI_MB) && defined(__x86_64__) && defined(__ELF__)
@@ -132,7 +132,7 @@ jwt_hmac_fn jwt_hmac_shani_1, jwt_hmac_shani_2, jwt_hmac_shani_4; /* SHA-NI, 1 /
 jwt_hmac_fn jwt_hmac_shani_4r, jwt_hmac_x16, jwt_hmac_shani_x16;
 #endif
 #if defined(__x86_64__)
-jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_avx512x2, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs, opt-in */
+jwt_hmac_fn jwt_hmac_avx512, jwt_hmac_zmm; /* zmm: 16 lanes in 512-bit regs (FAST_ZMM CPUs without FAST_SHANI) */
 #endif
 
 /* ---- RS256 / ES256 / EdDSA (built by default; -DJWT_NO_PK leaves them out; see PK.md) ----

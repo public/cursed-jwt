@@ -14,18 +14,15 @@ int main(int argc, char **argv) {
         void (*f)(void *, void *);
         int lanes;
     } K_[] = {
-        { "empty", k_empty, 1 },         { "x1_scalar", k_x1_scalar, 1 },
+        { "empty", k_empty, 1 },     { "x1_scalar", k_x1_scalar, 1 },
 #if defined(JWT_X86)
-        { "x8_avx2", k_x8_avx2, 8 },     { "x16_avx2x2", k_x16_avx2x2, 16 },
-        { "x8_avx512", k_x8_avx512, 8 }, { "x16_avx512x2", k_x16_avx512x2, 16 },
-        { "x16_zmm", k_x16_zmm, 16 },
+        { "x8_avx2", k_x8_avx2, 8 }, { "x8_avx512", k_x8_avx512, 8 }, { "x16_zmm", k_x16_zmm, 16 },
 #endif
 #if defined(JWT_HAVE_NEON)
         { "x4_neon", k_x4_neon, 4 },
 #endif
 #if defined(JWT_ARM_SHA2)
-        { "x1_sha2", k_x1_sha2, 1 },     { "x2_sha2", k_x2_sha2, 2 },
-        { "x4_sha2", k_x4_sha2, 4 },
+        { "x1_sha2", k_x1_sha2, 1 }, { "x2_sha2", k_x2_sha2, 2 },     { "x4_sha2", k_x4_sha2, 4 },
 #endif
     };
     if (argc < 3) {
