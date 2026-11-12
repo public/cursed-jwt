@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """seeds.py OUTDIR — starting corpora for the fuzz harnesses (deterministic; Python stdlib only).
 OUTDIR/verify: config byte + newline-separated tokens (valid ones, edge cases from the claim table, junk);
-OUTDIR/b64: base64url strings; OUTDIR/pk: algorithm byte + message + mutation ops."""
+OUTDIR/b64: base64url strings; OUTDIR/sign: config byte + NUL-separated payloads; OUTDIR/pk: algorithm byte + message + mutation ops."""
 
 import base64
 import hashlib
@@ -12,7 +12,7 @@ import random
 import sys
 
 out = sys.argv[1]
-for d in ("verify", "b64", "pk"):
+for d in ("verify", "b64", "sign", "pk"):
     os.makedirs(os.path.join(out, d), exist_ok=True)
 rnd = random.Random(1)
 b64u = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=")
@@ -64,4 +64,18 @@ for i in range(16):  # alg/fill byte, message length, message, mutation triples
     msg = bytes(rnd.randrange(256) for _ in range(rnd.randrange(0, 60)))
     ops = bytes(rnd.randrange(256) for _ in range(3 * rnd.randrange(0, 4)))
     open(os.path.join(out, "pk", "p%02d" % i), "wb").write(bytes([i, len(msg)]) + msg + ops)
-print(f"seeds: {len(toks) + 1} verify, {6 + 10} b64, 16 pk -> {out}")
+extra = [
+    b"",
+    b"{}",
+    b'{"exp":%d}' % EXP,
+    b'{"exp":%d,"nbf":%d}' % (EXP, EXP + 10),
+    b'{"exp":"x"}',
+    b'{"exp":%d,"exp":%d}' % (EXP, EXP),
+    b'{"ex\\u0070":1,"exp":%d}' % EXP,
+    b'{"exp":%d}  x' % EXP,
+    b'{"exp":%d,"pad":"%s"}' % (EXP, b"p" * 6500),
+]
+for i, r in enumerate(raws + extra):  # one payload per seed (EdDSA on every other), then all in one batch
+    open(os.path.join(out, "sign", "p%02d" % i), "wb").write(bytes([i % 8]) + r)
+open(os.path.join(out, "sign", "batch"), "wb").write(b"\x07" + b"\0".join(raws + extra))
+print(f"seeds: {len(toks) + 1} verify, {6 + 10} b64, {len(raws) + len(extra) + 1} sign, 16 pk -> {out}")

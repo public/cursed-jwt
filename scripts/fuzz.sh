@@ -4,6 +4,7 @@
 # go to build/fuzz-<arch>/ (kept between runs, so each run starts from the last one's corpus).
 #   verify      HS256: every engine and batch split agree, fast JSON paths == strict parser, result invariants
 #   b64         base64url: SIMD == scalar == an RFC 4648 reference
+#   sign        signing: payload checks agree with the verifier both ways, engines / batch splits agree, the encoder
 #   pk, pk_screen, pk_ossl   RS256 / ES256 (portable C, screening, libcrypto BN) vs OpenSSL's verdict
 # DOCKER_CPUS (default 8-13) pins the container; JOBS (default 1) parallel workers per harness.  The defaults are a smoke run (~1 min);
 # use e.g. `JOBS=6 ./scripts/fuzz.sh arm64 600` for a real campaign.
@@ -23,10 +24,11 @@ docker run --rm --platform linux/$ARCH --cpuset-cpus "${DOCKER_CPUS:-8-13}" -v "
   PK=''
   clang \$F fuzz/fuzz_verify.c \$S -lcrypto -o /tmp/verify
   clang \$F fuzz/fuzz_b64.c \$S -o /tmp/b64
+  clang \$F fuzz/fuzz_sign.c \$S -o /tmp/sign
   clang \$F \$PK fuzz/fuzz_pk.c \$S -lcrypto -o /tmp/pk
   clang \$F \$PK -DJWT_RSA_SCREEN fuzz/fuzz_pk.c \$S -lcrypto -o /tmp/pk_screen
   clang \$F \$PK -DJWT_OPENSSL fuzz/fuzz_pk.c \$S -lcrypto -o /tmp/pk_ossl
-  for h in verify b64 pk pk_screen pk_ossl; do
+  for h in verify b64 sign pk pk_screen pk_ossl; do
     seed=\${h%%_*}; mkdir -p /out/corpus/\$seed /out/crash-\$h
     echo \"== \$h (\$(uname -m), ${SECS} s)\"
     cd /out && ASAN_OPTIONS=detect_leaks=0 /tmp/\$h -max_total_time=$SECS -jobs=${JOBS:-1} -workers=${JOBS:-1} -max_len=12000 \

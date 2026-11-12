@@ -245,12 +245,14 @@ $(B)/replay_verify: fuzz/fuzz_verify.c fuzz/replay.c $(SRC) | $(B)
 	$(CC) $(FUZZ_SAN) fuzz/fuzz_verify.c fuzz/replay.c $(SSLLIB) -lcrypto $(X86SHA) -o $@
 $(B)/replay_b64: fuzz/fuzz_b64.c fuzz/replay.c $(SRC) | $(B)
 	$(CC) $(FUZZ_SAN) fuzz/fuzz_b64.c fuzz/replay.c $(X86SHA) -o $@
+$(B)/replay_sign: fuzz/fuzz_sign.c fuzz/replay.c $(SRC) | $(B)
+	$(CC) $(FUZZ_SAN) fuzz/fuzz_sign.c fuzz/replay.c $(X86SHA) -o $@
 $(B)/replay_pk: fuzz/fuzz_pk.c fuzz/replay.c $(PKSRC) | $(B)
 	$(CC) $(FUZZ_SAN) $(filter-out $(MONTOBJ),$(PK)) -DJWT_RSA_SCREEN fuzz/fuzz_pk.c fuzz/replay.c $(SSLLIB) -lcrypto \
 	  $(X86SHA) -o $@
-fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_pk
+fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_sign $(B)/replay_pk
 	@python3 -I fuzz/seeds.py $(B)/fuzz-seeds >/dev/null
-	@for h in verify b64 pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
+	@for h in verify b64 sign pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
 	  $$(ls -d $(B)/fuzz-*/corpus/$$h 2>/dev/null) || exit 1; done
 FUZZ_SECS ?= 10
 fuzz:
