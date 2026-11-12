@@ -1,9 +1,10 @@
 /* jwt.c — see jwt.h.  Part of cursed-jwt, MIT licence (see LICENSE).  The JWT layer over cursed-crypto (crypto/):
- *   3. base64url decode: scalar / NEON (vld4 de-interleave + vqtbl4) / AVX2 / AVX-512 VBMI
+ *   3. base64url decode: scalar / NEON (vld4 de-interleave + vqtbl4) / AVX2 / AVX-512 VBMI; the encoder
  *   4. strict JSON for the header and payload; 4b. the shape-matched fast path for the payload
  *   5. the batch front ends (HS256, and RS256 / ES256 / EdDSA)
+ *   6. signing (HS256, EdDSA)
  * Sections 1 and 2 (SHA-256 / HMAC, CPU dispatch) are crypto/src/cc_sha256.c, the public-key algorithms
- * crypto/src/cc_pk.c. */
+ * crypto/src/cc_pk.c, Ed25519 signing crypto/src/cc_sign.c. */
 #include "jwt.h"
 
 #ifndef JWT_EXTERNAL_CRYPTO
@@ -239,6 +240,35 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return CC_LOAD_FN(
 #else
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_decode_scalar(dst, src, n); }
 #endif
+
+/* base64url encode, unpadded.  Branch-free and table-free (the MAC and signature bytes go through it): each sextet v
+ * maps to v + 'A', then masks derived from v by subtraction move it to 'a'..'z', '0'..'9', '-' or '_'. */
+CC_INLINE char b64u_char(uint32_t v) {
+#define B64U_GE(x) (0u - ((uint32_t)((x) - v) >> 31)) /* all ones iff v > x */
+    uint32_t c = v + 'A';
+    c += B64U_GE(25) & 6;   /* 26..51 -> 'a'..'z' */
+    c -= B64U_GE(51) & 75;  /* 52..61 -> '0'..'9' */
+    c -= B64U_GE(61) & 13;  /* 62 -> '-' */
+    c += B64U_GE(62) & 49;  /* 63 -> '_' */
+#undef B64U_GE
+    return (char)c;
+}
+int jwt_b64url_encode(char *dst, const uint8_t *src, int n) {
+    int o = 0, i = 0;
+    for (; i + 3 <= n; i += 3, o += 4) {
+        uint32_t v = (uint32_t)src[i] << 16 | (uint32_t)src[i + 1] << 8 | src[i + 2];
+        dst[o] = b64u_char(v >> 18), dst[o + 1] = b64u_char(v >> 12 & 63);
+        dst[o + 2] = b64u_char(v >> 6 & 63), dst[o + 3] = b64u_char(v & 63);
+    }
+    if (n - i == 1) {
+        uint32_t v = (uint32_t)src[i] << 16;
+        dst[o++] = b64u_char(v >> 18), dst[o++] = b64u_char(v >> 12 & 63);
+    } else if (n - i == 2) {
+        uint32_t v = (uint32_t)src[i] << 16 | (uint32_t)src[i + 1] << 8;
+        dst[o++] = b64u_char(v >> 18), dst[o++] = b64u_char(v >> 12 & 63), dst[o++] = b64u_char(v >> 6 & 63);
+    }
+    return o;
+}
 
 /* ======================================================================================
  * 4. strict JSON
@@ -966,5 +996,163 @@ void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, con
         for (int j = 0; j < c; j++)
             if (ok[j]) claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
     }
+}
+#endif
+
+/* ======================================================================================
+ * 6. signing: HS256 through the multi-buffer HMAC engines, EdDSA through cursed-crypto's constant-time signer
+ * ====================================================================================== */
+
+/* A payload this library's verifier would accept, short of the claim profile and the clock (jwt.h, jwt_sign_batch):
+ * one JSON object, strict grammar, "exp" present, "exp" / "nbf" numbers, no repeated sub / username / exp / nbf. */
+static int payload_sign_ok(const uint8_t *pl, int n) {
+    jcur_t c = { pl, pl + n };
+    const uint8_t *s;
+    int len, esc, seen = 0, isint;
+    jws(&c);
+    if (c.p >= c.e || *c.p++ != '{') return 0;
+    jws(&c);
+    if (c.p < c.e && *c.p == '}') return 0; /* no exp */
+    for (;;) {
+        jws(&c);
+        if (!jstr(&c, &s, &len, &esc)) return 0;
+        int key = jkey(s, len, esc);
+        jws(&c);
+        if (c.p >= c.e || *c.p++ != ':') return 0;
+        jws(&c);
+        if (key != K_OTHER && key != K_ALG) {
+            if (seen & (1 << key)) return 0;
+            seen |= 1 << key;
+        }
+        if (c.p >= c.e) return 0;
+        if (key == K_EXP || key == K_NBF) {
+            if (*c.p != '-' && (*c.p < '0' || *c.p > '9')) return 0;
+            if (!jnum(&c, &s, &len, &isint)) return 0;
+        } else if (!jskip(&c, 1)) {
+            return 0;
+        }
+        jws(&c);
+        if (c.p >= c.e) return 0;
+        if (*c.p == ',') {
+            c.p++;
+            continue;
+        }
+        if (*c.p++ != '}') return 0;
+        break;
+    }
+    jws(&c);
+    return c.p == c.e && (seen & (1 << K_EXP));
+}
+
+/* header (36 chars) '.' payload '.' signature */
+static int sign_token_len(int payload_len, int sig_bytes) {
+    if (payload_len < 0 || payload_len > JWT_TOKEN_MAX) return -1;
+    int t = 36 + 1 + (payload_len * 4 + 2) / 3 + 1 + (sig_bytes * 4 + 2) / 3;
+    return t > JWT_TOKEN_MAX ? -1 : t;
+}
+int jwt_sign_size(int payload_len) {
+    int t = sign_token_len(payload_len, 32);
+    return t < 0 ? -1 : t + 1 + JWT_SIGN_SLACK;
+}
+
+/* checks payload i and writes "<header>.<payload>" into out[i]; returns the signing input's length or -1 */
+static int sign_input(const char *canon, const char *pl, int pn, int sig_bytes, char *out) {
+    if (sign_token_len(pn, sig_bytes) < 0 || !payload_sign_ok((const uint8_t *)pl, pn)) {
+        out[0] = 0;
+        return -1;
+    }
+    memcpy(out, canon, 36);
+    out[36] = '.';
+    return 37 + jwt_b64url_encode(out + 37, (const uint8_t *)pl, pn);
+}
+
+static int sign_impl(const jwt_key_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
+                     int *out_len, jwt_hmac_fn *hmac) {
+    enum { CH = 64 };
+    const uint8_t *msg[CH];
+    int mlen[CH], idx[CH], issued = 0;
+    uint32_t mac[CH][8];
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH, c = 0;
+        for (int i = 0; i < m; i++) {
+            int t = base + i, L = sign_input(canon_hdr, payload[t], payload_len[t], 32, out[t]);
+            out_len[t] = -1;
+            if (L < 0) continue;
+            msg[c] = (const uint8_t *)out[t], mlen[c] = L, idx[c++] = t;
+        }
+        hmac(k, c, msg, mlen, mac);
+        for (int j = 0; j < c; j++) {
+            uint8_t tag[32];
+            for (int w = 0; w < 8; w++) {
+                uint32_t v = mac[j][w];
+                tag[4 * w] = (uint8_t)(v >> 24), tag[4 * w + 1] = (uint8_t)(v >> 16);
+                tag[4 * w + 2] = (uint8_t)(v >> 8), tag[4 * w + 3] = (uint8_t)v;
+            }
+            char *o = out[idx[j]] + mlen[j];
+            *o++ = '.';
+            o += jwt_b64url_encode(o, tag, 32);
+            *o = 0;
+            out_len[idx[j]] = (int)(o - out[idx[j]]);
+            issued++;
+        }
+    }
+    return issued;
+}
+int jwt_sign_batch(const jwt_key_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
+                   int *out_len) {
+    return sign_impl(k, n, payload, payload_len, out, out_len, CC_LOAD_FN(cc__hmac_impl));
+}
+
+#ifndef CC_NO_PK
+struct jwt_skey {
+    cc_skey_t *cc;
+    const char *canon;
+    int sig_bytes;
+};
+jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]) {
+    jwt_skey_t *k = calloc(1, sizeof *k);
+    if (!k) return NULL;
+    if (!(k->cc = cc_skey_ed25519(seed))) {
+        free(k);
+        return NULL;
+    }
+    k->canon = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9", k->sig_bytes = 64; /* {"alg":"EdDSA","typ":"JWT"} */
+    return k;
+}
+void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]) { cc_skey_public(k->cc, pub); }
+void jwt_skey_free(jwt_skey_t *k) {
+    if (!k) return;
+    cc_skey_free(k->cc);
+    free(k);
+}
+int jwt_sign_size_pk(const jwt_skey_t *k, int payload_len) {
+    int t = sign_token_len(payload_len, k->sig_bytes);
+    return t < 0 ? -1 : t + 1;
+}
+int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
+                      int *out_len) {
+    enum { CH = 16 };
+    const uint8_t *msg[CH];
+    uint8_t sb[CH][64], *sp[CH];
+    int mlen[CH], idx[CH], issued = 0;
+    for (int base = 0; base < n; base += CH) {
+        int m = n - base < CH ? n - base : CH, c = 0;
+        for (int i = 0; i < m; i++) {
+            int t = base + i, L = sign_input(k->canon, payload[t], payload_len[t], k->sig_bytes, out[t]);
+            out_len[t] = -1;
+            if (L < 0) continue;
+            msg[c] = (const uint8_t *)out[t], mlen[c] = L, sp[c] = sb[c], idx[c++] = t;
+        }
+        cc_sign_batch(k->cc, c, msg, mlen, sp);
+        for (int j = 0; j < c; j++) {
+            char *o = out[idx[j]] + mlen[j];
+            *o++ = '.';
+            o += jwt_b64url_encode(o, sb[j], k->sig_bytes);
+            *o = 0;
+            out_len[idx[j]] = (int)(o - out[idx[j]]);
+            issued++;
+        }
+    }
+    return issued;
 }
 #endif
