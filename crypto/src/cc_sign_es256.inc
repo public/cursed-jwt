@@ -212,21 +212,22 @@ static void es_inv_n(uint64_t o[4], const uint64_t a[4]) {
 /* ---- RFC 6979 3.2 (SHA-256, q = n, qlen = hlen = 256) ---- */
 typedef struct {
     uint8_t K[32], V[32];
+    cc_hmac_key_t hk; /* K's HMAC midstates: K changes 3 times in 8 HMACs, so each key is set up once */
 } es_drbg;
-static void es_hmac(uint8_t out[32], const uint8_t K[32], const uint8_t *m, int len) {
-    cc_hmac_key_t hk;
-    cc_hmac_key_init(&hk, K, 32);
-    cc_hmac_sha256_bytes(&hk, 1, &m, &len, (uint8_t(*)[32])out);
-    cc_wipe(&hk, sizeof hk);
+static void es_hmac(uint8_t out[32], const cc_hmac_key_t *hk, const uint8_t *m, int len) {
+    cc_hmac_sha256_bytes(hk, 1, &m, &len, (uint8_t(*)[32])out);
 }
+static void es_setk(es_drbg *g) { cc_hmac_key_init(&g->hk, g->K, 32); }
 /* x = int2octets(d), h = bits2octets(H(m)) = int2octets(H(m) mod n) */
 static void es_drbg_init(es_drbg *g, const uint8_t x[32], const uint8_t h[32]) {
     uint8_t buf[97];
     memset(g->V, 1, 32), memset(g->K, 0, 32);
-    for (int t = 0; t < 2; t++) {
+    es_setk(g);
+    for (int t = 0; t < 2; t++) { /* K = HMAC_K(V || t || x || h), V = HMAC_K(V) */
         memcpy(buf, g->V, 32), buf[32] = (uint8_t)t, memcpy(buf + 33, x, 32), memcpy(buf + 65, h, 32);
-        es_hmac(g->K, g->K, buf, 97);
-        es_hmac(g->V, g->K, g->V, 32);
+        es_hmac(g->K, &g->hk, buf, 97);
+        es_setk(g);
+        es_hmac(g->V, &g->hk, g->V, 32);
     }
     cc_wipe(buf, sizeof buf);
 }
@@ -235,11 +236,12 @@ static int es_drbg_next(es_drbg *g, uint64_t k[4], int retry) {
     if (retry) { /* K = HMAC_K(V || 0x00), V = HMAC_K(V) */
         uint8_t buf[33];
         memcpy(buf, g->V, 32), buf[32] = 0;
-        es_hmac(g->K, g->K, buf, 33);
-        es_hmac(g->V, g->K, g->V, 32);
+        es_hmac(g->K, &g->hk, buf, 33);
+        es_setk(g);
+        es_hmac(g->V, &g->hk, g->V, 32);
         cc_wipe(buf, sizeof buf);
     }
-    es_hmac(g->V, g->K, g->V, 32);
+    es_hmac(g->V, &g->hk, g->V, 32);
     es_be_to_limbs(k, g->V);
     uint64_t ok = es_in_range(k);
     CC_DECLASSIFY(&ok, sizeof ok);
