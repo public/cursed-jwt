@@ -77,18 +77,36 @@ batch size.
   | ES256 at batch 16 | 4.3 | 5.0 |
 
 **Against crypto libraries:** one operation at a time, on the same 570-byte signing inputs. The ratio is to the
-fastest other library on that CPU, which is named.
+fastest other library on that CPU, which is named. A ratio below 1 means that library is faster.
 
 | | Turin | Genoa | Cascade Lake |
 |---|---|---|---|
-| HMAC-SHA256 | 1.03× (AWS-LC) | 1.00× (AWS-LC) | 1.10× (OpenSSL) |
-| RSA-2048 verify | 2.20× (AWS-LC) | 3.39× (AWS-LC) | 1.03× (AWS-LC) |
+| HMAC-SHA256 | 1.03× (AWS-LC, BoringSSL) | 1.00× (AWS-LC) | 1.08× (OpenSSL) |
+| RSA-2048 verify | 1.38× (Intel ippcp) | 1.46× (Intel ippcp) | **0.95× (Intel ippcp)**; batched, a tie |
 | ECDSA P-256 verify | 2.47× (AWS-LC) | 2.51× (AWS-LC) | 2.64× (AWS-LC) |
 | Ed25519 verify | 2.95× (AWS-LC) | 2.89× (ed25519-dalek) | 2.83× (ed25519-dalek) |
 
-- **The other libraries:** OpenSSL 3.0.13, AWS-LC 5.13.0, libsodium 1.0.22, Go 1.27's standard library, ring 0.17.14
-  and ed25519-dalek 3.0.0, each through its fastest documented path (keys parsed once).
-- **cursed-crypto's build:** `-DJWT_S2N -DJWT_OPENSSL -DJWT_RSAZ -DJWT_RSAZ8`.
+- **The other libraries:**
+  - OpenSSL 3.0.13, AWS-LC 5.13.0, libsodium 1.0.22, Go 1.27's standard library, ring 0.17.14 and ed25519-dalek
+    3.0.0;
+  - in a second run, BoringSSL 0.20261105.0 and Intel IPP crypto v2.4.0's `ippcp` (cryptography-primitives), which
+    has no Ed25519.
+
+  Each goes through its fastest documented path, keys parsed once, with OpenSSL timed in both runs as an anchor. Each
+  ratio is from one run on one VM.
+- **cursed-crypto's build:** `-DJWT_S2N -DJWT_OPENSSL -DJWT_RSAZ -DJWT_RSAZ8`, plus `-DJWT_ES8` in the second run.
+
+**Against Intel crypto_mb's 8-way verifies** (IPP crypto v2.4.0, AVX-512 IFMA only, so not on Cascade Lake). The ratio
+is crypto_mb's time per verify divided by ours at the same group size, 8 per call:
+
+| | Turin | Genoa |
+|---|---|---|
+| RSA-2048 | 1.24× | 1.14× |
+| ECDSA P-256 | 3.16× | 3.61× |
+| Ed25519 | 1.11× | 1.44× |
+
+Per verify, crypto_mb's groups of 8 are faster than our one-at-a-time path on Zen 4 / Zen 5: RSA up to 1.9×, P-256 up
+to 1.2×, and Ed25519 1.2× on Turin. Against our groups of 8, they're slower.
 
 **Against Intel ipsec-mb's multi-buffer HMAC-SHA256** (3.0.0, its 16-lane AVX-512 manager on all three CPUs).
 ipsec-mb gets exactly N messages and a flush, the same job as our call with N. Ratios for N = 1 to 32:
@@ -102,14 +120,18 @@ ipsec-mb gets exactly N messages and a flush, the same job as our call with N. R
 On Cascade Lake, 9 or more tokens run on the x16 kernel, at the cost of the zmm frequency licence (see
 [Building](#building)). The x16 kernel wasn't measured at N = 9, 10 or 24.
 
-**Is it the fastest?** Of everything we measured, on those three CPUs, yes, with four caveats:
+**Is it the fastest?** Of everything we measured, on those three CPUs, yes, with one exception and four caveats.
+
+**The exception:** RSA-2048 verify one at a time on Cascade Lake. Intel ippcp's AVX-512F code takes 23.1 µs against
+our 24.4 µs, 5% faster. Batched, it's a tie. That VM has no ADX and no IFMA.
+
+**The caveats:**
 - **One HMAC at a time ties AWS-LC.** The batch-1 path is OpenSSL's own SHA-256 code, and so is AWS-LC's; batching is
   where the gain comes from.
 - **ES256 and EdDSA's lead depends partly on per-key tables:** about 530–570 KB and a few milliseconds of key setup per
   key. That's the right trade for a server that sees many tokens per key, and the wrong one for verifying under a
   fresh key each time.
-- **Not everything was measured:** BoringSSL directly (jwt-simple builds on it), wolfSSL, Intel IPP, Apple's
-  CommonCrypto, or GPU/FPGA offload. These are VMs, not bare metal, and the ARM numbers are older (see
+- **Not everything was measured:** wolfSSL, Apple's CommonCrypto, or GPU/FPGA offload. These are VMs, not bare metal, and the ARM numbers are older (see
   [Benchmarks](#benchmarks)).
 - **The licence isn't only MIT.** cursed-jwt's own code is MIT, and every fast path is permissively licensed, but some
   of the fastest kernels are other projects' code under Apache-2.0 or BSD-3-Clause (see [Licence](#licence)).
