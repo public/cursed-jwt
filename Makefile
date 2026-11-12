@@ -12,6 +12,7 @@
 #   make fuzz-smoke   fuzz harnesses replaying their seed/saved corpora under ASan + UBSan (seconds, local)
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
+#   make sign-test    HS256 / EdDSA signing: RFC 8032 / 8037 / 7515 and pyca exact outputs, round trips, pyca checks
 #   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 #   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
@@ -142,6 +143,19 @@ test: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
 	./scripts/check-symbols.sh --cc-only $(B)/libcursedcrypto.a
 	./scripts/check-symbols.sh $(B)/libcursedjwt.a
+# signing (README.md, Signing): exact-output vectors (RFC 8032 7.1, RFC 8037 A.4, RFC 7515 A.1, pyca/cryptography),
+# round trips through both verifiers on every HMAC engine, then pyca/cryptography and Python's hmac check emitted tokens
+SIGN_N ?= 300
+$(B)/test_sign: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+	./scripts/fetch-vectors.sh
+	$$(cat $(B)/pyenv) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
+sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
+	./$(B)/test_sign $(B)/sign_vectors.txt
+	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
+	./$(B)/test_sign emit $(SIGN_N) > $(B)/sign_emitted.txt
+	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
@@ -376,4 +390,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: sign-test check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

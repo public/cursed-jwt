@@ -1143,7 +1143,7 @@ int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, co
             if (L < 0) continue;
             msg[c] = (const uint8_t *)out[t], mlen[c] = L, sp[c] = sb[c], idx[c++] = t;
         }
-        cc_sign_batch(k->cc, c, msg, mlen, sp);
+        if (c) cc_sign_batch(k->cc, c, msg, mlen, sp);
         for (int j = 0; j < c; j++) {
             char *o = out[idx[j]] + mlen[j];
             *o++ = '.';
