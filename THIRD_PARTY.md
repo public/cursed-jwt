@@ -54,8 +54,8 @@
   - **Modifications:** the preprocessor's line markers and blank lines removed and its `align` expansions folded back
     into `align`; the three functions renamed `cc_ipp_mul_school`, `cc_ipp_sqr_school`, `cc_ipp_mont_red` and made
     hidden. The machine code is unchanged: the script checks that its `.text` equals ippcp's own k0 object's.
-  - Used only when built with `make TUNED=1` or `TUNED_RSA_IPP=1` (`-DCC_TUNED_RSA_IPP`), for RSA on x86-64 CPUs with
-    BMI2 but no ADX.
+  - Used only when built with `make TUNED=1` or `TUNED_RSA_IPP=1` (`-DCC_TUNED_RSA_IPP`), for RSA-2048 on x86-64 CPUs
+    with BMI2 but no ADX.
 
 - **s2n-bignum's `edwards25519_scalarmulbase` for x86-64** (https://github.com/awslabs/s2n-bignum, commit
   `3306729`): `crypto/src/s2n/edwards25519_scalarmulbase.S`, `edwards25519_scalarmulbase_alt.S` and

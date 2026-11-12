@@ -688,8 +688,9 @@ static void mont_sqr_om(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
 #endif
 #if defined(CC_TUNED_RSA_IPP) && defined(__x86_64__) && defined(__ELF__)
 /* -DCC_TUNED_RSA_IPP (opt-in: make TUNED=1 or TUNED_RSA_IPP=1): Intel Cryptography Primitives' (ippcp) schoolbook
- * multiply / square followed by a separate Montgomery reduction, for BMI2 CPUs without ADX (mulx with add/adc
- * chains), extracted from ippcp's k0 build (crypto/src/ippcp_mont_k0.asm).  As in ippcp, leaving the Montgomery domain
+ * multiply / square followed by a separate Montgomery reduction, for RSA-2048 on BMI2 CPUs without ADX (mulx with
+ * add/adc chains), extracted from ippcp's k0 build (crypto/src/ippcp_mont_k0.asm).  Other sizes keep bn_mul_mont:
+ * only 2048 bits was measured.  As in ippcp, leaving the Montgomery domain
  * is a bare reduction instead of a multiplication by 1.  Taken only where s2n-bignum and OpenSSL's mulx/adx paths
  * can't run (BMI2 without ADX: many cloud VMs hide ADX); RSA verify there is about 5% faster than OpenSSL's
  * bn_mul_mont (README.md, Options). */
@@ -722,7 +723,7 @@ static mont_ops_t mont_for(const rsa_key_t *k) {
     if (k->nl == 32 && s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
 #endif
 #ifdef CC_HAVE_IPP_MONT
-    if (ipp_mont_ok()) return (mont_ops_t){ mont_mul_ipp, mont_sqr_ipp };
+    if (k->nl == 32 && ipp_mont_ok()) return (mont_ops_t){ mont_mul_ipp, mont_sqr_ipp }; /* RSA-2048: measured */
 #endif
 #ifdef CC_HAVE_OSSL_MONT
     if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
