@@ -221,23 +221,30 @@ static const cc_hmac_key_t sha_iv_key = {
 #include <cpuid.h>
 void cc_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
 #endif
-#if (defined(CC_OSSL_SHA256) || defined(CC_OSSL_MONT)) && defined(__x86_64__) && defined(__ELF__)
-/* the capability word OpenSSL's extracted asm dispatches on (SHA-256 above; bn_mul_mont reads word 2's BMI2 + ADX) */
+#if (defined(CC_OSSL_SHA256) || defined(CC_OSSL_SHA512) || defined(CC_OSSL_MONT)) && defined(__x86_64__) &&            \
+    defined(__ELF__)
+/* the capability word OpenSSL's extracted asm dispatches on (SHA-256 above, SHA-512 in cc_sha512.c; bn_mul_mont reads
+ * word 2's BMI2 + ADX).  Word 5 is CPUID.7.1:EAX (bit 0: the SHA512 instructions).  Word 1 bit 11 is OpenSSL's own XOP
+ * flag, not CPUID.1:ECX bit 11 (SDBG on Intel): it is always cleared, so the SHA-512 code never takes its XOP path. */
 #include <cpuid.h>
-__attribute__((visibility("hidden"))) unsigned int cc_ossl_ia32cap_P[4];
+__attribute__((visibility("hidden"))) unsigned int cc_ossl_ia32cap_P[8];
 __attribute__((constructor)) static void cc_ossl_cap_init(void) {
-    unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0;
+    unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0, w5 = 0;
     if (__get_cpuid(0, &a, &b, &c, &d) && b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e) w0 |= 1u << 30;
     if (__get_cpuid(1, &a, &b, &c, &d)) w1 = c;
-    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) w2 = b;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) {
+        w2 = b;
+        if (a >= 1 && __get_cpuid_count(7, 1, &a, &b, &c, &d)) w5 = a;
+    }
+    w1 &= ~(1u << 11);
     int ymm = 0;
     if (w1 & (1u << 27)) { /* OSXSAVE: XCR0 bits 1 (SSE) and 2 (AVX) */
         unsigned lo, hi;
         __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
         ymm = (lo & 6) == 6;
     }
-    if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5);
-    cc_ossl_ia32cap_P[0] = w0, cc_ossl_ia32cap_P[1] = w1, cc_ossl_ia32cap_P[2] = w2;
+    if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5), w5 = 0;
+    cc_ossl_ia32cap_P[0] = w0, cc_ossl_ia32cap_P[1] = w1, cc_ossl_ia32cap_P[2] = w2, cc_ossl_ia32cap_P[5] = w5;
 }
 #endif
 #if defined(CC_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)

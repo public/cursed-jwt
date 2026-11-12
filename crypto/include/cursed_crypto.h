@@ -3,8 +3,9 @@
  *
  * Build: compile crypto/src/cursed_crypto.c (one translation unit) for the baseline ISA, no -march needed, or link
  * the Makefile's build/libcursedcrypto.a.  On x86-64 Linux the Makefile also assembles the .S kernels in crypto/src
- * and builds with -DCC_OSSL_SHA256 -DCC_SHANI_MB -DCC_OSSL_MONT (README.md, Building, lists every option; the JWT_
- * spellings of the build flags are accepted as well).
+ * (and crypto/src/s2n) and builds with -DCC_OSSL_SHA256 -DCC_OSSL_SHA512 -DCC_SHANI_MB -DCC_OSSL_MONT
+ * -DCC_ED25519_ASM (README.md, Building, lists every option; the JWT_ spellings of the build flags are accepted as
+ * well).
  *
  * Every call takes a batch: n messages, verified or hashed together, so the cost of a call is per batch.
  *

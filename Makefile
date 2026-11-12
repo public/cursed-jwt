@@ -37,15 +37,16 @@ ARCHFLAGS ?=
 # ELF only), SHA-NI batches the generated 3/4-stream kernels (crypto/src/sha256_shani_mb.S) and zmm batches the generated
 # 16-lane kernel (crypto/src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB, and RSA uses OpenSSL's extracted bn_mul_mont
 # (crypto/src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.  Ed25519 signing's fixed-base multiplication is
-# s2n-bignum's (crypto/src/s2n/, vendored; -DJWT_ED25519_ASM).  `make OSSL_SHA=` builds without any of them.
+# s2n-bignum's (crypto/src/s2n/, vendored; -DJWT_ED25519_ASM), and SHA-512 is OpenSSL's (crypto/src/sha512_x86_64_ossl.S,
+# -DJWT_OSSL_SHA512).  `make OSSL_SHA=` builds without any of them.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
 ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o
 ifeq ($(OSSL_SHA),1)
 MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
-SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM
-SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ) $(ED25519OBJ)
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha512_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ) $(ED25519OBJ)
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
@@ -78,6 +79,8 @@ $(B):
 $(B)/jwt.o: $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(SHAFLAG) $(WARN) -Iinclude -c src/jwt.c -o $@
 $(B)/sha256_x86_64_ossl.o: crypto/src/sha256_x86_64_ossl.S | $(B)
+	$(CC) $(ASJCC) -c $< -o $@
+$(B)/sha512_x86_64_ossl.o: crypto/src/sha512_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
