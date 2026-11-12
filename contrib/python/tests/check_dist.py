@@ -12,6 +12,7 @@ NEED = [
     "Firedancer-LICENSE.txt",
     "intel-ipsec-mb-LICENSE.txt",
     "fiat-crypto-LICENSE-MIT.txt",
+    "s2n-bignum-LICENSE.txt",
 ]
 
 d = sys.argv[1]

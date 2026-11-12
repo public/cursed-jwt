@@ -2,8 +2,8 @@
 
 cursed-crypto is compiled exactly as the library's Makefile compiles it: crypto/src/cursed_crypto.c as one
 translation unit at -O3 for the baseline ISA (the engines are picked at run time from the CPU), and on x86-64 ELF
-the committed .S kernels with -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT.  Elsewhere it is the portable
-build (the Makefile's OSSL_SHA=).  Nothing is fetched at build time.
+the committed .S kernels with -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM.  Elsewhere it is
+the portable build (the Makefile's OSSL_SHA=).  Nothing is fetched at build time.
 
 In the cursed-jwt tree the sources sit two levels up (../../crypto, ../../LICENSE, ../../licenses).  They are
 copied into vendor/ before every build, so the sdist carries them and a wheel built from the sdist is identical to
@@ -33,6 +33,9 @@ ASM = [
     "sha256_x16_avx512.S",
     "bn_mont_x86_64_ossl.S",
     "bn_mont5_x86_64_ossl.S",
+    # s2n-bignum's constant-time Ed25519 fixed-base kernels (Ed25519 signing), renamed as the library's Makefile does
+    "s2n/edwards25519_scalarmulbase.S",
+    "s2n/edwards25519_scalarmulbase_alt.S",
 ]
 
 
@@ -66,7 +69,11 @@ x86_elf = (
     and os.environ.get("CURSED_CRYPTO_PORTABLE", "") != "1"
 )
 csrc = os.path.join("vendor", "crypto", "src")
-macros = [("JWT_OSSL_SHA256", None), ("JWT_SHANI_MB", None), ("JWT_OSSL_MONT", None)] if x86_elf else []
+macros = (
+    [("JWT_OSSL_SHA256", None), ("JWT_SHANI_MB", None), ("JWT_OSSL_MONT", None), ("JWT_ED25519_ASM", None)]
+    if x86_elf
+    else []
+)
 extra_c = shlex.split(os.environ.get("CURSED_CRYPTO_CFLAGS", ""))
 extra_ld = shlex.split(os.environ.get("CURSED_CRYPTO_LDFLAGS", ""))
 cflags = [
@@ -90,8 +97,10 @@ class BuildExt(build_ext):
             os.makedirs(objdir, exist_ok=True)
             objs = []
             for s in ASM:
-                o = os.path.join(objdir, s[:-2] + ".o")
-                self.spawn(self.compiler.compiler_so[:1] + ["-c", os.path.join(csrc, s), "-o", o])
+                name = os.path.basename(s)[:-2]
+                o = os.path.join(objdir, name + ".o")
+                ren = ["-DS2N_BN_HIDE_SYMBOLS=1", f"-D{name}=cc_s2n_{name}"] if s.startswith("s2n/") else []
+                self.spawn(self.compiler.compiler_so[:1] + ren + ["-c", os.path.join(csrc, s), "-o", o])
                 objs.append(o)
             ext.extra_objects = objs
         super().build_extension(ext)
