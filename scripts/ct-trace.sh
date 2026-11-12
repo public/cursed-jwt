@@ -1,7 +1,7 @@
 #!/bin/sh
-# Trace-equivalence constant-time check of the HMAC engines (see tests/ct_trace.c). Each engine runs under two keys at
-# batch 1, 3 and 16; the run fails if any engine's instruction / memory-address trace differs between the keys, or if
-# the leaky control's doesn't.
+# Trace-equivalence constant-time check of the HMAC engines and of signing (see tests/ct_trace.c). Each engine runs
+# under two keys at batch 1, 3 and 16 (signing Ed25519: 1 and 3); the run fails if any engine's instruction / memory-
+# address trace differs between the keys, or if the leaky control's doesn't.
 #
 #   ct-trace.sh SDE CT_TRACE [ENGINES]                 x86-64 under Intel SDE (-icx: AVX-512 and SHA-NI)
 #   ct-trace.sh --qemu QEMU EXECLOG CT_TRACE [ENGINES] AArch64 under qemu-aarch64 with its execlog plugin (a static,
@@ -10,7 +10,7 @@ set -eu
 if [ "$1" = --qemu ]; then
   MODE=qemu QEMU="$2" EXECLOG="$3" BIN="$4"
   shift 4
-  ENGINES="${1:-scalar neon sha2_1 sha2_2 sha2 verify}"
+  ENGINES="${1:-scalar neon sha2_1 sha2_2 sha2 verify sign_hs sign_ed}"
   NM="${NM:-aarch64-linux-gnu-nm}"
   # execlog prints each pc as 0x%x; nm pads to 16 digits
   BEGIN="0x$("$NM" "$BIN" | awk '$3=="ct_trace_begin"{print $1}' | sed 's/^0*//')"
@@ -21,7 +21,7 @@ if [ "$1" = --qemu ]; then
   fi
 else
   MODE=sde SDE="$1" BIN="$2"
-  ENGINES="${3:-scalar ossl avx2 shani_1 shani_2 shani_4 avx512 zmm shani_4r x16 shani_x16 verify}"
+  ENGINES="${3:-scalar ossl avx2 shani_1 shani_2 shani_4 avx512 zmm shani_4r x16 shani_x16 verify sign_hs sign_ed}"
 fi
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -65,7 +65,11 @@ for e in $ENGINES; do
     echo "ct-trace: $e not in this build, skipped"
     continue
   }
-  for n in 1 3 16; do
+  case $e in
+    sign_ed) ns="1 3" ;; # ~1M instructions per signature with key setup: batch 3 already covers the batched inversion
+    *) ns="1 3 16" ;;
+  esac
+  for n in $ns; do
     trace "$e" 0 "$n" "$T/a" && trace "$e" 1 "$n" "$T/b"
     if [ ! -s "$T/a" ]; then
       echo "ct-trace: $e b$n: EMPTY TRACE"

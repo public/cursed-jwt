@@ -18,6 +18,8 @@ instruction streams can work on several tokens at once:
   Design and numbers: [PK.md](PK.md).
 - **The front end:** SIMD base64url (AVX2, AVX-512 VBMI, NEON) and a strict RFC 8259 JSON parser with a shape-matched
   fast path.
+- **Signing** (HS256 and EdDSA): batched like verification, constant time in the private key (see
+  [Signing](#signing)).
 
 Every signature is recomputed on every call; only key material is kept (HMAC midstates, public-key tables). One binary
 picks the best engine for the CPU it runs on.
@@ -166,6 +168,7 @@ The tests need OpenSSL's libcrypto as the reference: on macOS `brew install open
 - [How fast](#how-fast)
 - [Using it](#using-it)
 - [Claim semantics](#claim-semantics)
+- [Signing](#signing)
 - [The crypto on its own](#the-crypto-on-its-own)
 - [How it works](#how-it-works)
 - [Building](#building)
@@ -242,6 +245,94 @@ and the JSON parser in `src/jwt.c` as building blocks.
 For RS256/ES256/EdDSA the signature length is 342 (RSA-2048) or 86 (ES256, EdDSA) characters instead of 43. `alg` must name the
 key's algorithm; the rest is identical.
 
+## Signing
+
+HS256 and EdDSA (Ed25519) tokens are issued in batches too, under one key per call. The caller owns the output
+buffers.
+
+```c
+jwt_key_t key;
+jwt_key_init(&key, secret, secret_len);                   // the same key type as verification
+
+const char *claims[n]; int claims_len[n];                 // the payloads, as JSON bytes
+char *out[n]; int out_len[n];                             // out[i]: room for jwt_sign_size(claims_len[i]) bytes
+int issued = jwt_sign_batch(&key, n, claims, claims_len, out, out_len);
+// out[i] = {"alg":"HS256","typ":"JWT"}.<claims>.<MAC>, NUL-terminated; out_len[i] = its length, or -1 if refused
+
+jwt_skey_t *sk = jwt_skey_ed25519(seed32);                // the 32-byte private key (an OKP JWK's "d")
+uint8_t pub[32];
+jwt_skey_public(sk, pub);                                 // for jwt_pkey_ed25519 / the JWK's "x"
+jwt_sign_batch_pk(sk, n, claims, claims_len, out, out_len);   // {"alg":"EdDSA","typ":"JWT"}, room: jwt_sign_size_pk
+jwt_skey_free(sk);                                        // wipes the key
+```
+
+- **The header** is the canonical `{"alg":"HS256","typ":"JWT"}` or `{"alg":"EdDSA","typ":"JWT"}`, the one the
+  verifier recognises without decoding it.
+- **The claims are the caller's bytes, used exactly as given**: nothing is added, removed or reordered. They are
+  checked first, so that the library never issues a token its own verifier would reject for its form:
+  - one strict RFC 8259 JSON object (valid UTF-8, nesting ≤ 32, nothing after it but whitespace);
+  - `exp` present; `exp` and `nbf` JSON numbers when present;
+  - no repeated `sub`, `username`, `exp` or `nbf` (keys compared after unescaping);
+  - the whole token at most `JWT_TOKEN_MAX` (8192) bytes.
+
+  A refused payload gets `out_len[i] = -1`, and nothing is written to its `out[i]` (which may be NULL); the rest of
+  the batch is unaffected.
+- **Not checked:** the `sub` / `username` profile (a token without them is issued, and the verifier returns
+  `JWT_BAD_PAYLOAD` for it), and the clock (an `exp` in the past is issued, and rejected by the verifier).
+- **Ed25519 is deterministic** (RFC 8032): no random numbers, and the same key and claims give the same token. The
+  public key is derived from the private key, never taken from the caller.
+- **Timing contract: signing is constant time in the private key.** No branch or memory address depends on the HMAC
+  key, the Ed25519 private key, its expanded scalar and nonce prefix, or the per-signature nonce (checked by valgrind
+  and trace equivalence), and by design only integer additions, multiplications, shifts and logic touch them: no
+  division and no table indexed by a secret. Variable-latency instructions are not checked mechanically; dudect on
+  three x86 CPUs found no timing difference.
+- **How.** HS256 runs on the same constant-time HMAC engines as verification. Ed25519 signing is a path of its own that
+  shares no code with the (variable-time) verifier beyond fiat-crypto's field and scalar arithmetic and SHA-512:
+  - on x86-64 Linux, the fixed-base multiplication [r]B is s2n-bignum's formally verified, constant-time
+    `edwards25519_scalarmulbase` (vendored in `crypto/src/s2n/`; its BMI2 + ADX version, or `_alt` on CPUs or VMs
+    without them);
+  - elsewhere (or with `-DJWT_NO_ED25519_ASM`) it is portable C: a table read only through masked selects, complete
+    addition formulas and a fixed inversion chain, with one inversion shared per batch of 16;
+  - the scalars are reduced in fiat's Montgomery arithmetic;
+  - the MAC and signature go through a branch-free, table-free base64url encoder.
+
+  What checks it is under [Constant time](#constant-time); the tests run both Ed25519 paths.
+- **Batching.** HS256 signing goes through the multi-buffer HMAC, so a batch gets verification's speed-up. Ed25519
+  signatures are independent; the portable path shares one inversion per batch (16–19%).
+- **Cost of an Ed25519 key:** 6–10 µs to set up with s2n-bignum's kernel; the portable path adds a 30 KB table of
+  multiples of the base point and takes 81–114 µs.
+
+**Measured** (`make bench-sign`, `make compare-sign`; Vultr VMs, Ubuntu 24.04, gcc 13.3, OpenSSL 3.0.13; the claims
+set `{"sub":"123456","username":"alice","iat":1700000000,"exp":4102444800}`; ns per token, batch 1, batch 16 in
+brackets):
+
+| | AMD EPYC Turin (Zen 5) | AMD EPYC Genoa (Zen 4) | Intel Xeon Cascade Lake |
+|---|---:|---:|---:|
+| **HS256** cursed-jwt `jwt_sign_batch`, whole token | **238** (153) | **247** (169) | **835** (275) |
+| OpenSSL `EVP_MAC`, key set once: the MAC alone | 255 | 252 | 862 |
+| jsonwebtoken 9.3 (Rust) `encode` | 551 | 559 | 1,550 |
+| jwt-cpp `create().sign()` | 2,666 | 2,946 | 5,224 |
+| golang-jwt v5 `SignedString` | 2,816 | 3,402 | 5,877 |
+| PyJWT 2.9 `jwt.encode` | 7,069 | 7,796 | 12,700 |
+| **EdDSA** cursed-jwt `jwt_sign_batch_pk`, whole token (x86-64 Linux: s2n-bignum kernel) | **6,669** (6,514) | **8,921** (8,861) | **11,637** (11,464) |
+| the same, portable C (`-DJWT_NO_ED25519_ASM`) | 13,266 (10,572) | 15,054 (12,527) | 19,350 (16,069) |
+| libsodium 1.0.20 `crypto_sign_detached`: the signature alone | 13,683 | 15,390 | 20,268 |
+| ed25519-dalek 2.1 `sign`: the signature alone | 14,450 | 15,950 | 20,095 |
+| Go `crypto/ed25519` `Sign`: the signature alone | 17,346 | 20,613 | 28,021 |
+| golang-jwt v5 `SignedString` | 19,841 | 23,404 | 32,273 |
+| pyca/cryptography `sign`: the signature alone | 22,378 | 30,138 | 37,301 |
+| ring 0.17 `sign`: the signature alone | 23,127 | 33,943 | 46,128 |
+| OpenSSL `EVP_DigestSign`: the signature alone | 27,018 | 36,186 | 47,474 |
+| PyJWT 2.9 `jwt.encode` | 28,496 | 37,716 | 49,375 |
+| jwt-cpp `create().sign()` | 29,478 | 39,276 | 51,302 |
+| jsonwebtoken 9.3 (Rust) `encode` | 46,050 | 67,096 | 90,798 |
+
+The other libraries serialise the claims themselves; cursed-jwt takes the JSON bytes and checks them. Every Ed25519
+row signs the same 141-byte signing input; the Genoa and Cascade Lake VMs hide ADX, so they ran s2n-bignum's `_alt`
+kernel. The first EdDSA row is from a later run than the rest (same VM classes), after SHA-512 moved to OpenSSL's
+assembly and the scalar reduction to precomputed constants: 9–12% faster than the same kernel before. A batch of 16
+HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC.
+
 ## The crypto on its own
 
 The SHA-256 / HMAC engines, the CPU dispatch and RS256 / ES256 / Ed25519 verification are a library of their own,
@@ -260,11 +351,17 @@ int good = cc_hmac_sha256_verify(&k, n, msgs, lens, (const uint8_t (*)[32])tags,
 cc_pkey_t *pk = cc_pkey_es256(x, y);                  // or cc_pkey_rs256 / cc_pkey_ed25519; per-key tables
 cc_verify_batch(pk, n, msgs, lens, sigs, sig_lens, ok); // raw signatures, hashed inside, batched
 cc_pkey_free(pk);
+
+cc_skey_t *sk = cc_skey_ed25519(seed32);              // signing: constant time in the private key
+cc_sign_batch(sk, n, msgs, lens, sigs);               // sigs[i]: 64 bytes, R || S
+cc_skey_free(sk);
+cc_sha512(data, len, digest64);                       // and cc_sha512_init / _update / _final
 ```
 
 - **Timing contract.** Everything that touches an HMAC key (key setup, every engine, `cc_tag_eq32`,
-  `cc_hmac_sha256_verify`) is constant time, checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`. Signature
-  verification is variable time: all of its inputs are public, as in every other library's verify.
+  `cc_hmac_sha256_verify`) is constant time, and so are signing (`cc_skey_ed25519`, `cc_sign_batch`, `cc_skey_free`)
+  and SHA-512, all checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`. Signature verification is variable
+  time: all of its inputs are public, as in every other library's verify.
 - **No speed lost by the split.** Calls cross the boundary once per batch, not per block or field operation, and the
   HS256 front end calls the dispatched engine through the same pointer either way. `src/jwt.c` still `#include`s
   `crypto/src/cursed_crypto.c`, so building `src/jwt.c` alone gives one translation unit, exactly as before;
@@ -357,6 +454,8 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
   extracted SHA-256 code, which dispatches itself (SHA-NI, AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile
   assembles `crypto/src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own
   program, do the same, or leave both out to get the compiled scalar code; `make OSSL_SHA=` builds without it.
+  SHA-512 (Ed25519) works the same way: `crypto/src/sha512_x86_64_ossl.S` with `JWT_OSSL_SHA512` (AVX2+BMI2, AVX, the
+  SHA512 instructions, plain x86-64), else portable C.
 - **Intel Skylake through Cascade Lake / Cooper Lake: `make JCC=1`.** Intel's microcode fix for the JCC erratum
   stalls any branch that crosses or ends on a 32-byte boundary. `JCC=1` has the assembler keep every branch off one
   (`-Wa,-mbranches-within-32B-boundaries` with gcc, `-mbranches-within-32B-boundaries` with clang), in the C and the
@@ -414,6 +513,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 |---|---|
 | `-DJWT_INPUT_PADDED` | every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads |
 | `-DJWT_NO_SHAPE_JSON` | strict parser only |
+| `-DJWT_NO_ED25519_ASM` | Ed25519 signing in portable C even where the Makefile assembles s2n-bignum's fixed-base kernel (`-DJWT_ED25519_ASM`, set by the Makefile on x86-64 Linux with the other `.S` files: link `crypto/src/s2n/*.S` too) |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `crypto/src/fiat/`) |
 | `-DJWT_S2N` | s2n-bignum's formally verified asm kernels for P-256, Ed25519 and RSA-2048 (`scripts/fetch-s2n-bignum.sh`). On x86, its ADX-free P-256 / Ed25519 versions run where BMI2 + ADX are missing; RSA-2048 then uses `bn_mul_mont` |
@@ -423,7 +523,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 | `-DJWT_RSAZ8` | with `-DJWT_RSAZ`: 8 RS256 tokens per call through crypto_mb's 8-lane exponentiation, on Zen 4 / Zen 5 (`scripts/fetch-crypto-mb-rsa.sh`) |
 | `-DJWT_ES8` | 8 ES256 tokens per call on crypto_mb's 8-lane P-256 field under our comb tables, on Zen 4 / Zen 5 |
 | `-DJWT_CRYPTO_MB` | Intel crypto_mb's own 8-way ES256 / RSA API (`scripts/build-crypto-mb.sh`, which needs OpenSSL ≥ 3.5.5 headers). Kept for comparison: `-DJWT_RSAZ8` / `-DJWT_ES8` are the measured paths |
-| `make OSSL_SHA=` | build without the x86-64 Linux assembly (OpenSSL's SHA-256 and `bn_mul_mont` extracts, the generated 4-stream SHA-NI and 16-lane zmm kernels); the compiled engines stay |
+| `make OSSL_SHA=` | build without the x86-64 Linux assembly (OpenSSL's SHA-256, SHA-512 and `bn_mul_mont` extracts, the generated 4-stream SHA-NI and 16-lane zmm kernels, s2n-bignum's Ed25519 fixed-base kernel); the compiled engines stay |
 | `make JCC=1` | keep branches off 32-byte boundaries (Intel's JCC erratum): for builds that run only on Intel Skylake through Cascade Lake / Cooper Lake |
 
 **Targets:**
@@ -564,6 +664,16 @@ planted early-exit compare as a positive control that must fail:
 - **`make test-ct-qemu QEMU=… EXECLOG=…`.** The same for the AArch64 engines, from an x86-64 machine, through
   qemu-aarch64's execlog plugin. It needs a qemu built with `--enable-plugins`.
 
+**Signing** is checked the same three ways (`test_ct sign`, and the `sign_hs` / `sign_ed` traces): the HS256 key, the
+Ed25519 private key, its scalar `a` and prefix, and the nonce `r` are marked secret (valgrind) or varied in every
+byte (SDE, qemu), through key setup and batches of 1 to 17 signatures, and the fixed-base multiplication, reduction
+mod L, inversion and SHA-512 on their own. valgrind runs it on gcc and clang builds at -O1 to -O3. Its positive
+control runs the verifier's variable-time scalar code on a secret and must be flagged. **`make dudect-sign`** adds
+fixed-against-random-key timing tests of both, with A/A controls, an early-exit control and a variable-time comb
+control that must both say LEAK. On Turin, Genoa and Cascade Lake every signing line is ok (max |t| 2.99, 10⁶ samples
+for HS256 at batch 1 and 16, 3·10⁵ for Ed25519 at batch 1 and 8, 10⁵ for Ed25519 key setup), repeated runs agree,
+and both controls say LEAK (|t| 244 to 5,859).
+
 **`make dudect`** adds a statistical timing test on real hardware: Welch's t, fixed against random keys, with A/A
 negative controls and the leaky positive control. On Turin, Genoa and Cascade Lake it's clean, with one exception:
 the AVX-512 engine on Genoa sat at the threshold, and its SDE traces are identical. RS256 / ES256 / EdDSA verification
@@ -577,7 +687,7 @@ is variable time by design, since every input it handles is public.
 | Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | test, ASan/UBSan; pk-test, every backend |
 | Linux amd64 (Ubuntu 24.04, Docker on Rosetta) | gcc 13.3, clang 18.1 | test, test-vectors (AVX2 engines, every OpenSSL SHA-256 path but SHA-NI), ASan/UBSan, AVX-512 build; pk-test, portable C |
 | Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | test, test-vectors on real AVX-512 (every engine); pk-test, every backend |
-| AMD EPYC Turin (Zen 5), AMD EPYC Genoa (Zen 4), Intel Xeon Cascade Lake (Vultr VMs, Ubuntu 24.04) | gcc 13.3 | test, pk-test, the AVX-512 / IFMA / SHA-NI / VBMI suites natively, dudect, the benchmarks in [How fast](#how-fast) |
+| AMD EPYC Turin (Zen 5), AMD EPYC Genoa (Zen 4), Intel Xeon Cascade Lake (Vultr VMs, Ubuntu 24.04) | gcc 13.3 | test, pk-test, the AVX-512 / IFMA / SHA-NI / VBMI suites natively, dudect, dudect-sign, the benchmarks in [How fast](#how-fast) and [Signing](#signing) |
 | Intel SDE 10.13 (Ice Lake and Cascade Lake emulation) | gcc 13.3 | test_jwt on every AVX-512 and SHA-NI engine, the IFMA PK suites (`scripts/ifma-sde-test.sh`), test-ct-sde |
 | qemu 8.2 aarch64-linux-user, with plugins | gcc 13.3 (cross) | test-ct-qemu, the AArch64 engines against scalar |
 | GitHub Actions | gcc, clang | test-quick, test-vectors, ASan, AVX-512 build, fuzz-smoke, lint on Ubuntu x86/ARM and macOS; the Rust port's tests |
@@ -752,6 +862,9 @@ What the models add (llvm-mca, cycles per byte per message, relative):
   verification rejects; read [PK.md](PK.md#screening-what-it-does-and-doesnt-prove) before turning it on.
 - **The HMAC key path is constant time:** every engine, key setup and the tag compare, proven by trace
   equivalence (see [Constant time](#constant-time)).
+- **Signing is constant time in the private key** (HS256 and Ed25519; see [Signing](#signing) and
+  [Constant time](#constant-time)). Ed25519 private keys are wiped by `jwt_skey_free` / `cc_skey_free`, and the
+  signer wipes its stack copies of secrets; neither can reach copies the compiler made in registers or spills.
 - **An internal review, not an external one.** It reproduced the bug classes known from other JWT and crypto
   libraries: `alg=none` and algorithm confusion, ECDSA r = s = 0 and out-of-range scalars, invalid-curve points,
   Ed25519 S ≥ L and non-canonical encodings, Bleichenbacher's e = 3 forgery, duplicate claims and parser

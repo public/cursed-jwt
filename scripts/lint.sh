@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lint.sh [--fix] [--staged]: formatting and lint checks for first-party code (vendor/ and third_party/ excluded).
+# lint.sh [--fix] [--staged]: formatting and lint checks for first-party code (vendored code excluded).
 #   formatting: clang-format (C, .clang-format), shfmt -i 2 -ci (shell), ruff format (Python, ruff.toml)
 #   linting:    shellcheck (warnings and errors), ruff check, cppcheck (warning + portability, library sources;
 #               skipped with --staged: it takes minutes)
@@ -40,7 +40,7 @@ fi
 git() { command git -c safe.directory='*' "$@"; }
 pick() { # tracked first-party files matching the globs; with --staged, only staged ones
   local all
-  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party|crypto/src/fiat)/' || true)
+  all=$(git ls-files -- "$@" | grep -vE '^(vendor|third_party|crypto/src/fiat|crypto/src/s2n)/' || true)
   if [ "${LINT_STAGED:-$staged}" = 1 ]; then
     [ -n "${LINT_FILES:-}" ] || return 0
     grep -xF -f <(tr ' ' '\n' <<<"$LINT_FILES") <<<"$all" || true
