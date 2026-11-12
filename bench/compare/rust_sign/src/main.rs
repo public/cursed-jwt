@@ -30,19 +30,30 @@ fn best<F: FnMut()>(name: &str, mut f: F) {
 }
 
 fn main() {
-    let c = Claims { sub: "123456".into(), username: "alice".into(), iat: 1700000000, exp: 4102444800 };
+    let c = Claims {
+        sub: "123456".into(),
+        username: "alice".into(),
+        iat: 1700000000,
+        exp: 4102444800,
+    };
     let hk = EncodingKey::from_secret(b"bench-secret-0123456789abcdef0123");
     let seed: Vec<u8> = (0..32u32).map(|i| (i * 7 + 1) as u8).collect();
     let kp = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
     // PKCS#8 v1 for an Ed25519 seed: the fixed 16-byte prefix, then the seed
-    let mut der = vec![0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+    let mut der = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    ];
     der.extend_from_slice(&seed);
     let ek = EncodingKey::from_ed_der(&der);
     let mut sink = 0usize;
     let hh = Header::new(Algorithm::HS256);
     let he = Header::new(Algorithm::EdDSA);
-    best("jsonwebtoken HS256 encode", || sink += encode(&hh, &c, &hk).unwrap().len());
-    best("jsonwebtoken EdDSA encode", || sink += encode(&he, &c, &ek).unwrap().len());
+    best("jsonwebtoken HS256 encode", || {
+        sink += encode(&hh, &c, &hk).unwrap().len()
+    });
+    best("jsonwebtoken EdDSA encode", || {
+        sink += encode(&he, &c, &ek).unwrap().len()
+    });
     best("ring Ed25519 sign (raw)", || sink += kp.sign(b"message").as_ref().len());
     let _ = kp.public_key();
     if sink == 42 {

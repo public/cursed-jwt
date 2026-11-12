@@ -198,7 +198,7 @@ void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, co
  * jwt_sign_batch_pk is jwt_sign_batch with the header {"alg":"EdDSA","typ":"JWT"} and a 64-byte signature, under the
  * same payload rules; jwt_sign_size_pk gives the room out[i] needs.  jwt_skey_free wipes the key. */
 typedef struct jwt_skey jwt_skey_t;
-jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]); /* NULL only if out of memory */
+jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]);       /* NULL only if out of memory */
 void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]); /* for jwt_pkey_ed25519 / the JWK "x" */
 void jwt_skey_free(jwt_skey_t *k);
 int jwt_sign_size_pk(const jwt_skey_t *k, int payload_len);

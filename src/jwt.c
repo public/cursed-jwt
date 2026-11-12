@@ -247,10 +247,10 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_
 CC_INLINE char b64u_char(uint32_t v) {
 #define B64U_GE(x) (0u - ((uint32_t)((x) - v) >> 31)) /* all ones iff v > x */
     uint32_t c = v + 'A';
-    c += B64U_GE(25) & 6;   /* 26..51 -> 'a'..'z' */
-    c -= B64U_GE(51) & 75;  /* 52..61 -> '0'..'9' */
-    c -= B64U_GE(61) & 13;  /* 62 -> '-' */
-    c += B64U_GE(62) & 49;  /* 63 -> '_' */
+    c += B64U_GE(25) & 6;  /* 26..51 -> 'a'..'z' */
+    c -= B64U_GE(51) & 75; /* 52..61 -> '0'..'9' */
+    c -= B64U_GE(61) & 13; /* 62 -> '-' */
+    c += B64U_GE(62) & 49; /* 63 -> '_' */
 #undef B64U_GE
     return (char)c;
 }

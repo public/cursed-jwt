@@ -213,8 +213,9 @@ static void make_payloads(int n) {
         int pad = (int)(rnd() % 4 == 0 ? rnd() % 600 : rnd() % 40);
         char padv[700];
         memset(padv, 'p', (size_t)pad), padv[pad] = 0;
-        pnl[i] = snprintf(pls[i], sizeof pls[i], "{\"sub\":\"%d\",\"username\":\"%s\",\"iat\":1700000000,\"pad\":\"%s\","
-                                                 "\"exp\":4102444800}",
+        pnl[i] = snprintf(pls[i], sizeof pls[i],
+                          "{\"sub\":\"%d\",\"username\":\"%s\",\"iat\":1700000000,\"pad\":\"%s\","
+                          "\"exp\":4102444800}",
                           uids[i], users[i], padv);
         outs[i] = obuf[i];
     }

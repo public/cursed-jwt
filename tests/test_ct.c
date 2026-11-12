@@ -10,9 +10,9 @@
  *            cc_hmac_sha256_verify against public tags (right and wrong ones) and cc_tag_eq32 on secret bytes, whose
  *            verdicts are declassified only after the call.
  *   sign     signing: the HS256 key through jwt_key_init and jwt_sign_batch (payload checks, the dispatched HMAC,
- *            the base64url encoder of the MAC), at batch sizes 1..17; the Ed25519 seed through cc_skey_ed25519 (SHA-512,
- *            the scalar reduction, [a] B, the encoding of A), with the key's a and prefix marked secret again before
- *            cc_sign_batch at batch sizes 1..17 (which computes r, [r] B, k and S from them); and the signing
+ *            the base64url encoder of the MAC), at batch sizes 1..17; the Ed25519 seed through cc_skey_ed25519
+ *            (SHA-512, the scalar reduction, [a] B, the encoding of A), with the key's a and prefix marked secret again
+ *            before cc_sign_batch at batch sizes 1..17 (which computes r, [r] B, k and S from them); and the signing
  *            primitives on their own with their inputs secret: SHA-512, the reduction mod L of a 512-bit value (r),
  *            the fixed-base multiplication [r] B and the field inversion.  Only the outputs are declassified, to
  *            check them against a key built from the same bytes left public.  Expect 0 errors.
@@ -101,8 +101,8 @@ static int sign_hs(const uint8_t *secret, size_t slen) {
     char *op[17], *rp[17];
     int pn[17], on[17], rn[17], bad = 0, runs = 0;
     for (int i = 0; i < 17; i++) {
-        pn[i] = snprintf(pl[i], sizeof pl[i], "{\"sub\":\"%d\",\"username\":\"u%0*d\",\"exp\":4102444800}",
-                         i + 1, i * 5, i);
+        pn[i] = snprintf(pl[i], sizeof pl[i], "{\"sub\":\"%d\",\"username\":\"u%0*d\",\"exp\":4102444800}", i + 1,
+                         i * 5, i);
         pp[i] = pl[i], op[i] = out[i], rp[i] = ref[i];
     }
     jwt_key_t kp, ks;
@@ -138,7 +138,8 @@ static int sign_ed(void) {
         VALGRIND_MAKE_MEM_DEFINED(pub, 32);
         bad += memcmp(pub, pubref, 32) != 0;
         for (int n = 1; n <= 17; n++) {
-            for (int i = 0; i < n; i++) sp[i] = sig[i], rp[i] = ref[i], mp[i] = msgbuf[i], ml[i] = (n * 19 + i * 37) % 301;
+            for (int i = 0; i < n; i++)
+                sp[i] = sig[i], rp[i] = ref[i], mp[i] = msgbuf[i], ml[i] = (n * 19 + i * 37) % 301;
             cc_sign_batch(kp, n, mp, ml, rp);
             cc_sign_batch(ks, n, mp, ml, sp);
             VALGRIND_MAKE_MEM_DEFINED(sig, sizeof sig); /* the signatures are output: declassify them */
@@ -147,7 +148,8 @@ static int sign_ed(void) {
         }
         cc_skey_free(ks), cc_skey_free(kp);
     }
-    printf("  sign: Ed25519 cc_skey_ed25519 + cc_sign_batch %d runs, %s\n", runs, bad ? "SIGNATURE MISMATCH" : "signatures match");
+    printf("  sign: Ed25519 cc_skey_ed25519 + cc_sign_batch %d runs, %s\n", runs,
+           bad ? "SIGNATURE MISMATCH" : "signatures match");
     /* the primitives on their own, inputs secret */
     uint8_t x[64], h1[64], h2[64], r1[32], r2[32];
     for (int t = 0; t < 8; t++) {

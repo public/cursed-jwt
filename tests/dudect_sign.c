@@ -51,7 +51,7 @@ typedef struct {
 static int test, batch;
 static edsec_t edfix[POOL], edrand[POOL], edfix2[POOL], *edpool[2];
 static key32_t kfix[POOL], krand[POOL], kfix2[POOL], *kpool[2];
-static cc_skey_t *kw;            /* the working signing key */
+static cc_skey_t *kw; /* the working signing key */
 static uint8_t seedcur[32], cmpa[32], cmpb0[32], cmpb1[32], cmpcur[32];
 static uint8_t msgs[MAXB][100], sig[MAXB][64], *sp[MAXB];
 static const uint8_t *mp[MAXB];
@@ -85,7 +85,7 @@ static void prepare(int c, int i) {
         case 1:
         case 2:
         case 4: memcpy(seedcur, kpool[c][i & (POOL - 1)].b, 32); break; /* edkey, hs, vt-control */
-        default: memcpy(cmpcur, c ? cmpb1 : cmpb0, 32); break;           /* control */
+        default: memcpy(cmpcur, c ? cmpb1 : cmpb0, 32); break;          /* control */
     }
 }
 static void op(void) {
@@ -137,8 +137,12 @@ int main(int argc, char **argv) {
     if (batch < 1 || batch > MAXB) return 2;
     int aa = !strncmp(t, "aa-", 3);
     const char *base = aa ? t + 3 : t;
-    test = !strcmp(base, "ed") ? 0 : !strcmp(base, "edkey") ? 1 : !strcmp(base, "hs") ? 2
-         : !strcmp(base, "vt-control") ? 4 : !strcmp(base, "control") ? 3 : -1;
+    test = !strcmp(base, "ed")           ? 0
+           : !strcmp(base, "edkey")      ? 1
+           : !strcmp(base, "hs")         ? 2
+           : !strcmp(base, "vt-control") ? 4
+           : !strcmp(base, "control")    ? 3
+                                         : -1;
     if (test < 0) return fprintf(stderr, "unknown test %s\n", t), 2;
 #ifdef CC_ED_S2N
     if (test == 4) return printf("vt-control: not in an s2n build\n"), 0;
@@ -204,7 +208,11 @@ int main(int argc, char **argv) {
         dn += snprintf(detail + dn, sizeof detail - dn, " p%.0f:%+.2f", pc[p] * 100, tv);
     }
     printf("%s b%d: N=%ld median %lu cyc, max|t| %.2f %s [%s ] engine %s\n", t, batch, N, (unsigned long)s[N / 2],
-           fabs(tmax), fabs(tmax) > 10 ? "LEAK" : fabs(tmax) > 4.5 ? "inconclusive" : "ok", detail, jwt_engine());
+           fabs(tmax),
+           fabs(tmax) > 10    ? "LEAK"
+           : fabs(tmax) > 4.5 ? "inconclusive"
+                              : "ok",
+           detail, jwt_engine());
     cc_skey_free(kw);
     return 0;
 }

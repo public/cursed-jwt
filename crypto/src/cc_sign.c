@@ -116,7 +116,7 @@ static void sg_add_p3(sg_p3 *P, const sg_p3 *Q, const sg_fe d2) {
 static fiat_25519_uint1 sg_eq(uint32_t x, uint32_t y) { return (fiat_25519_uint1)(((x ^ y) - 1u) >> 31); }
 /* t = d (i 256^j B for d = +-i, the identity for 0): reads all 8 entries of the row whatever d is */
 static void sg_select(sg_niels *t, const sg_niels row[8], int8_t d) {
-    uint32_t neg = (uint32_t)(uint8_t)d >> 7;              /* 1 iff d < 0 */
+    uint32_t neg = (uint32_t)(uint8_t)d >> 7;                 /* 1 iff d < 0 */
     uint32_t mag = (uint32_t)(d - ((-(int32_t)neg & d) * 2)); /* |d|, 0..8 */
     sg_set(t->ypx, 1), sg_set(t->ymx, 1), sg_set(t->xy2d, 0);
     for (int i = 0; i < 8; i++) {
@@ -180,7 +180,7 @@ static void sg_sc_reduce(sg_sc out_m, const uint8_t x[64]) {
     static const sg_sc two252 = { 0, 0, 0, 1ull << 60 };
     sg_sc c1, c2, m0, m1, m2;
     fiat_25519_scalar_to_montgomery(c1, two252); /* 2^252 R */
-    fiat_25519_scalar_mul(c2, c1, c1);          /* 2^504 R */
+    fiat_25519_scalar_mul(c2, c1, c1);           /* 2^504 R */
     fiat_25519_scalar_to_montgomery(m0, p[0]);
     fiat_25519_scalar_to_montgomery(m1, p[1]);
     fiat_25519_scalar_to_montgomery(m2, p[2]);
@@ -188,8 +188,7 @@ static void sg_sc_reduce(sg_sc out_m, const uint8_t x[64]) {
     fiat_25519_scalar_mul(m2, m2, c2);
     fiat_25519_scalar_add(m0, m0, m1);
     fiat_25519_scalar_add(out_m, m0, m2);
-    cc_wipe(w, sizeof w), cc_wipe(p, sizeof p), cc_wipe(m0, sizeof m0), cc_wipe(m1, sizeof m1),
-        cc_wipe(m2, sizeof m2);
+    cc_wipe(w, sizeof w), cc_wipe(p, sizeof p), cc_wipe(m0, sizeof m0), cc_wipe(m1, sizeof m1), cc_wipe(m2, sizeof m2);
 }
 static void sg_sc_bytes(uint8_t out[32], const sg_sc m) { /* from Montgomery form to 32 little-endian bytes */
     sg_sc v;
@@ -261,8 +260,7 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     sg_base_mul(&A, (const sg_niels(*)[8])k->tab, ar);
     sg_inv(zi, A.Z);
     sg_encode(k->pub, &A, zi);
-    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar), cc_wipe(&A, sizeof A),
-        cc_wipe(zi, sizeof zi);
+    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar), cc_wipe(&A, sizeof A), cc_wipe(zi, sizeof zi);
     return k;
 }
 void cc_skey_free(cc_skey_t *k) {
@@ -312,7 +310,7 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
             cc_sha512_final(&c, h);
             sg_sc_reduce(km, h);
             fiat_25519_scalar_mul(sm, km, k->a_m); /* k a R */
-            fiat_25519_scalar_add(sm, sm, r_m[i]);  /* (r + k a) R */
+            fiat_25519_scalar_add(sm, sm, r_m[i]); /* (r + k a) R */
             sg_sc_bytes(s + 32, sm);
             cc_wipe(km, sizeof km), cc_wipe(sm, sizeof sm);
         }

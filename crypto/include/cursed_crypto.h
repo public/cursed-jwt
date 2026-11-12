@@ -13,10 +13,10 @@
  *                       cc_tag_eq32 and cc_hmac_sha256_verify (no key- or MAC-dependent branch or memory address;
  *                       checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`)
  *                       cc_sha512_* and cc_sha512 (no data-dependent operation at all; checked by `make test-ct`)
- *                       signing: cc_skey_ed25519, cc_sign_batch and cc_skey_free (no branch or memory address depends on
- *                       the private key, the expanded scalar, the nonce prefix or the per-signature nonce; checked by
- *                       `make test-ct`, `test-ct-sde`, `test-ct-qemu` and the dudect sign arms).  Signing shares no
- *                       code with verification beyond fiat-crypto's field and scalar operations and SHA-512.
+ *                       signing: cc_skey_ed25519, cc_sign_batch and cc_skey_free (no branch or memory address
+ *                       depends on the private key, the expanded scalar, the nonce prefix or the per-signature nonce;
+ *                       checked by `make test-ct`, `test-ct-sde`, `test-ct-qemu` and `make dudect-sign`).  Signing
+ *                       shares no code with verification beyond fiat-crypto's field and scalar operations and SHA-512.
  *   variable time       signature verification (cc_pkey_*, cc_verify_batch): its inputs, the public key, the
  *                       message and the signature, are all public, as in every other library's verify
  */
@@ -146,9 +146,9 @@ void cc_verify_batch(const cc_pkey_t *k, int n, const uint8_t *const *msg, const
 typedef struct cc_skey cc_skey_t;
 cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]);
 void cc_skey_free(cc_skey_t *k);
-int cc_skey_alg(const cc_skey_t *k);                          /* CC_PK_* */
-int cc_skey_sig_bytes(const cc_skey_t *k);                    /* 64 for Ed25519 */
-void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]);     /* the public key, as cc_pkey_ed25519 takes it */
+int cc_skey_alg(const cc_skey_t *k);                      /* CC_PK_* */
+int cc_skey_sig_bytes(const cc_skey_t *k);                /* 64 for Ed25519 */
+void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]); /* the public key, as cc_pkey_ed25519 takes it */
 /* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes. */
 void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
 

@@ -234,8 +234,27 @@ def main():
     for n in list(range(0, 300)) + [1000, 4096, 10000]:
         m = rnd.randbytes(n)
         out.append(f"sha512 len-{n} {hx(m)} {hashlib.sha512(m).hexdigest()}")
-    edges = [0, 1, L - 1, L, L + 1, 2 * L - 1, 2 * L, 2**252 - 1, 2**252, 2**253, 2**256 - 1, 2**256, 2**504 - 1,
-             2**504, 2**512 - 1, 2**512 - L, (2**512 // L) * L, (2**512 // L) * L - 1, 2**255 - 19]
+    edges = [
+        0,
+        1,
+        L - 1,
+        L,
+        L + 1,
+        2 * L - 1,
+        2 * L,
+        2**252 - 1,
+        2**252,
+        2**253,
+        2**256 - 1,
+        2**256,
+        2**504 - 1,
+        2**504,
+        2**512 - 1,
+        2**512 - L,
+        (2**512 // L) * L,
+        (2**512 // L) * L - 1,
+        2**255 - 19,
+    ]
     edges += [rnd.randrange(2**512) for _ in range(200)] + [rnd.randrange(2**256) for _ in range(50)]
     for j, x in enumerate(edges):
         out.append(f"sc edge-{j} {hx(x.to_bytes(64, 'little'))} {hx((x % L).to_bytes(32, 'little'))}")

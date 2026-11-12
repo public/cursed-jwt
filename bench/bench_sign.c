@@ -74,7 +74,8 @@ int main(int argc, char **argv) {
     {
         EVP_MAC *m = EVP_MAC_fetch(NULL, "HMAC", NULL);
         EVP_MAC_CTX *c = EVP_MAC_CTX_new(m);
-        OSSL_PARAM prm[] = { OSSL_PARAM_construct_utf8_string("digest", (char *)"SHA256", 0), OSSL_PARAM_construct_end() };
+        OSSL_PARAM prm[] = { OSSL_PARAM_construct_utf8_string("digest", (char *)"SHA256", 0),
+                             OSSL_PARAM_construct_end() };
         EVP_MAC_init(c, (const uint8_t *)hkey, 33, prm);
         CELL("OpenSSL EVP_MAC (key set once)", 1, {
             size_t ol = 32;

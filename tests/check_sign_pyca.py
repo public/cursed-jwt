@@ -60,8 +60,10 @@ def main():
             raise SystemExit("unknown line: " + line)
         n[f[0]] += 1
     assert all(n.values()), n
-    print(f"pyca/cryptography + hmac: {n['hs']} HS256 tokens, {n['ed']} EdDSA tokens and {n['edraw']} raw Ed25519 "
-          "signatures verified; every Ed25519 signature equals pyca's")
+    print(
+        f"pyca/cryptography + hmac: {n['hs']} HS256 tokens, {n['ed']} EdDSA tokens and {n['edraw']} raw Ed25519 "
+        "signatures verified; every Ed25519 signature equals pyca's"
+    )
 
 
 if __name__ == "__main__":
