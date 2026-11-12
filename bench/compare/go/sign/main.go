@@ -37,6 +37,8 @@ func main() {
 		seed[i] = byte(i*7 + 1)
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
+	// the signing input of bench/bench_sign.c's claims set under the EdDSA header
+	si := []byte("eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTYiLCJ1c2VybmFtZSI6ImFsaWNlIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDI0NDQ4MDB9")
 	var sink int
 	best("golang-jwt HS256 SignedString", func() {
 		s, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(key)
@@ -47,7 +49,7 @@ func main() {
 		sink += len(s)
 	})
 	best("Go crypto/ed25519 Sign (raw)", func() {
-		sink += len(ed25519.Sign(priv, key))
+		sink += len(ed25519.Sign(priv, si))
 	})
 	_ = sink
 }

@@ -13,9 +13,9 @@
  *     reduction, recoding, table walk, decoding or compares) is used.
  *   - [r] B is ref10's fixed-base method: 64 signed radix-16 digits of r (recoded with arithmetic only), a table of
  *     i 256^j B (i = 1..8, j = 0..31) built from public data at key setup, and for every digit a scan of its whole
- *     8-entry row with fiat's constant-time select, then a conditional negation the same way.  The addition (mixed,
- *     extended + affine Niels) and doubling formulas for a = -1 twisted Edwards are complete: no exceptional case,
- *     so no branch, and the identity needs none either.
+ *     8-entry row by masks (each entry ANDed with all ones or zero, then ORed in), then a conditional negation the
+ *     same way.  The addition (mixed, extended + affine Niels) and doubling formulas for a = -1 twisted Edwards are
+ *     complete: no exceptional case, so no branch, and the identity needs none either.
  *   - Reduction mod L of the 512-bit hashes: the hash is split into pieces < 2^252 < L, each fed to fiat's Montgomery
  *     arithmetic mod L with constant multipliers 2^252 and 2^504.  Fiat requires inputs < L, which these are.
  *   - The encoding of R inverts Z with a fixed addition chain (Fermat, 254 squarings + 11 multiplications); a batch
@@ -23,6 +23,17 @@
  *   - Secrets on the stack are wiped (cc_wipe) before returning; cc_skey_free wipes the key.
  * Checked by tests/test_ct.c (valgrind, the seed marked secret), tests/ct_trace.c (identical instruction and address
  * traces under two seeds, SDE / qemu) and tests/dudect_sign.c (fixed vs random seed). */
+
+#if defined(CC_ED25519_ASM) && !defined(CC_NO_ED25519_ASM) && defined(__x86_64__) && defined(__ELF__)
+/* -DJWT_ED25519_ASM (the Makefile's default on x86-64 Linux): [n] B is s2n-bignum's edwards25519_scalarmulbase
+ * (crypto/src/s2n/, vendored; formally verified; constant time: its table is read with cmov over whole blocks, and it
+ * returns the affine point, fully reduced, after its own constant-time inversion).  It needs BMI2 + ADX; the _alt
+ * version (plain mul / adc) runs on every other x86-64.  The key then keeps no table, and a batch needs no shared
+ * inversion.  -DJWT_NO_ED25519_ASM keeps the portable code below (the tests run both). */
+#define CC_SIGN_S2N 1
+void cc_s2n_edwards25519_scalarmulbase(uint64_t res[8], const uint64_t scalar[4]);
+void cc_s2n_edwards25519_scalarmulbase_alt(uint64_t res[8], const uint64_t scalar[4]);
+#endif
 
 typedef uint64_t sg_fe[5]; /* fiat's 5 x 51-bit limbs */
 typedef struct {
@@ -35,10 +46,12 @@ typedef uint64_t sg_sc[4]; /* a scalar mod L, 4 x 64-bit little-endian limbs (fi
 
 struct cc_skey {
     int alg;
+#ifndef CC_SIGN_S2N
     sg_niels tab[32][8]; /* tab[j][i] = (i + 1) 256^j B: public */
-    sg_sc a_m;           /* the secret scalar a mod L, Montgomery form */
-    uint8_t prefix[32];  /* the nonce key */
-    uint8_t pub[32];     /* A, encoded */
+#endif
+    sg_sc a_m;          /* the secret scalar a mod L, Montgomery form */
+    uint8_t prefix[32]; /* the nonce key */
+    uint8_t pub[32];    /* A, encoded */
 };
 
 /* ---- field helpers: fiat calls only ---- */
@@ -113,27 +126,40 @@ static void sg_add_p3(sg_p3 *P, const sg_p3 *Q, const sg_fe d2) {
     SG_MUL(P->X, e, f), SG_MUL(P->Y, g, h), SG_MUL(P->T, e, h), SG_MUL(P->Z, f, g);
 }
 
-/* 1 if x == y else 0, for small non-negative ints, without a branch */
-static fiat_25519_uint1 sg_eq(uint32_t x, uint32_t y) { return (fiat_25519_uint1)(((x ^ y) - 1u) >> 31); }
-/* t = d (i 256^j B for d = +-i, the identity for 0): reads all 8 entries of the row whatever d is */
+/* all ones if x == y else 0, for small non-negative ints: arithmetic, then through an empty asm so the compiler can
+ * neither see the value nor turn its uses into a branch */
+static uint64_t sg_eqmask(uint32_t x, uint32_t y) {
+    uint64_t m = 0 - (uint64_t)(((x ^ y) - 1u) >> 31);
+#if defined(__GNUC__)
+    __asm__("" : "+r"(m));
+#endif
+    return m;
+}
+/* t = d (i 256^j B for d = +-i, the identity for 0).  Every one of the row's 8 entries is read, whatever d is: each
+ * is ANDed with its mask (all ones for the wanted one, else zero) and ORed in, so the loads, their addresses and the
+ * instructions are the same for every d, and the loop vectorises.  Then a conditional negation, the same way. */
 static void sg_select(sg_niels *t, const sg_niels row[8], int8_t d) {
+    enum { W = (int)(sizeof(sg_niels) / sizeof(uint64_t)) };  /* 15 limbs: ypx, ymx, xy2d */
     uint32_t neg = (uint32_t)(uint8_t)d >> 7;                 /* 1 iff d < 0 */
     uint32_t mag = (uint32_t)(d - ((-(int32_t)neg & d) * 2)); /* |d|, 0..8 */
-    sg_set(t->ypx, 1), sg_set(t->ymx, 1), sg_set(t->xy2d, 0);
+    uint64_t acc[W], m0 = sg_eqmask(mag, 0);
+    for (int w = 0; w < W; w++) acc[w] = 0;
+    acc[0] = m0 & 1, acc[5] = m0 & 1; /* the identity: y + x = y - x = 1, 2dxy = 0 */
     for (int i = 0; i < 8; i++) {
-        fiat_25519_uint1 c = sg_eq(mag, (uint32_t)i + 1);
-        fiat_25519_selectznz(t->ypx, c, t->ypx, row[i].ypx);
-        fiat_25519_selectznz(t->ymx, c, t->ymx, row[i].ymx);
-        fiat_25519_selectznz(t->xy2d, c, t->xy2d, row[i].xy2d);
+        uint64_t m = sg_eqmask(mag, (uint32_t)i + 1);
+        const uint64_t *e = (const uint64_t *)&row[i];
+        for (int w = 0; w < W; w++) acc[w] |= e[w] & m;
     }
+    memcpy(t, acc, sizeof *t);
     sg_fe nxy; /* -(x, y) = (-x, y): swap y + x and y - x, negate 2dxy */
     sg_neg(nxy, t->xy2d);
-    sg_fe ypx, ymx;
-    memcpy(ypx, t->ypx, sizeof ypx), memcpy(ymx, t->ymx, sizeof ymx);
-    fiat_25519_selectznz(t->ypx, (fiat_25519_uint1)neg, ypx, ymx);
-    fiat_25519_selectznz(t->ymx, (fiat_25519_uint1)neg, ymx, ypx);
-    fiat_25519_selectznz(t->xy2d, (fiat_25519_uint1)neg, t->xy2d, nxy);
-    cc_wipe(nxy, sizeof nxy), cc_wipe(ypx, sizeof ypx), cc_wipe(ymx, sizeof ymx);
+    uint64_t mn = sg_eqmask(neg, 1);
+    for (int w = 0; w < 5; w++) {
+        uint64_t p = t->ypx[w], q = t->ymx[w], x = (p ^ q) & mn;
+        t->ypx[w] = p ^ x, t->ymx[w] = q ^ x;
+        t->xy2d[w] ^= (t->xy2d[w] ^ nxy[w]) & mn;
+    }
+    cc_wipe(nxy, sizeof nxy), cc_wipe(acc, sizeof acc);
 }
 /* P = [s] B for a scalar s < 2^255 given as 32 little-endian bytes (ref10's ge_scalarmult_base) */
 static void sg_base_mul(sg_p3 *P, const sg_niels tab[32][8], const uint8_t s[32]) {
@@ -162,6 +188,24 @@ static void sg_encode(uint8_t out[32], const sg_p3 *P, const sg_fe zi) {
     out[31] |= (uint8_t)((xb[0] & 1) << 7);
     cc_wipe(x, sizeof x), cc_wipe(y, sizeof y), cc_wipe(xb, sizeof xb);
 }
+
+#ifdef CC_SIGN_S2N
+/* out = the encoding of [s] B, for a scalar s given as 32 little-endian bytes */
+static void sg_base_encode_s2n(uint8_t out[32], const uint8_t s[32]) {
+    uint64_t sc[4], res[8];
+    for (int i = 0; i < 4; i++) {
+        uint64_t v = 0;
+        for (int j = 7; j >= 0; j--) v = v << 8 | s[8 * i + j];
+        sc[i] = v;
+    }
+    if (cc_cpu() & CC_CPU_BMI2_ADX) cc_s2n_edwards25519_scalarmulbase(res, sc); /* (a branch on the CPU only) */
+    else cc_s2n_edwards25519_scalarmulbase_alt(res, sc);
+    for (int i = 0; i < 4; i++) /* y, little-endian, then the parity of x in the top bit */
+        for (int j = 0; j < 8; j++) out[8 * i + j] = (uint8_t)(res[4 + i] >> (8 * j));
+    out[31] |= (uint8_t)((res[0] & 1) << 7);
+    cc_wipe(sc, sizeof sc), cc_wipe(res, sizeof res);
+}
+#endif
 
 /* ---- scalars mod L: fiat's Montgomery arithmetic ---- */
 /* x mod L, Montgomery form, for a 512-bit little-endian x: x = x0 + x1 2^252 + x2 2^504 with x0, x1 < 2^252 and
@@ -245,10 +289,12 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     cc_skey_t *k = calloc(1, sizeof *k);
     if (!k) return NULL;
     k->alg = CC_PK_ED25519;
+#ifndef CC_SIGN_S2N
     if (!sg_table(k->tab)) {
         free(k);
         return NULL;
     }
+#endif
     uint8_t h[64], a[64] = { 0 };
     cc_sha512(seed, 32, h);
     memcpy(a, h, 32);
@@ -257,12 +303,17 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     sg_sc_reduce(k->a_m, a); /* a mod L: [a] B = [a mod L] B, and S needs it reduced */
     uint8_t ar[32];
     sg_sc_bytes(ar, k->a_m);
+#ifdef CC_SIGN_S2N
+    sg_base_encode_s2n(k->pub, ar);
+#else
     sg_p3 A;
     sg_fe zi;
     sg_base_mul(&A, (const sg_niels(*)[8])k->tab, ar);
     sg_inv(zi, A.Z);
     sg_encode(k->pub, &A, zi);
-    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar), cc_wipe(&A, sizeof A), cc_wipe(zi, sizeof zi);
+    cc_wipe(&A, sizeof A), cc_wipe(zi, sizeof zi);
+#endif
+    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar);
     return k;
 }
 void cc_skey_free(cc_skey_t *k) {
@@ -293,8 +344,13 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
             cc_sha512_final(&c, h);
             sg_sc_reduce(r_m[i], h);
             sg_sc_bytes(rb, r_m[i]);
+#ifdef CC_SIGN_S2N
+            sg_base_encode_s2n(sig[base + i], rb); /* R, the signature's first half */
+#else
             sg_base_mul(&R[i], (const sg_niels(*)[8])k->tab, rb);
+#endif
         }
+#ifndef CC_SIGN_S2N
         /* one inversion for the batch's Z (Montgomery's trick: multiplications only) */
         memcpy(pre[0], R[0].Z, sizeof(sg_fe));
         for (int i = 1; i < m; i++) SG_MUL(pre[i], pre[i - 1], R[i].Z);
@@ -304,6 +360,7 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
             else memcpy(zi, inv, sizeof zi);
             sg_encode(sig[base + i], &R[i], zi); /* R, the signature's first half */
         }
+#endif
         for (int i = 0; i < m; i++) { /* k = SHA-512(R || A || M) mod L, S = r + k a mod L */
             uint8_t *s = sig[base + i];
             sg_sc km, sm;
