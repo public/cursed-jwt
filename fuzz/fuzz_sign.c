@@ -2,7 +2,7 @@
  * jwt.c).
  *
  * Input: one config byte, then payloads separated by NUL bytes (at most 33).  Config bit 0 adds EdDSA signing of the
- * first payload; bits 1-2 pick the HMAC key's length.
+ * first payload; bits 1-2 pick the HMAC key's length; bit 3 adds ES256 signing of the first payload.
  * Oracles (any mismatch aborts):
  *   - the encoder equals a table-driven RFC 4648 reference and decodes back to its input;
  *   - the batch and each payload alone give identical tokens and lengths, on every HMAC engine this CPU runs;
@@ -11,7 +11,7 @@
  *   - the verifier agrees with the sign-side check in both directions: an issued token is accepted by
  *     jwt_verify_batch (JWT_OK or JWT_BAD_PAYLOAD) at a time inside [nbf, exp) whenever exp and nbf are integers,
  *     and a refused payload, signed by hand with the same header and key, is JWT_INVALID for the verifier;
- *   - with bit 0, the EdDSA token verifies with jwt_verify_batch_pk under the derived public key;
+ *   - with bit 0 (EdDSA) or bit 3 (ES256), the token verifies with jwt_verify_batch_pk under the derived public key;
  *   - ASan / UBSan find nothing.
  * Build: make fuzz (clang with -fsanitize=fuzzer); without libFuzzer, fuzz/replay.c runs a corpus through it. */
 #include "jwt.c"
@@ -203,6 +203,27 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             const char *tp = one;
             jwt_verify_batch_pk(pk, 1, &tp, &ol1, now, &r);
             FZ_ASSERT(r.status != JWT_INVALID, "EdDSA token rejected by the verifier");
+        }
+    }
+    if (cfg & 8 && n) {
+        static jwt_skey_t *ek;
+        static jwt_pkey_t *epk;
+        if (!ek) {
+            uint8_t d[32], x[32], y[32];
+            for (int b = 0; b < 32; b++) d[b] = (uint8_t)(b * 13 + 1);
+            ek = jwt_skey_es256(d);
+            jwt_skey_es256_public(ek, x, y);
+            epk = jwt_pkey_es256(x, y);
+        }
+        char *o1 = one;
+        jwt_sign_batch_pk(ek, 1, &pl[0], &pn[0], &o1, &ol1);
+        FZ_ASSERT((ol1 >= 0) == (ol[0] >= 0), "ES256 and HS256 disagree on payload 0");
+        int64_t now = 1800000000;
+        if (ol1 >= 0 && live_time((const uint8_t *)pl[0], pn[0], &now)) {
+            jwt_result_t r;
+            const char *tp = one;
+            jwt_verify_batch_pk(epk, 1, &tp, &ol1, now, &r);
+            FZ_ASSERT(r.status != JWT_INVALID, "ES256 token rejected by the verifier");
         }
     }
 #endif

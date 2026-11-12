@@ -76,6 +76,6 @@ extra = [
     b'{"exp":%d,"pad":"%s"}' % (EXP, b"p" * 6500),
 ]
 for i, r in enumerate(raws + extra):  # one payload per seed (EdDSA on every other), then all in one batch
-    open(os.path.join(out, "sign", "p%02d" % i), "wb").write(bytes([i % 8]) + r)
-open(os.path.join(out, "sign", "batch"), "wb").write(b"\x07" + b"\0".join(raws + extra))
+    open(os.path.join(out, "sign", "p%02d" % i), "wb").write(bytes([i % 16]) + r)
+open(os.path.join(out, "sign", "batch"), "wb").write(b"\x0f" + b"\0".join(raws + extra))
 print(f"seeds: {len(toks) + 1} verify, {6 + 10} b64, {len(raws) + len(extra) + 1} sign, 16 pk -> {out}")
