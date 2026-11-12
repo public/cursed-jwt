@@ -1109,12 +1109,10 @@ int jwt_sign_size(int payload_len) {
     return t < 0 ? -1 : t + 1 + JWT_SIGN_SLACK;
 }
 
-/* checks payload i and writes "<header>.<payload>" into out[i]; returns the signing input's length or -1 */
+/* checks payload i and writes "<header>.<payload>" into out[i]; returns the signing input's length, or -1 (and
+ * out[i] is not touched: it may be NULL for a payload whose jwt_sign_size is -1) */
 static int sign_input(const char *canon, const char *pl, int pn, int sig_bytes, char *out) {
-    if (sign_token_len(pn, sig_bytes) < 0 || !payload_sign_ok((const uint8_t *)pl, pn)) {
-        out[0] = 0;
-        return -1;
-    }
+    if (sign_token_len(pn, sig_bytes) < 0 || !payload_sign_ok((const uint8_t *)pl, pn)) return -1;
     memcpy(out, canon, 36);
     out[36] = '.';
     return 37 + jwt_b64url_encode(out + 37, (const uint8_t *)pl, pn);

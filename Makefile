@@ -14,6 +14,7 @@
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
 #   make sign-test    HS256 / EdDSA signing: RFC 8032 / 8037 / 7515 and pyca exact outputs, round trips, pyca checks
+#   make sign-asan    the same tests under ASan + UBSan, with output buffers of exactly jwt_sign_size; and -DJWT_INPUT_PADDED
 #   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 #   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
@@ -152,6 +153,13 @@ $(B)/test_sign: tests/test_sign.c $(SRC) | $(B)
 $(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
 	./scripts/fetch-vectors.sh
 	$$(cat $(B)/pyenv) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
+$(B)/asan_sign: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+$(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(SAN) -DJWT_INPUT_PADDED $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
+	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
+	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
 sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
 	./$(B)/test_sign $(B)/sign_vectors.txt
 	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
@@ -425,4 +433,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: sign-test dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

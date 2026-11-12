@@ -6,7 +6,8 @@
  *     r = SHA-512(prefix || M) mod L;  R = [r] B;  k = SHA-512(R || A || M) mod L;  S = r + k a mod L
  *
  * Everything here is constant time in the secrets (seed, a, prefix, r, and k and S, which are computed from them):
- * no branch and no memory address depends on them, and only fixed-latency integer operations touch them.
+ * no branch and no memory address depends on them, and only integer additions, multiplications, shifts and logic
+ * touch them (no division).
  *   - Field and scalar arithmetic is fiat-crypto's (curve25519_64.c, curve25519_scalar_64.c): generated, branch-free.
  *     The helpers below call nothing else; none of cc_ed25519.inc's verify-side code (its variable-time scalar
  *     reduction, recoding, table walk, decoding or compares) is used.

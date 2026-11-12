@@ -253,14 +253,17 @@ jwt_skey_free(sk);                                        // wipes the key
   - no repeated `sub`, `username`, `exp` or `nbf` (keys compared after unescaping);
   - the whole token at most `JWT_TOKEN_MAX` (8192) bytes.
 
-  A refused payload gets `out_len[i] = -1` and an empty `out[i]`; the rest of the batch is unaffected.
+  A refused payload gets `out_len[i] = -1`, and nothing is written to its `out[i]` (which may be NULL); the rest of
+  the batch is unaffected.
 - **Not checked:** the `sub` / `username` profile (a token without them is issued, and the verifier returns
   `JWT_BAD_PAYLOAD` for it), and the clock (an `exp` in the past is issued, and rejected by the verifier).
 - **Ed25519 is deterministic** (RFC 8032): no random numbers, and the same key and claims give the same token. The
   public key is derived from the private key, never taken from the caller.
-- **Timing contract: signing is constant time in the private key.** No branch, memory address or variable-latency
-  instruction depends on the HMAC key, the Ed25519 private key, its expanded scalar and nonce prefix, or the
-  per-signature nonce. HS256 runs on the same constant-time HMAC engines as verification. Ed25519 signing is a path of
+- **Timing contract: signing is constant time in the private key.** No branch or memory address depends on the HMAC
+  key, the Ed25519 private key, its expanded scalar and nonce prefix, or the per-signature nonce (checked by valgrind
+  and trace equivalence), and by design only integer additions, multiplications, shifts and logic touch them: no
+  division and no table indexed by a secret. Variable-latency instructions are not checked mechanically; dudect on
+  three x86 CPUs found no timing difference. HS256 runs on the same constant-time HMAC engines as verification. Ed25519 signing is a path of
   its own that shares no code with the (variable-time) verifier beyond fiat-crypto's field and scalar arithmetic and
   SHA-512: a fixed-base multiplication that reads its table only through constant-time selects, complete addition
   formulas, a fixed inversion chain, and scalar reduction in fiat's Montgomery arithmetic. The MAC and signature go

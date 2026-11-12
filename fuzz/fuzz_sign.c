@@ -131,7 +131,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     for (int t = 0; t < n; t++) {
         char *o1 = one;
         jwt_sign_batch(&k, 1, &pl[t], &pn[t], &o1, &ol1);
-        FZ_ASSERT(ol1 == ol[t] && !strcmp(one, outb[t]), "batch vs single, item %d", t);
+        FZ_ASSERT(ol1 == ol[t] && (ol1 < 0 || !strcmp(one, outb[t])), "batch vs single, item %d", t);
         cnt += ol[t] >= 0;
     }
     FZ_ASSERT(cnt == issued, "count");
@@ -143,7 +143,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         int el[MAXN];
         for (int t = 0; t < n; t++) ep[t] = eb[t];
         sign_impl(&k, n, pl, pn, ep, el, fz_engines[e].fn);
-        for (int t = 0; t < n; t++) FZ_ASSERT(el[t] == ol[t] && !strcmp(eb[t], outb[t]), "engine %d item %d", e, t);
+        for (int t = 0; t < n; t++)
+            FZ_ASSERT(el[t] == ol[t] && (el[t] < 0 || !strcmp(eb[t], outb[t])), "engine %d item %d", e, t);
     }
     for (int t = 0; t < n; t++) {
         int64_t now = 1800000000;

@@ -84,12 +84,14 @@ typedef struct {
     uint8_t buf[128];
     unsigned fill; /* bytes waiting in buf */
 } cc_sha512_ctx;
+/* constant time (tests: test_ct sign; the sign_ed traces of test-ct-sde / test-ct-qemu) */
 void cc_sha512_init(cc_sha512_ctx *c);
-void cc_sha512_update(cc_sha512_ctx *c, const void *data, size_t len);
-void cc_sha512_final(cc_sha512_ctx *c, uint8_t out[64]);
-void cc_sha512(const void *data, size_t len, uint8_t out[64]);
+void cc_sha512_update(cc_sha512_ctx *c, const void *data, size_t len); /* constant time */
+void cc_sha512_final(cc_sha512_ctx *c, uint8_t out[64]);               /* constant time; wipes the context */
+void cc_sha512(const void *data, size_t len, uint8_t out[64]);         /* constant time */
 
-/* Overwrite len bytes with zeros in a way the compiler can't drop (for secrets about to go out of scope). */
+/* Overwrite len bytes with zeros in a way the compiler can't drop (for secrets about to go out of scope).
+ * constant time */
 void cc_wipe(void *p, size_t len);
 
 /* ---- engine-specific entry points (same contracts), for tests and benchmarks ---- */
@@ -144,12 +146,14 @@ void cc_verify_batch(const cc_pkey_t *k, int n, const uint8_t *const *msg, const
  * Ed25519 (RFC 8032, deterministic: no random numbers): the 32-byte private key (the seed); the public key is derived
  * from it.  NULL only if out of memory.  cc_skey_free wipes the key before freeing it. */
 typedef struct cc_skey cc_skey_t;
+/* constant time (tests: test_ct sign, the sign_ed traces of test-ct-sde / test-ct-qemu, dudect_sign edkey) */
 cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]);
-void cc_skey_free(cc_skey_t *k);
+void cc_skey_free(cc_skey_t *k);                          /* constant time; wipes the key */
 int cc_skey_alg(const cc_skey_t *k);                      /* CC_PK_* */
 int cc_skey_sig_bytes(const cc_skey_t *k);                /* 64 for Ed25519 */
 void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]); /* the public key, as cc_pkey_ed25519 takes it */
-/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes. */
+/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes.
+ * constant time (tests: test_ct sign, the sign_ed traces of test-ct-sde / test-ct-qemu, dudect_sign ed) */
 void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
 
 #ifdef __cplusplus

@@ -151,10 +151,10 @@ static void vectors(const char *path) {
             uint8_t seed[32] = { 7 };
             tokbuf[0] = 'x';
             sign_hs_one(seed, 32, C, pn, tokbuf, &o1);
-            CHECK(o1 == -1 && tokbuf[0] == 0, "%s: HS256 issued a token for a refused payload", src);
+            CHECK(o1 == -1 && tokbuf[0] == 'x', "%s: HS256 issued a token for a refused payload", src);
             tokbuf[0] = 'x';
             sign_ed_one(seed, C, pn, tokbuf, &o2);
-            CHECK(o2 == -1 && tokbuf[0] == 0, "%s: EdDSA issued a token for a refused payload", src);
+            CHECK(o2 == -1 && tokbuf[0] == 'x', "%s: EdDSA issued a token for a refused payload", src);
         } else if (!strcmp(kind, "sha512")) {
             int ml = unhex(f3, A);
             uint8_t want[64], got[64];
@@ -220,6 +220,23 @@ static void make_payloads(int n) {
         outs[i] = obuf[i];
     }
 }
+/* the same batch into buffers of exactly the advertised size (ASan builds catch any overrun): tokens equal ref[] */
+static void exact_size(int n, const jwt_key_t *hk, const jwt_skey_t *sk) {
+    char *ex[MAXB];
+    const char *pp[MAXB];
+    int el[MAXB];
+    for (int i = 0; i < n; i++) {
+        int sz = hk ? jwt_sign_size(pnl[i]) : jwt_sign_size_pk(sk, pnl[i]);
+        CHECK(sz > ol[i], "advertised size %d for a %d-char token", sz, ol[i]);
+        ex[i] = malloc((size_t)sz), pp[i] = pls[i];
+    }
+    if (hk) jwt_sign_batch(hk, n, pp, pnl, ex, el);
+    else jwt_sign_batch_pk(sk, n, pp, pnl, ex, el);
+    for (int i = 0; i < n; i++) {
+        CHECK(el[i] == ol[i] && !strcmp(ex[i], obuf[i]), "exact-size buffer n=%d i=%d", n, i);
+        free(ex[i]);
+    }
+}
 static void check_results(const char *what, int n, const jwt_result_t *r) {
     for (int i = 0; i < n; i++)
         CHECK(r[i].status == JWT_OK && r[i].uid == uids[i] && !strcmp(r[i].username, users[i]),
@@ -242,6 +259,7 @@ static void roundtrip_hs(void) {
         for (int i = 0; i < n; i++) tp[i] = obuf[i];
         jwt_verify_batch(&k, n, tp, ol, 1800000000, res);
         check_results("hs default", n, res);
+        exact_size(n, &k, NULL);
         for (size_t e = 0; e < sizeof all_engines / sizeof all_engines[0]; e++) {
             if ((all_engines[e].need & f) != all_engines[e].need) continue;
             engines += n == 1;
@@ -280,6 +298,7 @@ static void roundtrip_ed(void) {
         CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n, "ed n=%d: not all issued", n);
         jwt_verify_batch_pk(pk, n, tp, ol, 1800000000, res);
         check_results("ed", n, res);
+        exact_size(n, NULL, k);
         for (int i = 0; i < n; i++) { /* deterministic: signing alone gives the same token */
             int o;
             char *op = ref[i];
@@ -287,10 +306,10 @@ static void roundtrip_ed(void) {
             CHECK(o == ol[i] && !strcmp(ref[i], obuf[i]), "ed n=%d i=%d: batch vs single", n, i);
         }
         /* a refused payload in the middle of a batch leaves the others alone */
-        if (n >= 3) {
-            pnl[1] = 3;
-            CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n - 1 && ol[1] == -1 && obuf[1][0] == 0,
-                  "ed n=%d: refused item", n);
+        if (n >= 3) { /* (its out[] is NULL: a refused item must not be written to) */
+            pnl[1] = 3, outs[1] = NULL;
+            CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n - 1 && ol[1] == -1, "ed n=%d: refused item", n);
+            outs[1] = obuf[1];
             jwt_verify_batch_pk(pk, n, tp, ol, 1800000000, res);
             CHECK(res[1].status == JWT_INVALID && res[0].status == JWT_OK && res[2].status == JWT_OK, "ed mixed");
         }

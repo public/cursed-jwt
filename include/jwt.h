@@ -85,7 +85,7 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
  * Neither "sub" nor "username" is required, and times are not compared with the clock: a token issued with an "exp"
  * in the past is issued, and rejected by the verifier.
  * out[i] must have room for jwt_sign_size(payload_len[i]) bytes; it receives the token, NUL-terminated, and
- * out_len[i] its length (without the NUL), or -1 if payload i was refused (out[i] then holds "").  Returns the number
+ * out_len[i] its length (without the NUL), or -1 if payload i was refused (out[i] is then not written to, and may be NULL).  Returns the number
  * of tokens issued. */
 #ifdef JWT_INPUT_PADDED
 #define JWT_SIGN_SLACK 64 /* the HMAC reads up to 64 bytes past the signing input, which is built in out[i] */
@@ -93,6 +93,7 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
 #define JWT_SIGN_SLACK 0
 #endif
 int jwt_sign_size(int payload_len); /* bytes out[i] needs (the token + its NUL + JWT_SIGN_SLACK); -1 if too long */
+/* constant time in the key (tests: test_ct sign, the sign_hs traces of test-ct-sde / test-ct-qemu, dudect_sign hs) */
 int jwt_sign_batch(const jwt_key_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
                    int *out_len);
 
@@ -198,6 +199,7 @@ void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, co
  * jwt_sign_batch_pk is jwt_sign_batch with the header {"alg":"EdDSA","typ":"JWT"} and a 64-byte signature, under the
  * same payload rules; jwt_sign_size_pk gives the room out[i] needs.  jwt_skey_free wipes the key. */
 typedef struct jwt_skey jwt_skey_t;
+/* jwt_skey_ed25519, jwt_sign_batch_pk and jwt_skey_free: constant time in the private key (cc_sign_batch's tests) */
 jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]);       /* NULL only if out of memory */
 void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]); /* for jwt_pkey_ed25519 / the JWK "x" */
 void jwt_skey_free(jwt_skey_t *k);
