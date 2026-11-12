@@ -13,9 +13,9 @@
  *     reduction, recoding, table walk, decoding or compares) is used.
  *   - [r] B is ref10's fixed-base method: 64 signed radix-16 digits of r (recoded with arithmetic only), a table of
  *     i 256^j B (i = 1..8, j = 0..31) built from public data at key setup, and for every digit a scan of its whole
- *     8-entry row with fiat's constant-time select, then a conditional negation the same way.  The addition (mixed,
- *     extended + affine Niels) and doubling formulas for a = -1 twisted Edwards are complete: no exceptional case,
- *     so no branch, and the identity needs none either.
+ *     8-entry row by masks (each entry ANDed with all ones or zero, then ORed in), then a conditional negation the
+ *     same way.  The addition (mixed, extended + affine Niels) and doubling formulas for a = -1 twisted Edwards are
+ *     complete: no exceptional case, so no branch, and the identity needs none either.
  *   - Reduction mod L of the 512-bit hashes: the hash is split into pieces < 2^252 < L, each fed to fiat's Montgomery
  *     arithmetic mod L with constant multipliers 2^252 and 2^504.  Fiat requires inputs < L, which these are.
  *   - The encoding of R inverts Z with a fixed addition chain (Fermat, 254 squarings + 11 multiplications); a batch
@@ -127,27 +127,40 @@ static void sg_add_p3(sg_p3 *P, const sg_p3 *Q, const sg_fe d2) {
     SG_MUL(P->X, e, f), SG_MUL(P->Y, g, h), SG_MUL(P->T, e, h), SG_MUL(P->Z, f, g);
 }
 
-/* 1 if x == y else 0, for small non-negative ints, without a branch */
-static fiat_25519_uint1 sg_eq(uint32_t x, uint32_t y) { return (fiat_25519_uint1)(((x ^ y) - 1u) >> 31); }
-/* t = d (i 256^j B for d = +-i, the identity for 0): reads all 8 entries of the row whatever d is */
+/* all ones if x == y else 0, for small non-negative ints: arithmetic, then through an empty asm so the compiler can
+ * neither see the value nor turn its uses into a branch */
+static uint64_t sg_eqmask(uint32_t x, uint32_t y) {
+    uint64_t m = 0 - (uint64_t)(((x ^ y) - 1u) >> 31);
+#if defined(__GNUC__)
+    __asm__("" : "+r"(m));
+#endif
+    return m;
+}
+/* t = d (i 256^j B for d = +-i, the identity for 0).  Every one of the row's 8 entries is read, whatever d is: each
+ * is ANDed with its mask (all ones for the wanted one, else zero) and ORed in, so the loads, their addresses and the
+ * instructions are the same for every d, and the loop vectorises.  Then a conditional negation, the same way. */
 static void sg_select(sg_niels *t, const sg_niels row[8], int8_t d) {
+    enum { W = (int)(sizeof(sg_niels) / sizeof(uint64_t)) };  /* 15 limbs: ypx, ymx, xy2d */
     uint32_t neg = (uint32_t)(uint8_t)d >> 7;                 /* 1 iff d < 0 */
     uint32_t mag = (uint32_t)(d - ((-(int32_t)neg & d) * 2)); /* |d|, 0..8 */
-    sg_set(t->ypx, 1), sg_set(t->ymx, 1), sg_set(t->xy2d, 0);
+    uint64_t acc[W], m0 = sg_eqmask(mag, 0);
+    for (int w = 0; w < W; w++) acc[w] = 0;
+    acc[0] = m0 & 1, acc[5] = m0 & 1; /* the identity: y + x = y - x = 1, 2dxy = 0 */
     for (int i = 0; i < 8; i++) {
-        fiat_25519_uint1 c = sg_eq(mag, (uint32_t)i + 1);
-        fiat_25519_selectznz(t->ypx, c, t->ypx, row[i].ypx);
-        fiat_25519_selectznz(t->ymx, c, t->ymx, row[i].ymx);
-        fiat_25519_selectznz(t->xy2d, c, t->xy2d, row[i].xy2d);
+        uint64_t m = sg_eqmask(mag, (uint32_t)i + 1);
+        const uint64_t *e = (const uint64_t *)&row[i];
+        for (int w = 0; w < W; w++) acc[w] |= e[w] & m;
     }
+    memcpy(t, acc, sizeof *t);
     sg_fe nxy; /* -(x, y) = (-x, y): swap y + x and y - x, negate 2dxy */
     sg_neg(nxy, t->xy2d);
-    sg_fe ypx, ymx;
-    memcpy(ypx, t->ypx, sizeof ypx), memcpy(ymx, t->ymx, sizeof ymx);
-    fiat_25519_selectznz(t->ypx, (fiat_25519_uint1)neg, ypx, ymx);
-    fiat_25519_selectznz(t->ymx, (fiat_25519_uint1)neg, ymx, ypx);
-    fiat_25519_selectznz(t->xy2d, (fiat_25519_uint1)neg, t->xy2d, nxy);
-    cc_wipe(nxy, sizeof nxy), cc_wipe(ypx, sizeof ypx), cc_wipe(ymx, sizeof ymx);
+    uint64_t mn = sg_eqmask(neg, 1);
+    for (int w = 0; w < 5; w++) {
+        uint64_t p = t->ypx[w], q = t->ymx[w], x = (p ^ q) & mn;
+        t->ypx[w] = p ^ x, t->ymx[w] = q ^ x;
+        t->xy2d[w] ^= (t->xy2d[w] ^ nxy[w]) & mn;
+    }
+    cc_wipe(nxy, sizeof nxy), cc_wipe(acc, sizeof acc);
 }
 /* P = [s] B for a scalar s < 2^255 given as 32 little-endian bytes (ref10's ge_scalarmult_base) */
 static void sg_base_mul(sg_p3 *P, const sg_niels tab[32][8], const uint8_t s[32]) {
