@@ -158,7 +158,8 @@ sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
 	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
-#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
+#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h); then
+#                  the same for signing (`test_ct sign`: the HS256 key, the Ed25519 seed, a, prefix and nonce r)
 #   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
 #                  AVX-512): every engine's instruction and address trace must be identical under two keys
 #   make test-ct-qemu QEMU=…/qemu-aarch64 EXECLOG=…/libexeclog.so   the same for the AArch64 engines (NEON, SHA2), cross-
@@ -169,6 +170,10 @@ $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 test-ct: $(B)/test_ct
 	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct sign
+	@if valgrind -q --error-exitcode=1 ./$(B)/test_ct sign-control >/dev/null 2>&1; then \
+	  echo "test-ct: the sign-control run raised no memcheck error: the method is broken"; exit 1; \
+	  else echo "test-ct: sign-control flagged (as it must)"; fi
 $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 SDE ?= sde64

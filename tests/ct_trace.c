@@ -10,6 +10,10 @@
  *
  * ENGINE "verify" is cc_hmac_sha256_verify (the dispatched engine, then the tag compare) against key 0's tags: key 0
  * accepts them all and key 1 none, and the traces must still be identical.
+ * ENGINE "sign_hs" is HS256 signing: jwt_key_init and jwt_sign_batch (payload checks, the dispatched HMAC, the
+ * base64url encoder) of BATCH fixed payloads.  ENGINE "sign_ed" is Ed25519 signing: cc_skey_ed25519 from a 32-byte
+ * seed (SHA-512, the scalar reduction, [a] B, the encoding of A), cc_sign_batch of BATCH fixed messages and
+ * cc_skey_free.  The two keys / seeds differ in every byte.
  *
  *   ct_trace ENGINE KEY BATCH          (prints the first MAC word)
  *   make test-ct-sde SDE=/path/to/sde64
@@ -63,6 +67,38 @@ int main(int argc, char **argv) {
         { "sha2", jwt_hmac_sha2 },
 #endif
     };
+    if (!strcmp(e, "sign_hs") || !strcmp(e, "sign_ed")) {
+        static char pl[32][200], out[32][400];
+        static const char *pp[32];
+        static char *op[32];
+        static int pn[32], on[32];
+        static uint8_t sig[32][64], *sp[32];
+        static const uint8_t *mp[32];
+        static int ml[32];
+        for (int i = 0; i < n; i++) {
+            pn[i] = snprintf(pl[i], sizeof pl[i], "{\"sub\":\"%d\",\"username\":\"user%d\",\"exp\":4102444800}",
+                             1000 + i, i);
+            pp[i] = pl[i], op[i] = out[i], mp[i] = (const uint8_t *)pl[i], ml[i] = pn[i], sp[i] = sig[i];
+        }
+        if (e[5] == 'h') {
+            jwt_key_t k;
+            SSC_MARK(0x111);
+            jwt_key_init(&k, key, 64);
+            jwt_sign_batch(&k, n, pp, pn, op, on);
+            SSC_MARK(0x222);
+            printf("%s\n", out[0]);
+        } else {
+#ifndef JWT_NO_PK
+            SSC_MARK(0x111);
+            cc_skey_t *sk = cc_skey_ed25519(key);
+            cc_sign_batch(sk, n, mp, ml, sp);
+            cc_skey_free(sk);
+            SSC_MARK(0x222);
+            printf("%02x%02x\n", sig[0][0], sig[0][63]);
+#endif
+        }
+        return 0;
+    }
     jwt_hmac_fn *f = 0;
     int verify = !strcmp(e, "verify");
     for (size_t i = 0; i < sizeof eng / sizeof eng[0]; i++)
