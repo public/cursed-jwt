@@ -12,6 +12,11 @@
  *   constant time       everything that touches an HMAC key: cc_hmac_key_init, every cc_hmac_sha256_* engine,
  *                       cc_tag_eq32 and cc_hmac_sha256_verify (no key- or MAC-dependent branch or memory address;
  *                       checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`)
+ *                       cc_sha512_* and cc_sha512 (no data-dependent operation at all; checked by `make test-ct`)
+ *                       signing: cc_skey_ed25519, cc_sign_batch and cc_skey_free (no branch or memory address depends on
+ *                       the private key, the expanded scalar, the nonce prefix or the per-signature nonce; checked by
+ *                       `make test-ct`, `test-ct-sde`, `test-ct-qemu` and the dudect sign arms).  Signing shares no
+ *                       code with verification beyond fiat-crypto's field and scalar operations and SHA-512.
  *   variable time       signature verification (cc_pkey_*, cc_verify_batch): its inputs, the public key, the
  *                       message and the signature, are all public, as in every other library's verify
  */
@@ -71,6 +76,22 @@ int cc_hmac_sha256_verify(const cc_hmac_key_t *k, int n, const uint8_t *const *m
 /* 1 iff the 32 bytes at a and b are equal, in constant time. */
 int cc_tag_eq32(const void *a, const void *b);
 
+/* ---- SHA-512 (FIPS 180-4; constant time: no branch or address depends on the data, only on its length) ----
+ * Streaming: init, update any number of times, final (which wipes the context).  Used for Ed25519. */
+typedef struct {
+    uint64_t h[8];
+    uint64_t total; /* bytes hashed so far */
+    uint8_t buf[128];
+    unsigned fill; /* bytes waiting in buf */
+} cc_sha512_ctx;
+void cc_sha512_init(cc_sha512_ctx *c);
+void cc_sha512_update(cc_sha512_ctx *c, const void *data, size_t len);
+void cc_sha512_final(cc_sha512_ctx *c, uint8_t out[64]);
+void cc_sha512(const void *data, size_t len, uint8_t out[64]);
+
+/* Overwrite len bytes with zeros in a way the compiler can't drop (for secrets about to go out of scope). */
+void cc_wipe(void *p, size_t len);
+
 /* ---- engine-specific entry points (same contracts), for tests and benchmarks ---- */
 cc_sha256_fn cc_sha256_scalar;
 cc_hmac_fn cc_hmac_sha256_scalar;
@@ -116,6 +137,20 @@ int cc_pkey_sig_bytes(const cc_pkey_t *k); /* the signature length the key takes
  * Signatures are raw: ES256 r || s (64 bytes, as in JWS), RS256 the k-byte integer, Ed25519 R || S. */
 void cc_verify_batch(const cc_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                      const int *slen, uint8_t *ok);
+
+/* ---- signing (constant time in the private key) ----
+ * A signing key never shares code with the verify side's key (cc_pkey_t): its scalar multiplication reads its table
+ * only through constant-time selects, uses complete formulas, and inverts with a fixed addition chain.
+ * Ed25519 (RFC 8032, deterministic: no random numbers): the 32-byte private key (the seed); the public key is derived
+ * from it.  NULL only if out of memory.  cc_skey_free wipes the key before freeing it. */
+typedef struct cc_skey cc_skey_t;
+cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]);
+void cc_skey_free(cc_skey_t *k);
+int cc_skey_alg(const cc_skey_t *k);                          /* CC_PK_* */
+int cc_skey_sig_bytes(const cc_skey_t *k);                    /* 64 for Ed25519 */
+void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]);     /* the public key, as cc_pkey_ed25519 takes it */
+/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes. */
+void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
 
 #ifdef __cplusplus
 }
