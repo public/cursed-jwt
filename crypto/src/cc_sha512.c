@@ -1,7 +1,8 @@
 /* cc_sha512.c — SHA-512 (FIPS 180-4), #included by cursed_crypto.c.  Part of cursed-jwt, MIT licence (see LICENSE).
  *
  * Constant time: the compression function is additions, rotations and boolean operations on the state and the
- * message words, with no data-dependent branch or memory address; the buffering branches on lengths only.  So it is
+ * message words, with no data-dependent branch or memory address; the buffering branches on lengths only.  On x86-64
+ * Linux the blocks go through OpenSSL's assembly (below), which is constant time the same way.  So it is
  * safe on secrets (Ed25519 signing hashes the private key and the nonce prefix with it).  Ed25519 verification uses
  * the same block function (sha512_ram in cc_ed25519.inc). */
 
@@ -38,7 +39,7 @@ static const uint64_t SHA512_IV[8] = { 0x6a09e667f3bcc908ull, 0xbb67ae8584caa73b
                                        0xa54ff53a5f1d36f1ull, 0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
                                        0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull };
 #define ROR64(x, n) ((x) >> (n) | (x) << (64 - (n)))
-static void sha512_block(uint64_t st[8], const uint8_t *p) {
+static void sha512_block_c(uint64_t st[8], const uint8_t *p) {
     uint64_t w[80], a = st[0], b = st[1], c = st[2], d = st[3], e = st[4], f = st[5], g = st[6], h = st[7];
     for (int i = 0; i < 16; i++) {
         uint64_t v = 0;
@@ -59,6 +60,20 @@ static void sha512_block(uint64_t st[8], const uint8_t *p) {
     cc_wipe(w, sizeof w); /* the schedule holds the message (a secret, when signing) */
 }
 
+#if defined(CC_OSSL_SHA512) && defined(__x86_64__) && defined(__ELF__)
+/* -DJWT_OSSL_SHA512 (the Makefile's default on x86-64 Linux): OpenSSL's sha512_block_data_order, extracted
+ * (crypto/src/sha512_x86_64_ossl.S, link it too): its AVX2+BMI2, AVX, SHA512-instruction and plain paths, dispatched on
+ * cc_ossl_ia32cap_P (cc_sha256.c).  Constant time like the C (no data-dependent branch or address).  Its message
+ * schedule stays on its stack, as in OpenSSL; the C version's is wiped. */
+void cc_ossl_sha512_block(uint64_t h[8], const void *in, size_t blocks);
+static void sha512_blocks(uint64_t st[8], const uint8_t *p, size_t n) { cc_ossl_sha512_block(st, p, n); }
+#else
+static void sha512_blocks(uint64_t st[8], const uint8_t *p, size_t n) {
+    for (; n; n--, p += 128) sha512_block_c(st, p);
+}
+#endif
+static void sha512_block(uint64_t st[8], const uint8_t *p) { sha512_blocks(st, p, 1); }
+
 void cc_sha512_init(cc_sha512_ctx *c) {
     memcpy(c->h, SHA512_IV, sizeof c->h);
     c->total = 0, c->fill = 0;
@@ -72,7 +87,7 @@ void cc_sha512_update(cc_sha512_ctx *c, const void *data, size_t len) {
         if (c->fill < 128) return;
         sha512_block(c->h, c->buf), c->fill = 0;
     }
-    for (; len >= 128; m += 128, len -= 128) sha512_block(c->h, m);
+    if (len >= 128) sha512_blocks(c->h, m, len / 128), m += len / 128 * 128, len %= 128;
     memcpy(c->buf, m, len), c->fill = (unsigned)len;
 }
 void cc_sha512_final(cc_sha512_ctx *c, uint8_t out[64]) {

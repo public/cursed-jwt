@@ -32,6 +32,9 @@
 #if defined(JWT_SHANI_MB) && !defined(CC_SHANI_MB)
 #define CC_SHANI_MB 1
 #endif
+#if defined(JWT_OSSL_SHA512) && !defined(CC_OSSL_SHA512)
+#define CC_OSSL_SHA512 1
+#endif
 #if defined(JWT_ED25519_ASM) && !defined(CC_ED25519_ASM)
 #define CC_ED25519_ASM 1
 #endif

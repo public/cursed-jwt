@@ -1,6 +1,7 @@
-/* sha256_x86_64_ossl.S: OpenSSL's sha256_block_data_order for x86-64 (SHA-NI, AVX2+BMI2, AVX, SSSE3 and plain
- * x86-64 paths, dispatched on a CPU capability word), generated from OpenSSL 3.6.0 crypto/sha/asm/sha512-x86_64.pl
- * by scripts/extract-openssl-sha256.sh and renamed for cursed-jwt.  Do not edit; regenerate.
+/* sha256_x86_64_ossl.S: OpenSSL's sha256_block_data_order for x86-64 (its SIMD, SHA-extension and plain
+ * x86-64 paths, dispatched on a CPU capability word), generated from OpenSSL 3.6.0
+ * crypto/sha/asm/sha512-x86_64.pl by scripts/extract-openssl-sha256.sh and renamed for cursed-jwt.  Do not
+ * edit; regenerate.
  *
  * Copyright 2005-2025 The OpenSSL Project Authors. All Rights Reserved.
  * Written by Andy Polyakov for the OpenSSL project.

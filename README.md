@@ -430,6 +430,8 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
   extracted SHA-256 code, which dispatches itself (SHA-NI, AVX2+BMI2, AVX, SSSE3, plain x86-64). The Makefile
   assembles `crypto/src/sha256_x86_64_ossl.S` and defines `JWT_OSSL_SHA256`. If you compile `src/jwt.c` into your own
   program, do the same, or leave both out to get the compiled scalar code; `make OSSL_SHA=` builds without it.
+  SHA-512 (Ed25519) works the same way: `crypto/src/sha512_x86_64_ossl.S` with `JWT_OSSL_SHA512` (AVX2+BMI2, AVX, the
+  SHA512 instructions, plain x86-64), else portable C.
 - **Intel Skylake through Cascade Lake / Cooper Lake: `make JCC=1`.** Intel's microcode fix for the JCC erratum
   stalls any branch that crosses or ends on a 32-byte boundary. `JCC=1` has the assembler keep every branch off one
   (`-Wa,-mbranches-within-32B-boundaries` with gcc, `-mbranches-within-32B-boundaries` with clang), in the C and the
@@ -497,7 +499,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 | `-DJWT_RSAZ8` | with `-DJWT_RSAZ`: 8 RS256 tokens per call through crypto_mb's 8-lane exponentiation, on Zen 4 / Zen 5 (`scripts/fetch-crypto-mb-rsa.sh`) |
 | `-DJWT_ES8` | 8 ES256 tokens per call on crypto_mb's 8-lane P-256 field under our comb tables, on Zen 4 / Zen 5 |
 | `-DJWT_CRYPTO_MB` | Intel crypto_mb's own 8-way ES256 / RSA API (`scripts/build-crypto-mb.sh`, which needs OpenSSL ≥ 3.5.5 headers). Kept for comparison: `-DJWT_RSAZ8` / `-DJWT_ES8` are the measured paths |
-| `make OSSL_SHA=` | build without the x86-64 Linux assembly (OpenSSL's SHA-256 and `bn_mul_mont` extracts, the generated 4-stream SHA-NI and 16-lane zmm kernels); the compiled engines stay |
+| `make OSSL_SHA=` | build without the x86-64 Linux assembly (OpenSSL's SHA-256, SHA-512 and `bn_mul_mont` extracts, the generated 4-stream SHA-NI and 16-lane zmm kernels, s2n-bignum's Ed25519 fixed-base kernel); the compiled engines stay |
 | `make JCC=1` | keep branches off 32-byte boundaries (Intel's JCC erratum): for builds that run only on Intel Skylake through Cascade Lake / Cooper Lake |
 
 **Targets:**

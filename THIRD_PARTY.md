@@ -15,6 +15,14 @@
   - Used on x86-64 Linux for HS256 batch 1 and the lanes left over by vector groups (`-DJWT_OSSL_SHA256`, set by the
     Makefile there).
 
+- **OpenSSL `sha512_block_data_order` for x86-64**: `crypto/src/sha512_x86_64_ossl.S`.
+  - The same source, licence and generator as the SHA-256 file above (`sha512-x86_64.pl` emits SHA-512 when the
+    output is named `sha512`), with the same modifications: `sha512_block_data_order*` → `cc_ossl_sha512_block*`
+    (hidden), `OPENSSL_ia32cap_P` → `cc_ossl_ia32cap_P` (filled from CPUID, its XOP bit always clear), a
+    `.note.GNU-stack` section.
+  - Used on x86-64 Linux for SHA-512, i.e. Ed25519 signing and verification (`-DJWT_OSSL_SHA512`, set by the
+    Makefile there).
+
 - **Intel ipsec-mb `sha256_x16_avx512` for x86-64 AVX-512**: `crypto/src/sha256_x16_avx512.S`.
   - Copyright (c) 2012-2026, Intel Corporation. BSD 3-Clause licence, full text in
     [licenses/intel-ipsec-mb-LICENSE.txt](licenses/intel-ipsec-mb-LICENSE.txt).
