@@ -279,6 +279,7 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
     enum { CH = 16 };
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH;
+        if (m < 1) break; /* (never: base < n; it tells the compiler, which can't prove it under -fwrapv) */
         sg_p3 R[CH];
         sg_sc r_m[CH];
         memset(R, 0, sizeof R); /* (m >= 1 entries are set below; for static analysers) */
