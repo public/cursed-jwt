@@ -8,6 +8,10 @@
  *   HMACKey(key)  the two SHA-256 midstates of an HMAC-SHA256 key (cc_hmac_key_t); the raw key is not kept
  *     .verify(data, tag) / .verify_batch(datas, tags)   as above; tags are compared by cc_hmac_sha256_verify only
  *     .digest(data) / .digest_batch(datas)              32-byte MACs
+ *   SKey          a cc_skey_t (an Ed25519 private key), built once, wiped and freed with the object
+ *     skey_ed25519(seed32)           -> SKey (the public key is derived from the seed)
+ *     .public_bytes()                -> the 32-byte public key
+ *     .sign(data) / .sign_batch(datas)   64-byte signatures (cc_sign_batch: constant time in the key)
  *   sha256_batch(datas), der_to_raw(sig), engine(), cpu_features()
  *
  * der: ES256 signatures are DER (as pyca/cryptography takes them) and are converted here to r || s by a strict
@@ -479,6 +483,115 @@ static PyTypeObject HMACKeyType = {
     .tp_new = PyType_GenericNew,
 };
 
+/* ---------------------------------------------------------------------------------- SKey (Ed25519 signing) */
+typedef struct {
+    PyObject_HEAD cc_skey_t *k;
+} SKeyObject;
+
+static void skey_dealloc(SKeyObject *self) {
+    cc_skey_free(self->k); /* wipes the key */
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+static PyTypeObject SKeyType;
+
+static PyObject *m_skey_ed25519(PyObject *m, PyObject *args) {
+    Py_buffer seed;
+    if (!PyArg_ParseTuple(args, "y*", &seed)) return NULL;
+    if (seed.len != 32) {
+        PyBuffer_Release(&seed);
+        return PyErr_Format(PyExc_ValueError, "an Ed25519 private key is 32 bytes, not %zd", seed.len);
+    }
+    cc_skey_t *k;
+    Py_BEGIN_ALLOW_THREADS;
+    k = cc_skey_ed25519(seed.buf);
+    Py_END_ALLOW_THREADS;
+    PyBuffer_Release(&seed);
+    if (!k) return PyErr_NoMemory();
+    SKeyObject *o = PyObject_New(SKeyObject, &SKeyType);
+    if (!o) {
+        cc_skey_free(k);
+        return NULL;
+    }
+    o->k = k;
+    return (PyObject *)o;
+}
+
+static PyObject *skey_public_bytes(SKeyObject *self, PyObject *unused) {
+    uint8_t pub[32];
+    cc_skey_public(self->k, pub);
+    return PyBytes_FromStringAndSize((const char *)pub, 32);
+}
+
+/* 64-byte signatures of an iterable, as a list of bytes; the GIL is released for the signing */
+static PyObject *skey_sign_batch(SKeyObject *self, PyObject *datas) {
+    static const char *const names[1] = { "datas" };
+    bufs_t b;
+    if (bufs_get(&b, 1, &datas, names) < 0) return NULL;
+    for (Py_ssize_t i = 0; i < b.n; i++)
+        if (BUF(&b, 0, i)->len > INT_MAX) {
+            bufs_free(&b);
+            return PyErr_Format(PyExc_OverflowError, "data item %zd is longer than %d bytes", i, INT_MAX);
+        }
+    scratch_t *s = scratch_new();
+    uint8_t(*out)[64] = PyMem_Malloc((size_t)b.n * 64 + 1);
+    if (!s || !out) {
+        PyMem_RawFree(s), PyMem_Free(out), bufs_free(&b);
+        return s ? PyErr_NoMemory() : NULL;
+    }
+    Py_BEGIN_ALLOW_THREADS;
+    uint8_t *sp[CHUNK];
+    for (Py_ssize_t base = 0; base < b.n; base += CHUNK) {
+        int m = (int)(b.n - base < CHUNK ? b.n - base : CHUNK);
+        for (int i = 0; i < m; i++)
+            s->msg[i] = BUF(&b, 0, base + i)->buf, s->len[i] = (int)BUF(&b, 0, base + i)->len, sp[i] = out[base + i];
+        cc_sign_batch(self->k, m, s->msg, s->len, sp);
+    }
+    Py_END_ALLOW_THREADS;
+    bufs_free(&b);
+    PyMem_RawFree(s);
+    PyObject *l = PyList_New(b.n);
+    for (Py_ssize_t i = 0; l && i < b.n; i++) {
+        PyObject *d = PyBytes_FromStringAndSize((const char *)out[i], 64);
+        if (!d) Py_CLEAR(l);
+        else PyList_SET_ITEM(l, i, d);
+    }
+    PyMem_Free(out);
+    return l;
+}
+
+static PyObject *skey_sign(SKeyObject *self, PyObject *arg) {
+    Py_buffer ms;
+    if (get_buf(arg, &ms) < 0) return NULL;
+    if (ms.len > INT_MAX) {
+        PyBuffer_Release(&ms);
+        return PyErr_Format(PyExc_OverflowError, "data is longer than %d bytes", INT_MAX);
+    }
+    const uint8_t *mp = ms.buf;
+    int ml = (int)ms.len;
+    uint8_t sig[64], *sp = sig;
+    Py_BEGIN_ALLOW_THREADS; /* a signature is ~15-20 us: worth releasing the GIL */
+    cc_sign_batch(self->k, 1, &mp, &ml, &sp);
+    Py_END_ALLOW_THREADS;
+    PyBuffer_Release(&ms);
+    return PyBytes_FromStringAndSize((const char *)sig, 64);
+}
+
+static PyMethodDef skey_methods[] = {
+    { "public_bytes", (PyCFunction)skey_public_bytes, METH_NOARGS, "public_bytes() -> the 32-byte public key" },
+    { "sign", (PyCFunction)skey_sign, METH_O, "sign(data) -> 64-byte signature" },
+    { "sign_batch", (PyCFunction)skey_sign_batch, METH_O, "sign_batch(datas) -> list of 64-byte signatures" },
+    { NULL }
+};
+static PyTypeObject SKeyType = {
+    .ob_base = { PyObject_HEAD_INIT(NULL) 0 },
+    .tp_name = "cursed_crypto._native.SKey",
+    .tp_basicsize = sizeof(SKeyObject),
+    .tp_dealloc = (destructor)skey_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "an Ed25519 signing key (cc_skey_t); made by skey_ed25519(seed32)",
+    .tp_methods = skey_methods,
+};
+
 /* ---------------------------------------------------------------------------------- module */
 static PyObject *m_sha256_batch(PyObject *m, PyObject *datas) { return digests(NULL, datas); }
 
@@ -529,6 +642,7 @@ static PyMethodDef module_methods[] = {
     { "pkey_ed25519", m_pkey_ed25519, METH_VARARGS, "pkey_ed25519(pub32) -> PKey | None" },
     { "pkey_es256", m_pkey_es256, METH_VARARGS, "pkey_es256(x32, y32) -> PKey | None" },
     { "pkey_rs256", m_pkey_rs256, METH_VARARGS, "pkey_rs256(n, e) -> PKey | None (big-endian)" },
+    { "skey_ed25519", m_skey_ed25519, METH_VARARGS, "skey_ed25519(seed32) -> SKey" },
     { "sha256_batch", m_sha256_batch, METH_O, "sha256_batch(datas) -> list[bytes]" },
     { "der_to_raw", m_der_to_raw, METH_VARARGS, "der_to_raw(sig) -> r || s (64 bytes) | None" },
     { "_overhead", m_overhead, METH_VARARGS, "verify_batch's binding work without the crypto (benchmarks)" },
@@ -541,12 +655,14 @@ static struct PyModuleDef module_def = {
 };
 
 PyMODINIT_FUNC PyInit__native(void) {
-    if (PyType_Ready(&PKeyType) < 0 || PyType_Ready(&HMACKeyType) < 0) return NULL;
+    if (PyType_Ready(&PKeyType) < 0 || PyType_Ready(&HMACKeyType) < 0 || PyType_Ready(&SKeyType) < 0) return NULL;
     PyObject *m = PyModule_Create(&module_def);
     if (!m) return NULL;
     Py_INCREF(&HMACKeyType);
     Py_INCREF(&PKeyType);
+    Py_INCREF(&SKeyType);
     if (PyModule_AddObject(m, "HMACKey", (PyObject *)&HMACKeyType) < 0 ||
+        PyModule_AddObject(m, "SKey", (PyObject *)&SKeyType) < 0 ||
         PyModule_AddObject(m, "PKey", (PyObject *)&PKeyType) < 0 ||
         PyModule_AddIntConstant(m, "PK_RS256", CC_PK_RS256) || PyModule_AddIntConstant(m, "PK_ES256", CC_PK_ES256) ||
         PyModule_AddIntConstant(m, "PK_ED25519", CC_PK_ED25519)) {
