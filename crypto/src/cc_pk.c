@@ -637,7 +637,6 @@ CC_INLINE void mont_sqr(uint64_t *r, const uint64_t *a, const uint64_t *n, uint6
 typedef struct {
     void (*mul)(uint64_t *, const uint64_t *, const uint64_t *, const rsa_key_t *);
     void (*sqr)(uint64_t *, const uint64_t *, const rsa_key_t *);
-    void (*red)(uint64_t *, const uint64_t *, const rsa_key_t *); /* x R^-1 (out of the Montgomery domain); NULL: mul by 1 */
 } mont_ops_t;
 #define MONT_SIZE(N)                                                                                                   \
     static void mont_mul_##N(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {                  \
@@ -723,7 +722,7 @@ static mont_ops_t mont_for(const rsa_key_t *k) {
     if (k->nl == 32 && s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
 #endif
 #ifdef CC_HAVE_IPP_MONT
-    if (ipp_mont_ok()) return (mont_ops_t){ mont_mul_ipp, mont_sqr_ipp, mont_red_ipp };
+    if (ipp_mont_ok()) return (mont_ops_t){ mont_mul_ipp, mont_sqr_ipp };
 #endif
 #ifdef CC_HAVE_OSSL_MONT
     if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
@@ -1099,8 +1098,11 @@ static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const u
     uint64_t sr[RSA_MAXL], x[RSA_MAXL], one[RSA_MAXL] = { 1 };
     mo.mul(sr, s, k->r2, k);
     rsa_pow(x, sr, k->e, k, mo);
-    if (mo.red) mo.red(x, x, k);
-    else mo.mul(x, x, one, k);
+#ifdef CC_HAVE_IPP_MONT
+    if (mo.mul == mont_mul_ipp) mont_red_ipp(x, x, k); /* ippcp's kernels: a bare reduction */
+    else
+#endif
+        mo.mul(x, x, one, k);
     uint64_t d = 0;
     for (int j = 0; j < k->nl; j++) d |= x[j] ^ em[j];
     return d == 0;
