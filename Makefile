@@ -7,11 +7,14 @@
 #   make asan         ASan + UBSan build of the test (quick mode)
 #   make bench        ns/token per engine and batch size, vs OpenSSL
 #   make compare      full verify vs jwt-cpp and golang-jwt (fetched at pinned commits; go optional)
+#   make bench-sign   signing ns/token vs OpenSSL; compare-sign adds golang-jwt, jwt-cpp, jsonwebtoken (Rust), PyJWT
 #   make avx512       real AVX-512VL build of the test and bench (run them on an AVX-512 CPU)
 #   make licence      AVX-512 frequency-licence probe (meaningful only on AVX-512 hardware)
 #   make fuzz-smoke   fuzz harnesses replaying their seed/saved corpora under ASan + UBSan (seconds, local)
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
+#   make sign-test    HS256 / EdDSA signing: RFC 8032 / 8037 / 7515 and pyca exact outputs, round trips, pyca checks
+#   make sign-asan    the same tests under ASan + UBSan, with output buffers of exactly jwt_sign_size; and -DJWT_INPUT_PADDED
 #   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 #   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
 #   make pk-test-s2n / pk-bench-s2n   the same with s2n-bignum's verified asm kernels (-DJWT_S2N; fetched pinned)
@@ -142,19 +145,45 @@ test: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
 	./scripts/check-symbols.sh --cc-only $(B)/libcursedcrypto.a
 	./scripts/check-symbols.sh $(B)/libcursedjwt.a
+# signing (README.md, Signing): exact-output vectors (RFC 8032 7.1, RFC 8037 A.4, RFC 7515 A.1, pyca/cryptography),
+# round trips through both verifiers on every HMAC engine, then pyca/cryptography and Python's hmac check emitted tokens
+SIGN_N ?= 300
+$(B)/test_sign: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+	./scripts/fetch-vectors.sh
+	$$(cat $(B)/pyenv) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
+$(B)/asan_sign: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+$(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(SAN) -DJWT_INPUT_PADDED $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
+sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
+	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
+	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
+sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
+	./$(B)/test_sign $(B)/sign_vectors.txt
+	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
+	./$(B)/test_sign emit $(SIGN_N) > $(B)/sign_emitted.txt
+	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
-#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h)
+#                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h); then
+#                  the same for signing (`test_ct sign`: the HS256 key, the Ed25519 seed, a, prefix and nonce r)
 #   make test-ct-sde SDE=…/sde64   trace equivalence under Intel SDE for the engines valgrind can't run (SHA-NI,
 #                  AVX-512): every engine's instruction and address trace must be identical under two keys
 #   make test-ct-qemu QEMU=…/qemu-aarch64 EXECLOG=…/libexeclog.so   the same for the AArch64 engines (NEON, SHA2), cross-
 #                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
 #   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
 #                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
+#   make dudect-sign  the same for signing (HS256 and Ed25519, fixed vs random private key)
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 test-ct: $(B)/test_ct
 	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct sign
+	@if valgrind -q --error-exitcode=1 ./$(B)/test_ct sign-control >/dev/null 2>&1; then \
+	  echo "test-ct: the sign-control run raised no memcheck error: the method is broken"; exit 1; \
+	  else echo "test-ct: sign-control flagged (as it must)"; fi
 $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 SDE ?= sde64
@@ -175,6 +204,15 @@ dudect: $(B)/dudect_hmac
 	for b in 3 16; do for e in ossl avx2 avx512 zmm x16 shani_4 shani_4r shani_x16; do ./$(B)/dudect_hmac key $$e $$b; done; done
 	./$(B)/dudect_hmac key ossl 1
 	./$(B)/dudect_hmac mac x 1; ./$(B)/dudect_hmac mac x 16; ./$(B)/dudect_hmac b64 x 1
+# dudect for signing (tests/dudect_sign.c): fixed vs random private key, HS256 and Ed25519, on a quiet machine; the
+# two controls must say LEAK and the A/A lines ok
+$(B)/dudect_sign: tests/dudect_sign.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -lm -o $@
+dudect-sign: $(B)/dudect_sign
+	./$(B)/dudect_sign control 1 1000000; ./$(B)/dudect_sign vt-control 1 200000
+	for b in 1 16; do ./$(B)/dudect_sign aa-hs $$b 1000000; ./$(B)/dudect_sign hs $$b 1000000; done
+	for b in 1 8; do ./$(B)/dudect_sign aa-ed $$b 100000; ./$(B)/dudect_sign ed $$b 100000; done
+	./$(B)/dudect_sign edkey 1 100000
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json
@@ -194,6 +232,23 @@ compare: $(B)/tokens.json $(SRC) | $(B)
 	./$(B)/compare_jwtcpp $(B)/tokens.json
 	@if command -v go >/dev/null; then (cd bench/compare/go && GOFLAGS=-mod=mod go build -o ../../../$(B)/compare_gojwt .) && ./$(B)/compare_gojwt $(B)/tokens.json; \
 	  else echo "golang-jwt: skipped (no go toolchain)"; fi
+
+# signing: bench/bench_sign.c (vs OpenSSL), then the other libraries where their toolchains are installed (cargo, go,
+# python3 with PyJWT and cryptography)
+$(B)/bench_sign: bench/bench_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
+bench-sign: $(B)/bench_sign
+	./$(B)/bench_sign
+compare-sign: $(B)/bench_sign $(SRC) | $(B)
+	./scripts/fetch-compare.sh
+	./$(B)/bench_sign
+	$(CXX) -O3 $(ARCHFLAGS) -std=c++17 -w -Ithird_party/jwt-cpp/include $(SSLINC) bench/compare/jwtcpp_sign.cpp $(SSLLIB) -lcrypto -o $(B)/compare_jwtcpp_sign
+	./$(B)/compare_jwtcpp_sign
+	@if command -v go >/dev/null; then (cd bench/compare/go && GOFLAGS=-mod=mod go build -o ../../../$(B)/compare_gojwt_sign ./sign) && ./$(B)/compare_gojwt_sign; \
+	  else echo "golang-jwt: skipped (no go toolchain)"; fi
+	@if command -v cargo >/dev/null; then (cd bench/compare/rust_sign && cargo run -q --release --target-dir ../../../$(B)/rust_sign); \
+	  else echo "jsonwebtoken: skipped (no cargo)"; fi
+	@$(PYTHON) bench/compare/sign_py.py 2>/dev/null || echo "PyJWT: skipped (needs python3 with PyJWT and cryptography)"
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
@@ -226,12 +281,14 @@ $(B)/replay_verify: fuzz/fuzz_verify.c fuzz/replay.c $(SRC) | $(B)
 	$(CC) $(FUZZ_SAN) fuzz/fuzz_verify.c fuzz/replay.c $(SSLLIB) -lcrypto $(X86SHA) -o $@
 $(B)/replay_b64: fuzz/fuzz_b64.c fuzz/replay.c $(SRC) | $(B)
 	$(CC) $(FUZZ_SAN) fuzz/fuzz_b64.c fuzz/replay.c $(X86SHA) -o $@
+$(B)/replay_sign: fuzz/fuzz_sign.c fuzz/replay.c $(SRC) | $(B)
+	$(CC) $(FUZZ_SAN) fuzz/fuzz_sign.c fuzz/replay.c $(X86SHA) -o $@
 $(B)/replay_pk: fuzz/fuzz_pk.c fuzz/replay.c $(PKSRC) | $(B)
 	$(CC) $(FUZZ_SAN) $(filter-out $(MONTOBJ),$(PK)) -DJWT_RSA_SCREEN fuzz/fuzz_pk.c fuzz/replay.c $(SSLLIB) -lcrypto \
 	  $(X86SHA) -o $@
-fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_pk
+fuzz-smoke: $(B)/replay_verify $(B)/replay_b64 $(B)/replay_sign $(B)/replay_pk
 	@python3 -I fuzz/seeds.py $(B)/fuzz-seeds >/dev/null
-	@for h in verify b64 pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
+	@for h in verify b64 sign pk; do printf "%-7s " $$h; ASAN_OPTIONS=detect_leaks=0 ./$(B)/replay_$$h $(B)/fuzz-seeds/$$h \
 	  $$(ls -d $(B)/fuzz-*/corpus/$$h 2>/dev/null) || exit 1; done
 FUZZ_SECS ?= 10
 fuzz:
@@ -376,4 +433,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

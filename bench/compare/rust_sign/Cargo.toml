@@ -1,0 +1,14 @@
+# jsonwebtoken (Rust) signing, for the comparison in bench/bench_sign.c's README numbers.  cargo run --release
+[package]
+name = "rust_sign"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+jsonwebtoken = "=9.3.0"
+serde = { version = "=1.0.210", features = ["derive"] }
+ring = "=0.17.8"
+
+[profile.release]
+codegen-units = 1

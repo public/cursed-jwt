@@ -74,6 +74,34 @@ void jwt_key_init(jwt_key_t *k, const void *secret, size_t len);
 void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
                       jwt_result_t *out);
 
+/* ---- HS256 signing (constant time in the key; see README.md, Signing) ----
+ * Issues n tokens {"alg":"HS256","typ":"JWT"}.<payload>.<MAC> under one key, through the same multi-buffer HMAC
+ * engines as jwt_verify_batch.  payload[i] / payload_len[i] are the claims as JSON bytes, used exactly as given
+ * (nothing is added or reordered), after a check that this library's verifier would accept them:
+ *   - one strict RFC 8259 JSON object (UTF-8 validated, nesting depth <= 32, nothing after it but whitespace);
+ *   - "exp" present, and "exp" / "nbf" JSON numbers when present;
+ *   - no repeated "sub", "username", "exp" or "nbf" (the verifier rejects a repeated claim);
+ *   - the whole token at most JWT_TOKEN_MAX bytes.
+ * Neither "sub" nor "username" is required, and times are not compared with the clock: a token issued with an "exp"
+ * in the past is issued, and rejected by the verifier.
+ * out[i] must have room for jwt_sign_size(payload_len[i]) bytes; it receives the token, NUL-terminated, and
+ * out_len[i] its length (without the NUL), or -1 if payload i was refused (out[i] is then not written to, and may be NULL).  Returns the number
+ * of tokens issued. */
+#ifdef JWT_INPUT_PADDED
+#define JWT_SIGN_SLACK 64 /* the HMAC reads up to 64 bytes past the signing input, which is built in out[i] */
+#else
+#define JWT_SIGN_SLACK 0
+#endif
+int jwt_sign_size(int payload_len); /* bytes out[i] needs (the token + its NUL + JWT_SIGN_SLACK); -1 if too long */
+/* constant time in the key (tests: test_ct sign, the sign_hs traces of test-ct-sde / test-ct-qemu, dudect_sign hs) */
+int jwt_sign_batch(const jwt_key_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
+                   int *out_len);
+
+/* base64url encode (no padding): writes (4n + 2) / 3 characters and no NUL, returns their number.  No branch or
+ * memory address depends on the bytes encoded (AVX2 on x86-64 where the CPU has it, else portable). */
+int jwt_b64url_encode(char *dst, const uint8_t *src, int n);
+int jwt_b64url_encode_scalar(char *dst, const uint8_t *src, int n);
+
 /* ---- CPU dispatch ----
  * The engine is chosen at run time from the CPU's features (CPUID / HWCAP), whatever -march the library was built
  * with: SHA-NI on AMD, then AVX-512VL, then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.
@@ -164,6 +192,20 @@ void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, con
  * RS256: k bytes for a k-byte modulus).  ok[i] = 1 iff valid.  For tests and benchmarks. */
 void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, const int *len, const uint8_t *const *sig,
                        const int *slen, uint8_t *ok);
+
+/* ---- EdDSA signing (Ed25519, RFC 8032 / RFC 8037; constant time in the private key) ----
+ * A signing key is made from the 32-byte private key ("seed", RFC 8032 5.1.5; the "d" of an OKP JWK); its public
+ * key is derived from it, never taken from the caller.  Signing is deterministic: no random numbers.
+ * jwt_sign_batch_pk is jwt_sign_batch with the header {"alg":"EdDSA","typ":"JWT"} and a 64-byte signature, under the
+ * same payload rules; jwt_sign_size_pk gives the room out[i] needs.  jwt_skey_free wipes the key. */
+typedef struct jwt_skey jwt_skey_t;
+/* jwt_skey_ed25519, jwt_sign_batch_pk and jwt_skey_free: constant time in the private key (cc_sign_batch's tests) */
+jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]);       /* NULL only if out of memory */
+void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]); /* for jwt_pkey_ed25519 / the JWK "x" */
+void jwt_skey_free(jwt_skey_t *k);
+int jwt_sign_size_pk(const jwt_skey_t *k, int payload_len);
+int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
+                      int *out_len);
 
 /* Plain SHA-256 of n messages through the same multi-buffer engines (the RS256 / ES256 signing inputs).
  * dig[i] receives the 8 big-endian-interpreted state words.  jwt_sha256_batch picks the default engine. */
