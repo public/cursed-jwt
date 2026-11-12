@@ -210,6 +210,12 @@ void jwt_skey_es256_public(const jwt_skey_t *k, uint8_t x[32], uint8_t y[32]); /
  * token and the verifier's 528 KB of tables).  A token whose signature fails gets out_len[i] = -1 (out[i] is then "").
  * 0, or -1 for an Ed25519 key or out of memory. */
 int jwt_skey_verify_after_sign(jwt_skey_t *k, int on);
+/* RS256 (PKCS#1 v1.5, SHA-256): only in a -DJWT_OPENSSL build (link -lcrypto), where libcrypto signs; NULL in any
+ * other build.  key: an RSA private key of 2048..4096 bits, DER (PKCS#8 or PKCS#1) or PEM.  jwt_sign_batch_pk then
+ * issues {"alg":"RS256","typ":"JWT"} tokens; jwt_skey_rs256_public gives n and e for jwt_pkey_rs256 (see
+ * cc_skey_rs256_public).  Timing is libcrypto's. */
+jwt_skey_t *jwt_skey_rs256(const uint8_t *key, size_t len);
+int jwt_skey_rs256_public(const jwt_skey_t *k, uint8_t *n, size_t ncap, uint8_t *e, size_t ecap, size_t *elen);
 void jwt_skey_free(jwt_skey_t *k);
 int jwt_sign_size_pk(const jwt_skey_t *k, int payload_len);
 int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,

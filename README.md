@@ -247,7 +247,8 @@ key's algorithm; the rest is identical.
 
 ## Signing
 
-HS256, EdDSA (Ed25519) and ES256 (ECDSA P-256) tokens are issued in batches too, under one key per call. The caller owns the output
+HS256, EdDSA (Ed25519) and ES256 (ECDSA P-256) tokens are issued in batches too, under one key per call, and RS256
+in a `-DJWT_OPENSSL` build (below). The caller owns the output
 buffers.
 
 ```c
@@ -288,6 +289,11 @@ jwt_skey_free(ek);
   `JWT_BAD_PAYLOAD` for it), and the clock (an `exp` in the past is issued, and rejected by the verifier).
 - **Ed25519 and ES256 are deterministic** (RFC 8032; RFC 6979 for ES256's nonces): no random numbers, and the same
   key and claims give the same token. The public key is derived from the private key, never taken from the caller.
+- **RS256 signing is delegated to OpenSSL's libcrypto** and exists only in a `-DJWT_OPENSSL` build (link
+  `-lcrypto`); elsewhere `jwt_skey_rs256` returns NULL. It takes an RSA private key of 2048 to 4096 bits, DER (PKCS#8
+  or PKCS#1) or PEM, and issues `{"alg":"RS256","typ":"JWT"}` tokens whose PKCS#1 v1.5 signatures are byte-identical
+  to OpenSSL's. Its timing and fault defences are libcrypto's (CRT with blinding, constant-time exponentiation, the
+  result checked against the public key); this library's constant-time tests cover HS256, EdDSA and ES256 only.
 - **ES256 verify-after-sign** (`jwt_skey_verify_after_sign`, off by default): every signature is checked with the
   public key before its token is issued, a defence against computation faults (glitches, bit flips) that could leak
   the key through a bad signature. It costs about one verification per token and the verifier's 528 KB of key tables;
@@ -548,7 +554,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `crypto/src/fiat/`) |
 | `-DJWT_S2N` | s2n-bignum's formally verified asm kernels for P-256, Ed25519 and RSA-2048 (`scripts/fetch-s2n-bignum.sh`). On x86, its ADX-free P-256 / Ed25519 versions run where BMI2 + ADX are missing; RSA-2048 then uses `bn_mul_mont` |
-| `-DJWT_OPENSSL` | libcrypto's bignum asm for RSA (links `-lcrypto`) |
+| `-DJWT_OPENSSL` | libcrypto's bignum asm for RSA verification, and RS256 signing (delegated to libcrypto; links `-lcrypto`) |
 | `-DJWT_RSA_SCREEN` | RSA batch screening (read the caveat in [PK.md](PK.md) first) |
 | `-DJWT_RSAZ` | RS256-2048 on AVX-512 IFMA (Zen 4 / Zen 5, Intel Ice Lake and later): OpenSSL's 52-bit multiply, one or two tokens per call (`scripts/fetch-ossl-rsaz.sh`, x86-64 Linux) |
 | `-DJWT_RSAZ8` | with `-DJWT_RSAZ`: 8 RS256 tokens per call through crypto_mb's 8-lane exponentiation, on Zen 4 / Zen 5 (`scripts/fetch-crypto-mb-rsa.sh`) |

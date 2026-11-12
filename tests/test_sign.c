@@ -94,8 +94,9 @@ static void vectors(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) perror(path), exit(2);
     int counts[16] = { 0 };
-    static const char *kinds[] = { "ed",     "edjws", "hsjws", "edtok", "hstok", "refuse",
-                                   "sha512", "sc",    "b64",   "es",    "estok" };
+    static const char *kinds[] = { "ed", "edjws", "hsjws", "edtok", "hstok", "refuse", "sha512",
+                                   "sc", "b64",   "es",    "estok", "rs",    "rsjws",  "rstok" };
+    int rs_skipped = 0;
     enum { NK = (int)(sizeof kinds / sizeof kinds[0]) };
     while (fgets(line, sizeof line, f)) {
         char kind[16], src[64], *f3 = NULL, *f4 = NULL, *f5 = NULL, *f6 = NULL, *f7 = NULL, *f8 = NULL;
@@ -193,6 +194,40 @@ static void vectors(const char *path) {
             sign_es_one(A, C, pn, tokbuf, &ol);
             CHECK(ol == (int)strlen(f5) && !strcmp(tokbuf, f5), "%s: token (len %d)\n  got  %s\n  want %s", src, ol,
                   tokbuf, f5);
+        } else if (!strcmp(kind, "rs") || !strcmp(kind, "rsjws") || !strcmp(kind, "rstok")) { /* key ... */
+            static uint8_t der[4096];
+            int kl = unhex(f3, der), ml = unhex(f4, C);
+            jwt_skey_t *k = jwt_skey_rs256(der, (size_t)kl);
+#ifdef JWT_OPENSSL
+            CHECK(k != NULL, "%s: RS256 key refused", src);
+#else
+            CHECK(k == NULL, "%s: an RS256 key without -DJWT_OPENSSL", src);
+            rs_skipped++;
+#endif
+            if (!k) continue;
+            if (kind[2] == 't') { /* rstok: the whole token */
+                int ol = -2;
+                const char *pl = (const char *)C;
+                char *op = tokbuf;
+                jwt_sign_batch_pk(k, 1, &pl, &ml, &op, &ol);
+                CHECK(ol == (int)strlen(f5) && !strcmp(tokbuf, f5), "%s: token\n  got  %s\n  want %s", src, tokbuf, f5);
+            } else {
+                static uint8_t sig[512], want[512];
+                uint8_t *sp = sig;
+                const uint8_t *mp = C;
+                cc_sign_batch(k->cc, 1, &mp, &ml, &sp);
+                int sb = k->sig_bytes;
+                if (kind[2] == 'j') { /* rsjws: signing input -> token */
+                    memcpy(tokbuf, C, (size_t)ml);
+                    tokbuf[ml] = '.';
+                    int tl = ml + 1 + jwt_b64url_encode(tokbuf + ml + 1, sig, sb);
+                    tokbuf[tl] = 0;
+                    CHECK(!strcmp(tokbuf, f5), "%s: token\n  got  %s\n  want %s", src, tokbuf, f5);
+                } else {
+                    CHECK(unhex(f5, want) == sb && !memcmp(sig, want, (size_t)sb), "%s: signature differs", src);
+                }
+            }
+            jwt_skey_free(k);
         } else if (!strcmp(kind, "refuse")) {
             int pn = unhex(f3, C), o1 = 0, o2 = 0;
             uint8_t seed[32] = { 7 };
@@ -244,6 +279,7 @@ static void vectors(const char *path) {
     fclose(f);
     printf("vectors:");
     for (int i = 0; i < NK; i++) printf(" %s %d", kinds[i], counts[i]);
+    if (rs_skipped) printf(" (RS256: %d checked to be refused without -DJWT_OPENSSL)", rs_skipped);
     printf("\n");
     CHECK(counts[0] >= 5 && counts[1] == 1 && counts[2] == 1 && counts[9] >= 2, "the RFC vectors are missing");
 }
@@ -419,6 +455,35 @@ static void roundtrip_es(void) {
            MAXB);
 }
 
+#ifdef JWT_OPENSSL
+/* RS256 (libcrypto): batches through jwt_verify_batch_pk under the key's own n and e, 2048- and 4096-bit keys */
+static void roundtrip_rs(void) {
+    static jwt_result_t res[MAXB];
+    for (int bits = 2048; bits <= 4096; bits += 2048) {
+        EVP_PKEY *gen = EVP_RSA_gen((unsigned)bits);
+        unsigned char *der = NULL;
+        int dl = i2d_PrivateKey(gen, &der);
+        jwt_skey_t *k = jwt_skey_rs256(der, (size_t)dl);
+        uint8_t nb[512], eb[16];
+        size_t el = 0;
+        int nl = jwt_skey_rs256_public(k, nb, sizeof nb, eb, sizeof eb, &el);
+        jwt_pkey_t *pk = jwt_pkey_rs256(nb, (size_t)nl, eb, el);
+        CHECK(k && pk && k->sig_bytes == bits / 8, "RS256 %d keys", bits);
+        for (int n = 1; n <= 17; n += 8) {
+            make_payloads(n);
+            const char *pp[MAXB], *tp[MAXB];
+            for (int i = 0; i < n; i++) pp[i] = pls[i], tp[i] = obuf[i];
+            CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n, "rs n=%d: not all issued", n);
+            jwt_verify_batch_pk(pk, n, tp, ol, 1800000000, res);
+            check_results("rs", n, res);
+            exact_size(n, NULL, k);
+        }
+        jwt_pkey_free(pk), jwt_skey_free(k), OPENSSL_free(der), EVP_PKEY_free(gen);
+    }
+    printf("round trip RS256 (libcrypto): 2048 and 4096 bits, batch 1, 9, 17, verified by jwt_verify_batch_pk\n");
+}
+#endif
+
 /* the static P-256 table (cc_p256_table.inc) recomputed with the signer's own point arithmetic */
 static void p256_table_check(void) {
     int bad = 0;
@@ -509,6 +574,9 @@ int main(int argc, char **argv) {
     roundtrip_hs();
     roundtrip_ed();
     roundtrip_es();
+#ifdef JWT_OPENSSL
+    roundtrip_rs();
+#endif
     p256_table_check();
     printf("test_sign: %d checks, %d failures\n", checks, fails);
     return fails != 0;
