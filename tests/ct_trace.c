@@ -92,6 +92,9 @@ int main(int argc, char **argv) {
         } else if (e[6] == 's') {
 #ifndef JWT_NO_PK
             key[0] &= 0x7f; /* d < n */
+#ifdef CC_ES256_NISTZ
+            if (!(cc_cpu() & CC_CPU_BMI2_ADX)) fprintf(stderr, "sign_es: [k] G by ecp_nistz256 (no ADX)\n");
+#endif
             SSC_MARK(0x111);
             cc_skey_t *sk = cc_skey_es256(key);
             cc_sign_batch(sk, n, mp, ml, sp);

@@ -221,6 +221,9 @@ SDE ?= sde64
 test-ct-sde: $(B)/ct_trace $(B)/ct_trace_portable
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable "sign_ed sign_es"   # the portable signers
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+	SDECPU=-hsw scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace "sign_es"   # Haswell, no ADX: the ecp_nistz256 [k] G
+endif
 # the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
 CROSS ?= aarch64-linux-gnu-
 QEMU ?= qemu-aarch64
