@@ -349,12 +349,19 @@ brackets):
 | PyJWT 2.9 `jwt.encode` | 28,496 | 37,716 | 49,375 |
 | jwt-cpp `create().sign()` | 29,478 | 39,276 | 51,302 |
 | jsonwebtoken 9.3 (Rust) `encode` | 46,050 | 67,096 | 90,798 |
+| **ES256** cursed-jwt `jwt_sign_batch_pk`, whole token (x86-64 Linux: s2n-bignum kernels; RFC 6979) | **10,139** (10,136) | **16,145** (16,222) | **22,042** (21,536) |
+| the same, portable C (`-DJWT_NO_ES256_ASM`) | 52,416 (52,376) | 75,383 (72,589) | 110,926 (112,126) |
+| ring 0.17 `sign` (random k): the signature alone | 11,772 | 16,625 | 21,067 |
+| pyca/cryptography 44 `sign`, RFC 6979 / random k: the signature alone | 18,255 / 15,858 | 24,879 / 21,726 | 39,409 / 31,297 |
+| OpenSSL 3.0 `EVP_DigestSign` (random k): the signature alone | 15,981 | 22,092 | 30,400 |
+| Go `crypto/ecdsa` `SignASN1` (random k): the signature alone | 20,720 | 29,569 | 39,235 |
 
 The other libraries serialise the claims themselves; cursed-jwt takes the JSON bytes and checks them. Every Ed25519
 row signs the same 141-byte signing input; the Genoa and Cascade Lake VMs hide ADX, so they ran s2n-bignum's `_alt`
 kernel. The first EdDSA row is from a later run than the rest (same VM classes), after SHA-512 moved to OpenSSL's
 assembly and the scalar reduction to precomputed constants: 9–12% faster than the same kernel before. A batch of 16
-HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC.
+HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC. The ES256 rows are from a later
+run again; an ES256 key takes 7–15 µs to set up (41–85 µs portable).
 
 ## The crypto on its own
 
@@ -696,7 +703,8 @@ control runs the verifier's variable-time scalar code on a secret and must be fl
 fixed-against-random-key timing tests of both, with A/A controls, an early-exit control and a variable-time comb
 control that must both say LEAK. On Turin, Genoa and Cascade Lake every signing line is ok (max |t| 2.99, 10⁶ samples
 for HS256 at batch 1 and 16, 3·10⁵ for Ed25519 at batch 1 and 8, 10⁵ for Ed25519 key setup), repeated runs agree,
-and both controls say LEAK (|t| 244 to 5,859).
+and both controls say LEAK (|t| 244 to 5,859). ES256 signing (10⁵–2·10⁵ samples: b1, b8, key setup) is ok on all
+three as well (max |t| 3.10).
 
 **`make dudect`** adds a statistical timing test on real hardware: Welch's t, fixed against random keys, with A/A
 negative controls and the leaky positive control. On Turin, Genoa and Cascade Lake it's clean, with one exception:
