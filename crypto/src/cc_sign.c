@@ -222,15 +222,19 @@ static void sg_sc_reduce(sg_sc out_m, const uint8_t x[64]) {
     for (int i = 0; i < 4; i++) p[1][i] = w[3 + i] >> 60 | w[4 + i] << 4;
     p[1][3] &= m60;
     p[2][0] = w[7] >> 56, p[2][1] = p[2][2] = p[2][3] = 0;
-    static const sg_sc two252 = { 0, 0, 0, 1ull << 60 };
-    sg_sc c1, c2, m0, m1, m2;
-    fiat_25519_scalar_to_montgomery(c1, two252); /* 2^252 R */
-    fiat_25519_scalar_mul(c2, c1, c1);           /* 2^504 R */
-    fiat_25519_scalar_to_montgomery(m0, p[0]);
-    fiat_25519_scalar_to_montgomery(m1, p[1]);
-    fiat_25519_scalar_to_montgomery(m2, p[2]);
-    fiat_25519_scalar_mul(m1, m1, c1);
-    fiat_25519_scalar_mul(m2, m2, c2);
+    /* Montgomery products (x y / R mod L, R = 2^256) with R^2, 2^252 R^2 and 2^504 R^2 mod L give x0 R, x1 2^252 R
+     * and x2 2^504 R: their sum is x R, the Montgomery form of x mod L, in three products and two additions.  The
+     * constants are reduced mod L, as fiat requires. */
+    static const sg_sc R2 = { 0xa40611e3449c0f01ull, 0xd00e1ba768859347ull, 0xceec73d217f5be65ull,
+                              0x0399411b7c309a3dull };
+    static const sg_sc K1 = { 0x54343c555c028163ull, 0x5e359edba69ac777ull, 0x78065dc6c04ec5b6ull,
+                              0x09e530b773599cecull }; /* 2^252 R^2 mod L */
+    static const sg_sc K2 = { 0x81e91088eac17b3full, 0x605bf084507c17c7ull, 0xd7e7faf80eb68700ull,
+                              0x05f9dc924e5a45ffull }; /* 2^504 R^2 mod L */
+    sg_sc m0, m1, m2;
+    fiat_25519_scalar_mul(m0, p[0], R2);
+    fiat_25519_scalar_mul(m1, p[1], K1);
+    fiat_25519_scalar_mul(m2, p[2], K2);
     fiat_25519_scalar_add(m0, m0, m1);
     fiat_25519_scalar_add(out_m, m0, m2);
     cc_wipe(w, sizeof w), cc_wipe(p, sizeof p), cc_wipe(m0, sizeof m0), cc_wipe(m1, sizeof m1), cc_wipe(m2, sizeof m2);
