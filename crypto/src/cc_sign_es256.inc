@@ -229,8 +229,8 @@ static void nz_base_mul(uint64_t res[8], const uint64_t k[4]) {
     cc_ossl_ecp_nistz256_mul_mont(z2, z2, zi);
     cc_ossl_ecp_nistz256_mul_mont(res + 4, p.Y, z2);
     cc_ossl_ecp_nistz256_from_mont(res, res), cc_ossl_ecp_nistz256_from_mont(res + 4, res + 4);
-    cc_wipe(s, sizeof s), cc_wipe(&p, sizeof p), cc_wipe(&t, sizeof t), cc_wipe(zp, sizeof zp),
-        cc_wipe(zi, sizeof zi), cc_wipe(z2, sizeof z2), cc_wipe(tm, sizeof tm), cc_wipe(&w, sizeof w);
+    cc_wipe(s, sizeof s), cc_wipe(&p, sizeof p), cc_wipe(&t, sizeof t), cc_wipe(zp, sizeof zp), cc_wipe(zi, sizeof zi),
+        cc_wipe(z2, sizeof z2), cc_wipe(tm, sizeof tm), cc_wipe(&w, sizeof w);
 }
 #endif
 /* x, y (big-endian bytes) of [k] G for k < n given as 4 little-endian limbs */

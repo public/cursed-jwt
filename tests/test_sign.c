@@ -448,13 +448,14 @@ static void nistz_kernel_check(void) {
         }
         if (c == 5) memset(k, (it / 10) % 2 ? 0xff : 0x55, 32);
         for (int t = 0; t < 2 && !es_in_range(k); t++) es_sub_n_once(k, k); /* < 2^256 < 2n: one subtraction */
-        if (!es_in_range(k)) continue; /* k = 0 or n: not a nonce */
+        if (!es_in_range(k)) continue;                                      /* k = 0 or n: not a nonce */
         cc_s2n_p256_scalarmulbase_alt(r1, k, 4, CC_P256_GTAB);
         nz_base_mul(r2, k);
         bad += memcmp(r1, r2, 64) != 0, cnt++;
     }
     CHECK(bad == 0, "ecp_nistz256 [k] G: %d of %d differ from s2n-bignum's", bad, cnt);
-    printf("ecp_nistz256 [k] G: %d scalars, %s s2n-bignum's p256_scalarmulbase_alt\n", cnt, bad ? "MISMATCH vs" : "equal to");
+    printf("ecp_nistz256 [k] G: %d scalars, %s s2n-bignum's p256_scalarmulbase_alt\n", cnt,
+           bad ? "MISMATCH vs" : "equal to");
 }
 #endif
 
