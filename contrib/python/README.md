@@ -111,9 +111,9 @@ make -C contrib/python PYTHON=build/venv/bin/python test
 ```
 
 `crypto/src/cursed_crypto.c` is compiled into the extension as one unit, as the library's Makefile builds it. On
-x86-64 Linux the committed assembly kernels are assembled with `-DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT
--DJWT_ED25519_ASM` (the last one is s2n-bignum's vendored Ed25519 fixed-base kernel, for signing); elsewhere the build
-is portable C. Engines (AVX2, AVX-512, SHA-NI, NEON, ...) are picked at run time from the CPU. Nothing is downloaded at
+x86-64 Linux the committed assembly kernels are assembled with `-DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB
+-DJWT_OSSL_MONT -DJWT_ED25519_ASM` (the last one is s2n-bignum's vendored Ed25519 fixed-base kernel, for signing);
+elsewhere the build is portable C. Engines (AVX2, AVX-512, SHA-NI, NEON, ...) are picked at run time from the CPU. Nothing is downloaded at
 build time; the IFMA build and the fetched s2n-bignum kernels (`-DJWT_S2N`) stay out. `CURSED_CRYPTO_PORTABLE=1` builds
 without the assembly, `CURSED_CRYPTO_CFLAGS` adds compiler flags. Requires cryptography ≥ 42 (41 accepted other
 input types). Tested on CPython 3.12.

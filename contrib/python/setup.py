@@ -2,8 +2,8 @@
 
 cursed-crypto is compiled exactly as the library's Makefile compiles it: crypto/src/cursed_crypto.c as one
 translation unit at -O3 for the baseline ISA (the engines are picked at run time from the CPU), and on x86-64 ELF
-the committed .S kernels with -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM.  Elsewhere it is
-the portable build (the Makefile's OSSL_SHA=).  Nothing is fetched at build time.
+the committed .S kernels with -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM.
+Elsewhere it is the portable build (the Makefile's OSSL_SHA=).  Nothing is fetched at build time.
 
 In the cursed-jwt tree the sources sit two levels up (../../crypto, ../../LICENSE, ../../licenses).  They are
 copied into vendor/ before every build, so the sdist carries them and a wheel built from the sdist is identical to
@@ -29,6 +29,7 @@ ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 VENDOR = os.path.join(HERE, "vendor")
 ASM = [
     "sha256_x86_64_ossl.S",
+    "sha512_x86_64_ossl.S",
     "sha256_shani_mb.S",
     "sha256_x16_avx512.S",
     "bn_mont_x86_64_ossl.S",
@@ -70,7 +71,13 @@ x86_elf = (
 )
 csrc = os.path.join("vendor", "crypto", "src")
 macros = (
-    [("JWT_OSSL_SHA256", None), ("JWT_SHANI_MB", None), ("JWT_OSSL_MONT", None), ("JWT_ED25519_ASM", None)]
+    [
+        ("JWT_OSSL_SHA256", None),
+        ("JWT_OSSL_SHA512", None),
+        ("JWT_SHANI_MB", None),
+        ("JWT_OSSL_MONT", None),
+        ("JWT_ED25519_ASM", None),
+    ]
     if x86_elf
     else []
 )
