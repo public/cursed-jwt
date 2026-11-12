@@ -5,6 +5,7 @@ Exact-output vectors for tests/test_sign.c (signing).  Sources (scripts/fetch-ve
   RFC 8032 7.1    Ed25519 TEST 1, 2, 3, 1024 and SHA(abc): secret key, public key, message, signature
   RFC 8037 A.4    the EdDSA JWS ({"alg":"EdDSA"}, payload "Example of Ed25519 signing", not a claims set)
   RFC 7515 A.1    the HS256 JWS ({"typ":"JWT",\\r\\n "alg":"HS256"}, its CRLF-formatted claims)
+  RFC 6979 A.2.5  ECDSA P-256 with SHA-256, "sample" and "test": private key, public key, nonce k, r and s
   pyca/cryptography and Python's hmac / hashlib: random Ed25519 keys and messages, whole HS256 and EdDSA tokens with
   the canonical headers, SHA-512 at every length around the block and padding boundaries, base64url, and reductions
   mod L of 512-bit values at the edges (0, L - 1, L, L + 1, 2^252, 2^256 - 1, 2^512 - 1, multiples of L, ...).
@@ -15,6 +16,8 @@ Output, one per line (hex, "-" = empty):
   ed SRC SEED PUB MSG SIG              raw Ed25519
   edjws SRC SEED SIGNING_INPUT TOKEN   a JWS whose header is not the canonical one: checked at the signing input
   hsjws SRC KEY SIGNING_INPUT TOKEN
+  es SRC D X Y MSG K SIG               raw ES256 (D big-endian; K the RFC 6979 nonce, or "-"; SIG r || s)
+  estok SRC D PAYLOAD TOKEN            the ES256 token jwt_sign_batch_pk must issue
   edtok SRC SEED PAYLOAD TOKEN         the token jwt_sign_batch_pk must issue for PAYLOAD (JSON bytes)
   hstok SRC KEY PAYLOAD TOKEN          the token jwt_sign_batch must issue
   refuse SRC PAYLOAD                   a payload both sign APIs must refuse
@@ -31,12 +34,61 @@ import os
 import random
 import re
 import sys
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 L = 2**252 + 27742317777372353535851937790883648493
 CANON_HS = b'{"alg":"HS256","typ":"JWT"}'
 CANON_ED = b'{"alg":"EdDSA","typ":"JWT"}'
+CANON_ES = b'{"alg":"ES256","typ":"JWT"}'
+N256 = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+try:  # deterministic (RFC 6979) ECDSA: cryptography >= 43 (the Makefile's pyenv-sign makes sure)
+    DET = ec.ECDSA(hashes.SHA256(), deterministic_signing=True)
+except TypeError:
+    raise SystemExit("make_sign_vectors.py: needs cryptography >= 43 for deterministic ECDSA (make build/pyenv-sign)")
+
+
+def es_key(d):
+    return ec.derive_private_key(int.from_bytes(d, "big"), ec.SECP256R1())
+
+
+def es_sign(d, msg):
+    sk = es_key(d)
+    der = sk.sign(msg, DET)
+    sk.public_key().verify(der, msg, ec.ECDSA(hashes.SHA256()))  # raises if not
+    r, s = decode_dss_signature(der)
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+
+def es_pub(d):
+    n = es_key(d).public_key().public_numbers()
+    return n.x.to_bytes(32, "big"), n.y.to_bytes(32, "big")
+
+
+def es_token(d, payload):
+    si = b64u(CANON_ES) + "." + b64u(payload)
+    return si + "." + b64u(es_sign(d, si.encode()))
+
+
+def rfc6979(path):
+    """A.2.5: P-256 with SHA-256, "sample" and "test" (the other hashes' lines are skipped)"""
+    text = open(path).read()
+    sec = text[text.rindex("\nA.2.5.  ECDSA, 256 Bits") : text.rindex("\nA.2.6.  ECDSA, 384 Bits")]
+    d = bytes.fromhex(re.search(r"\n   x = ([0-9A-F]+)", sec).group(1))
+    ux = bytes.fromhex(re.search(r"Ux = ([0-9A-F]+)", sec).group(1))
+    uy = bytes.fromhex(re.search(r"Uy = ([0-9A-F]+)", sec).group(1))
+    assert es_pub(d) == (ux, uy), "RFC 6979 A.2.5 key disagrees with pyca"
+    out = []
+    for m in re.finditer(
+        r'With SHA-256, message = "(\w+)":\s+k = ([0-9A-F]+)\s+r = ([0-9A-F]+)\s+s = ([0-9A-F]+)', sec
+    ):
+        msg, k, rr, ss = m.group(1).encode(), m.group(2), m.group(3), m.group(4)
+        sig = bytes.fromhex(rr) + bytes.fromhex(ss)
+        assert es_sign(d, msg) == sig, f"RFC 6979 A.2.5 {msg} disagrees with pyca"
+        out.append(f"es rfc6979-a25-{msg.decode()} {hx(d)} {hx(ux)} {hx(uy)} {hx(msg)} {k.lower()} {hx(sig)}")
+    assert len(out) == 2, out
+    return out
 
 
 def hx(b):
@@ -212,11 +264,16 @@ def main():
     vdir, nrand, seed = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     V = lambda f: os.path.join(vdir, f)
     rnd = random.Random(seed)
-    out = rfc8032(V("rfc8032.txt")) + rfc8037(V("rfc8037.txt")) + rfc7515(V("rfc7515.txt"))
+    out = rfc8032(V("rfc8032.txt")) + rfc8037(V("rfc8037.txt")) + rfc7515(V("rfc7515.txt")) + rfc6979(V("rfc6979.txt"))
     for i in range(nrand):  # raw Ed25519: random seeds, messages of every short length and some long ones
         sd = rnd.randbytes(32)
         msg = rnd.randbytes(i % 300 if i % 10 else rnd.randrange(300, 5000))
         out.append(f"ed pyca-{i} {hx(sd)} {hx(ed_pub(ed_key(sd)))} {hx(msg)} {hx(ed_sign(sd, msg))}")
+    for i in range(nrand):  # raw ES256: random keys (and the edges 1, n - 1), messages of every short length
+        d = (rnd.randrange(1, N256) if i > 1 else (1, N256 - 1)[i]).to_bytes(32, "big")
+        msg = rnd.randbytes(i % 300 if i % 10 else rnd.randrange(300, 5000))
+        x, y = es_pub(d)
+        out.append(f"es pyca-{i} {hx(d)} {hx(x)} {hx(y)} {hx(msg)} - {hx(es_sign(d, msg))}")
     for sd in (bytes(32), b"\xff" * 32):
         out.append(f"ed pyca-edge-{sd[0]:02x} {hx(sd)} {hx(ed_pub(ed_key(sd)))} - {hx(ed_sign(sd, b''))}")
     for i in range(nrand):  # whole tokens
@@ -225,10 +282,13 @@ def main():
         pl = rand_claims(rnd, i)
         out.append(f"hstok pyca-{i} {hx(key)} {hx(pl)} {hs_token(key, pl)}")
         out.append(f"edtok pyca-{i} {hx(sd)} {hx(pl)} {ed_token(sd, pl)}")
+        d = rnd.randrange(1, N256).to_bytes(32, "big")
+        out.append(f"estok pyca-{i} {hx(d)} {hx(pl)} {es_token(d, pl)}")
     for j, pl in enumerate(ACCEPT):
         key, sd = rnd.randbytes(32), rnd.randbytes(32)
         out.append(f"hstok accept-{j} {hx(key)} {hx(pl)} {hs_token(key, pl)}")
         out.append(f"edtok accept-{j} {hx(sd)} {hx(pl)} {ed_token(sd, pl)}")
+        out.append(f"estok accept-{j} {hx(sd)} {hx(pl)} {es_token(sd, pl)}")
     for j, pl in enumerate(REFUSE):
         out.append(f"refuse refuse-{j} {hx(pl)}")
     for n in list(range(0, 300)) + [1000, 4096, 10000]:

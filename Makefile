@@ -158,9 +158,14 @@ check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
 SIGN_N ?= 300
 $(B)/test_sign: tests/test_sign.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
-$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+# signing's vectors need pyca/cryptography >= 43 (deterministic ECDSA): python3's own if it has it, else a venv
+$(B)/pyenv-sign: | $(B)
+	@if $(PYTHON) -c "from cryptography.hazmat.primitives import hashes; from cryptography.hazmat.primitives.asymmetric import ec; ec.ECDSA(hashes.SHA256(), deterministic_signing=True)" 2>/dev/null; \
+	  then echo $(PYTHON) > $@; \
+	  else $(PYTHON) -m venv $(B)/venv-sign && $(B)/venv-sign/bin/pip -q install "cryptography>=43" && echo $(B)/venv-sign/bin/python > $@; fi
+$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv-sign
 	./scripts/fetch-vectors.sh
-	$$(cat $(B)/pyenv) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
+	$$(cat $(B)/pyenv-sign) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
 $(B)/asan_sign: tests/test_sign.c $(SRC) | $(B)
 	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
 $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
@@ -168,13 +173,13 @@ $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
 sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
-sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv
+sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv-sign
 	./$(B)/test_sign $(B)/sign_vectors.txt
 	./$(B)/test_sign_portable $(B)/sign_vectors.txt | tail -1   # -DJWT_NO_ED25519_ASM: the portable Ed25519 signer
 	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: s2n-bignum's _alt kernel
 	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
 	./$(B)/test_sign emit $(SIGN_N) > $(B)/sign_emitted.txt
-	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
+	$$(cat $(B)/pyenv-sign) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h); then
@@ -270,13 +275,13 @@ compare-sign: $(B)/bench_sign $(SRC) | $(B)
 # the portable Ed25519 signer (fiat-crypto, no assembly) where the default build uses s2n-bignum's kernel:
 # -DJWT_NO_ED25519_ASM.  make sign-test, test-ct, test-ct-sde and bench-sign check it as well.
 $(B)/test_sign_portable: tests/test_sign.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/test_ct_portable: tests/test_ct.c $(SRC) | $(B)
-	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/ct_trace_portable: tests/ct_trace.c $(SRC) | $(B)
-	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/bench_sign_portable: bench/bench_sign.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
