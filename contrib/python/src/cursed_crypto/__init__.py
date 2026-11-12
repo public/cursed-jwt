@@ -21,7 +21,9 @@ Handled natively (everything else is passed to pyca, with pyca's result):
     Ed25519Verifier  Ed25519 (RFC 8032)
     ECDSAVerifier    ECDSA P-256 (SECP256R1) with SHA-256; DER signatures as pyca takes them, or raw r || s
     RSAVerifier      RSASSA-PKCS1-v1_5 with SHA-256, 2048 to 4096-bit moduli, odd 3 <= e < 2**64
-    HMACSHA256       HMAC-SHA256 with 32-byte tags, any key; plus digest / digest_batch
+    HMACSHA256       HMAC-SHA256 with 32-byte tags, any key; plus digest / digest_batch (MACs: HS256 signing)
+    Ed25519Signer    Ed25519 signing for an Ed25519PrivateKey: sign / sign_batch, deterministic (RFC 8032), constant
+                     time in the private key; signatures byte-identical to the key's own sign()
     sha256_batch     SHA-256 of many messages
 
 Other curves, hashes or paddings (PSS), RSA keys outside that range, ``Prehashed``, truncated HMAC tags, and any
@@ -55,6 +57,7 @@ __all__ = [
     "ECDSAVerifier",
     "RSAVerifier",
     "HMACSHA256",
+    "Ed25519Signer",
     "sha256_batch",
     "engine",
     "InvalidSignature",
@@ -281,3 +284,47 @@ class HMACSHA256:
                 if r is None:
                     res[i] = self._one(datas[i], signatures[i])
         return res
+
+
+class Ed25519Signer:
+    """Ed25519 signing for an ``Ed25519PrivateKey``: ``sign(data)`` as ``private_key.sign(data)``, and
+    ``sign_batch(datas)`` for many messages in one call.  Ed25519 is deterministic (RFC 8032), so every signature is
+    byte-identical to the one pyca's ``private_key.sign`` returns.
+
+    The native path is cursed-crypto's constant-time signer: no branch or memory address depends on the private key
+    or the per-signature nonce.  It holds its own copy of the key (about 30 KB with a table of multiples of the base
+    point, built in about 0.1 ms) and wipes it when the signer is garbage-collected.  Getting the key out of pyca
+    goes through ``private_bytes_raw()``, whose ``bytes`` copy Python can't wipe; it is dropped at once.  A key
+    object that isn't pyca's own class (a subclass with its own ``sign``) is used through its ``sign``.
+
+    Errors: an item that isn't bytes-like raises ``TypeError`` for the whole batch, before anything is signed."""
+
+    def __init__(self, private_key: ed25519.Ed25519PrivateKey) -> None:
+        if not isinstance(private_key, ed25519.Ed25519PrivateKey):
+            raise TypeError("private_key must be an Ed25519PrivateKey")
+        self.private_key = private_key
+        self._k: Optional[_native.SKey] = None
+        if _pyca_type(private_key):
+            k = _native.skey_ed25519(private_key.private_bytes_raw())
+            if k.public_bytes() != private_key.public_key().public_bytes_raw():
+                raise RuntimeError("cursed_crypto: the derived Ed25519 public key differs from pyca's")
+            self._k = k
+
+    def public_key(self) -> ed25519.Ed25519PublicKey:
+        """The key's public key, as ``private_key.public_key()``."""
+        return self.private_key.public_key()
+
+    def sign(self, data: Buffer) -> bytes:
+        """The 64-byte signature of ``data``, as ``private_key.sign(data)``."""
+        if self._k is None:
+            return self.private_key.sign(data)
+        return self._k.sign(data)
+
+    def sign_batch(self, datas: Iterable[Buffer]) -> List[bytes]:
+        """The 64-byte signatures of every item of ``datas``, signed together."""
+        if self._k is None:
+            datas = _seq(datas)
+            for x in datas:
+                memoryview(x)  # TypeError before signing anything, as on the native path
+            return [self.private_key.sign(d) for d in datas]
+        return self._k.sign_batch(datas)

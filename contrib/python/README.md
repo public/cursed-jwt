@@ -1,7 +1,7 @@
 # cursed-crypto for Python
 
-Batch (multi-buffer) verification for [pyca/cryptography](https://cryptography.io)'s key objects, backed by
-cursed-crypto (this repository's `crypto/`). Import name `cursed_crypto`.
+Batch (multi-buffer) verification for [pyca/cryptography](https://cryptography.io)'s key objects, and batched
+constant-time Ed25519 signing, backed by cursed-crypto (this repository's `crypto/`). Import name `cursed_crypto`.
 
 It is a companion to pyca/cryptography, not a replacement. pyca/cryptography has no backend plug-in point: every
 `backend=` argument is ignored and `default_backend()` always returns the built-in OpenSSL backend (checked in
@@ -31,6 +31,10 @@ mac.verify(data, tag)                            # None, or InvalidSignature
 mac.verify_batch(datas, tags)                    # [True, False, ...]
 mac.digest_batch(datas)                          # [32-byte MAC, ...]
 cursed_crypto.sha256_batch(datas)                # [32-byte digest, ...]
+
+signer = cursed_crypto.Ed25519Signer(ed25519_private_key)   # build once per key, keep it
+signer.sign(data)                                # 64 bytes, identical to ed25519_private_key.sign(data)
+signer.sign_batch(datas)                         # [64-byte signature, ...], signed together
 ```
 
 ## Batches are per item
@@ -82,6 +86,21 @@ Tags are compared in constant time inside cursed-crypto (`cc_hmac_sha256_verify`
 SHA-256 midstates live in the C object (cleared when it is freed); the key bytes are kept only for the items passed
 to pyca. There is no streaming `update()`: pyca's `update()` / `finalize()` objects can't be batched, so the batch
 calls are one-shot.
+
+## Signing
+
+`Ed25519Signer(private_key)` signs with cursed-crypto's constant-time Ed25519 signer: no branch or memory address
+depends on the private key or the per-signature nonce (the library's README, Signing, has the evidence). Ed25519 is
+deterministic (RFC 8032), so every signature is byte-identical to pyca's `private_key.sign(data)`; the tests check
+that on RFC 8032's vectors, random keys and Hypothesis-generated messages.
+
+- **The key.** The signer holds its own copy of the key (about 30 KB with a table of multiples of the base point,
+  built in about 0.1 ms) and wipes it when the object is freed. The key leaves pyca through `private_bytes_raw()`,
+  whose `bytes` copy Python can't wipe; it is dropped at once. A key of the application's own subclass is used
+  through its own `sign`.
+- **The GIL** is released for every signature and batch.
+- **HS256 signing** is an HMAC of the signing input: `HMACSHA256(key).digest(data)` / `.digest_batch(datas)`, on the
+  same constant-time engines as `verify`.
 
 ## Building
 
