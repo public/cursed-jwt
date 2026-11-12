@@ -51,6 +51,19 @@ SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha512_x86_64_ossl.o $(B)/sha256_shani_
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
+# TUNED=1: every opt-in tuned kernel (README.md, Options), each measured faster on the CPUs its row names and taken at
+# run time only where the CPU can run it; the defaults stay as they are.  TUNED_<KERNEL>=1 enables one alone and
+# TUNED_<KERNEL>=0 drops one from TUNED=1 (for bisecting); each sets -DCC_TUNED_<KERNEL>.
+#   TUNED_ES256_NISTZ  OpenSSL's ecp_nistz256 for ES256 signing's [k] G on x86-64 without ADX
+#                      (crypto/src/ecp_nistz256_x86_64_ossl.S, scripts/extract-openssl-nistz256.sh)
+ifeq ($(TUNED),1)
+TUNED_ES256_NISTZ ?= 1
+endif
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+SHAOBJ += $(B)/ecp_nistz256_x86_64_ossl.o
+SHAFLAG += -DCC_TUNED_ES256_NISTZ
+X86SHA := $(SHAFLAG) $(SHAOBJ)
+endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
 SSLINC := -I$(SSLDIR)/include
@@ -86,6 +99,8 @@ $(B)/sha512_x86_64_ossl.o: crypto/src/sha512_x86_64_ossl.S | $(B)
 $(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_x16_avx512.o: crypto/src/sha256_x16_avx512.S | $(B)
+	$(CC) $(ASJCC) -c $< -o $@
+$(B)/ecp_nistz256_x86_64_ossl.o: crypto/src/ecp_nistz256_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
