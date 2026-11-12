@@ -115,6 +115,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     static char e1[96 * 1024], e2[96 * 1024];
     int l1 = jwt_b64url_encode(e1, data, (int)size), l2 = ref_b64(e2, data, (int)size);
     FZ_ASSERT(l1 == l2 && !memcmp(e1, e2, (size_t)l1), "encoder differs from the reference at size %zu", size);
+    l1 = jwt_b64url_encode_scalar(e1, data, (int)size);
+    FZ_ASSERT(l1 == l2 && !memcmp(e1, e2, (size_t)l1), "scalar encoder differs from the reference at size %zu", size);
     static uint8_t back[64 * 1024 + 64];
     FZ_ASSERT(jwt_b64url_decode_scalar(back, e1, l1) == (int)size && !memcmp(back, data, size), "encode/decode");
 

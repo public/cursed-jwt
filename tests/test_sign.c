@@ -183,6 +183,9 @@ static void vectors(const char *path) {
             int o = jwt_b64url_encode(tokbuf, A, n);
             tokbuf[o] = 0;
             CHECK(!strcmp(tokbuf, want), "%s: base64url %s vs %s", src, tokbuf, want);
+            static char sc[1 << 12];
+            int o2 = jwt_b64url_encode_scalar(sc, A, n);
+            CHECK(o2 == o && !memcmp(sc, tokbuf, (size_t)o), "%s: scalar encoder", src);
             CHECK(jwt_b64url_decode_scalar(Bf, tokbuf, o) == n && !memcmp(Bf, A, (size_t)n), "%s: decode", src);
         } else {
             CHECK(0, "unknown vector kind %s", kind);

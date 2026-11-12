@@ -96,9 +96,10 @@ int jwt_sign_size(int payload_len); /* bytes out[i] needs (the token + its NUL +
 int jwt_sign_batch(const jwt_key_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,
                    int *out_len);
 
-/* base64url encode (no padding): writes (4n + 2) / 3 characters and no NUL, returns their number.  Branch-free and
- * table-free: no branch or memory address depends on the bytes encoded. */
+/* base64url encode (no padding): writes (4n + 2) / 3 characters and no NUL, returns their number.  No branch or
+ * memory address depends on the bytes encoded (AVX2 on x86-64 where the CPU has it, else portable). */
 int jwt_b64url_encode(char *dst, const uint8_t *src, int n);
+int jwt_b64url_encode_scalar(char *dst, const uint8_t *src, int n);
 
 /* ---- CPU dispatch ----
  * The engine is chosen at run time from the CPU's features (CPUID / HWCAP), whatever -march the library was built

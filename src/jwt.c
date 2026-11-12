@@ -242,7 +242,8 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_
 #endif
 
 /* base64url encode, unpadded.  Branch-free and table-free (the MAC and signature bytes go through it): each sextet v
- * maps to v + 'A', then masks derived from v by subtraction move it to 'a'..'z', '0'..'9', '-' or '_'. */
+ * maps to v + 'A', then masks derived from v by subtraction move it to 'a'..'z', '0'..'9', '-' or '_'.  x86-64 with
+ * AVX2 runs the body 24 bytes at a time (below); the branches there depend on the length only. */
 CC_INLINE char b64u_char(uint32_t v) {
 #define B64U_GE(x) (0u - ((uint32_t)((x) - v) >> 31)) /* all ones iff v > x */
     uint32_t c = v + 'A';
@@ -253,7 +254,7 @@ CC_INLINE char b64u_char(uint32_t v) {
 #undef B64U_GE
     return (char)c;
 }
-int jwt_b64url_encode(char *dst, const uint8_t *src, int n) {
+int jwt_b64url_encode_scalar(char *dst, const uint8_t *src, int n) {
     int o = 0, i = 0;
     for (; i + 3 <= n; i += 3, o += 4) {
         uint32_t v = (uint32_t)src[i] << 16 | (uint32_t)src[i + 1] << 8 | src[i + 2];
@@ -269,6 +270,58 @@ int jwt_b64url_encode(char *dst, const uint8_t *src, int n) {
     }
     return o;
 }
+#if defined(CC_X86)
+CC_BEGIN_AVX2
+/* AVX2, 24 bytes -> 32 characters per step (Mula and Lemire, "Faster Base64 Encoding and Decoding using AVX2
+ * Instructions", ACM TOW 2018): the sextets are unpacked with shuffles and multiplies, and translated with a vpshufb
+ * of a register-held table of offsets (no memory lookup, so no data-dependent address).  The whole groups left over
+ * go through a zero-padded copy; a final 1- or 2-byte group through the scalar code. */
+CC_INLINE void avx2_b64e_24(char *dst, const uint8_t *src) { /* reads 28 bytes, writes 32 characters */
+    const __m256i shuf = _mm256_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10, 1, 0, 2, 1, 4, 3, 5, 4, 7,
+                                          6, 8, 7, 10, 9, 11, 10);
+    /* offsets: 0..25 +'A', 26..51 +('a' - 26), 52..61 +('0' - 52), 62 -> '-', 63 -> '_' */
+    const __m256i lut = _mm256_setr_epi8(65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -17, 32, 0, 0, 65, 71, -4, -4,
+                                         -4, -4, -4, -4, -4, -4, -4, -4, -17, 32, 0, 0);
+    /* each 128-bit lane reads 16 bytes and uses the first 12 */
+    __m256i in = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm_loadu_si128((const __m128i *)src)),
+                                         _mm_loadu_si128((const __m128i *)(src + 12)), 1);
+    in = _mm256_shuffle_epi8(in, shuf); /* per 32-bit lane: bytes b1 b0 b2 b1 of a 3-byte group */
+    __m256i t0 = _mm256_and_si256(in, _mm256_set1_epi32(0x0fc0fc00));
+    __m256i t1 = _mm256_mulhi_epu16(t0, _mm256_set1_epi32(0x04000040));
+    __m256i t2 = _mm256_and_si256(in, _mm256_set1_epi32(0x003f03f0));
+    __m256i t3 = _mm256_mullo_epi16(t2, _mm256_set1_epi32(0x01000010));
+    __m256i v = _mm256_or_si256(t1, t3); /* one sextet per byte */
+    __m256i idx = _mm256_subs_epu8(v, _mm256_set1_epi8(51));
+    idx = _mm256_sub_epi8(idx, _mm256_cmpgt_epi8(v, _mm256_set1_epi8(25)));
+    _mm256_storeu_si256((__m256i *)dst, _mm256_add_epi8(v, _mm256_shuffle_epi8(lut, idx)));
+}
+static int b64url_encode_avx2(char *dst, const uint8_t *src, int n) {
+    int i = 0, o = 0;
+    for (; i + 28 <= n; i += 24, o += 32) avx2_b64e_24(dst + o, src + i);
+    int g = (n - i) / 3 * 3; /* the remaining whole 3-byte groups (< 28 bytes): through a zero-padded copy */
+    if (g) {
+        uint8_t buf[56] = { 0 };
+        char tmp[64];
+        memcpy(buf, src + i, (size_t)g);
+        avx2_b64e_24(tmp, buf);
+        if (g > 24) avx2_b64e_24(tmp + 32, buf + 24);
+        memcpy(dst + o, tmp, (size_t)(g / 3 * 4));
+        i += g, o += g / 3 * 4;
+    }
+    return o + jwt_b64url_encode_scalar(dst + o, src + i, n - i); /* the last 1 or 2 bytes */
+}
+CC_END_TARGET
+static int b64url_encode_resolve(char *dst, const uint8_t *src, int n);
+static int (*b64url_enc_impl)(char *, const uint8_t *, int) = b64url_encode_resolve;
+static int b64url_encode_resolve(char *dst, const uint8_t *src, int n) {
+    int (*f)(char *, const uint8_t *, int) = cc_cpu() & CC_CPU_AVX2 ? b64url_encode_avx2 : jwt_b64url_encode_scalar;
+    CC_STORE_FN(b64url_enc_impl, f);
+    return f(dst, src, n);
+}
+int jwt_b64url_encode(char *dst, const uint8_t *src, int n) { return CC_LOAD_FN(b64url_enc_impl)(dst, src, n); }
+#else
+int jwt_b64url_encode(char *dst, const uint8_t *src, int n) { return jwt_b64url_encode_scalar(dst, src, n); }
+#endif
 
 /* ======================================================================================
  * 4. strict JSON
@@ -912,6 +965,7 @@ __attribute__((constructor)) static void jwt_b64_resolve(void) {
     CC_STORE_FN(b64url_impl, b64u_pick_vbmi()         ? b64url_decode_vbmi
                              : cc_cpu() & CC_CPU_AVX2 ? b64url_decode_avx2
                                                       : jwt_b64url_decode_scalar);
+    CC_STORE_FN(b64url_enc_impl, cc_cpu() & CC_CPU_AVX2 ? b64url_encode_avx2 : jwt_b64url_encode_scalar);
 #endif
 }
 
