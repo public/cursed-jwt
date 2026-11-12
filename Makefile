@@ -190,7 +190,7 @@ sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pye
 #                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
 #   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
 #                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
-#   make dudect-sign  the same for signing (HS256 and Ed25519, fixed vs random private key)
+#   make dudect-sign  the same for signing (HS256, Ed25519 and ES256, fixed vs random private key)
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 test-ct: $(B)/test_ct $(B)/test_ct_portable
@@ -230,6 +230,8 @@ dudect-sign: $(B)/dudect_sign
 	for b in 1 16; do ./$(B)/dudect_sign aa-hs $$b 1000000; ./$(B)/dudect_sign hs $$b 1000000; done
 	for b in 1 8; do ./$(B)/dudect_sign aa-ed $$b 100000; ./$(B)/dudect_sign ed $$b 100000; done
 	./$(B)/dudect_sign edkey 1 100000
+	for b in 1 8; do ./$(B)/dudect_sign aa-es $$b 100000; ./$(B)/dudect_sign es $$b 100000; done
+	./$(B)/dudect_sign eskey 1 100000
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json

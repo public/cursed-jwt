@@ -14,10 +14,12 @@
  *                       cc_tag_eq32 and cc_hmac_sha256_verify (no key- or MAC-dependent branch or memory address;
  *                       checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`)
  *                       cc_sha512_* and cc_sha512 (no data-dependent operation at all; checked by `make test-ct`)
- *                       signing: cc_skey_ed25519, cc_sign_batch and cc_skey_free (no branch or memory address
- *                       depends on the private key, the expanded scalar, the nonce prefix or the per-signature nonce;
- *                       checked by `make test-ct`, `test-ct-sde`, `test-ct-qemu` and `make dudect-sign`).  Signing
- *                       shares no code with verification beyond fiat-crypto's field and scalar operations and SHA-512.
+ *                       signing: cc_skey_ed25519, cc_skey_es256, cc_sign_batch and cc_skey_free (no branch or memory
+ *                       address depends on the private key, Ed25519's expanded scalar and nonce prefix, or the
+ *                       per-signature nonce (ES256: k, k^-1, the RFC 6979 state; only its ~2^-32 retries branch, on
+ *                       a declassified bit); checked by `make test-ct`, `test-ct-sde`, `test-ct-qemu` and `make
+ *                       dudect-sign`).  Signing shares no code with verification beyond fiat-crypto's field and scalar
+ *                       operations and the hashes (verify-after-sign calls the verifier on the public result).
  *   variable time       signature verification (cc_pkey_*, cc_verify_batch): its inputs, the public key, the
  *                       message and the signature, are all public, as in every other library's verify
  */

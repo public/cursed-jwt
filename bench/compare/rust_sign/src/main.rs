@@ -2,7 +2,8 @@
 // usage), plus ring's and ed25519-dalek's raw Ed25519 sign.  ns/token, best of 5 passes.
 use ed25519_dalek::Signer;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::rand::SystemRandom;
+use ring::signature::{EcdsaKeyPair, Ed25519KeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 use serde::Serialize;
 use std::time::Instant;
 
@@ -61,6 +62,13 @@ fn main() {
     best("ring Ed25519 sign (raw)", || sink += kp.sign(SI).as_ref().len());
     let dk = ed25519_dalek::SigningKey::from_bytes(&seed.clone().try_into().unwrap());
     best("ed25519-dalek sign (raw)", || sink += dk.sign(SI).to_bytes().len());
+    // ES256: a PKCS#8 P-256 key generated once (ring signs with a random nonce mixed with the key)
+    let rng = SystemRandom::new();
+    let p8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let ek = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, p8.as_ref(), &rng).unwrap();
+    best("ring ECDSA P-256 sign (raw)", || {
+        sink += ek.sign(&rng, SI).unwrap().as_ref().len()
+    });
     let _ = kp.public_key();
     if sink == 42 {
         println!();
