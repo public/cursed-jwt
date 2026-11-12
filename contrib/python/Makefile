@@ -31,7 +31,7 @@ vectors:
 test: $(B)/.inplace vectors
 	HYPOTHESIS_EXAMPLES=$(EX) PYTHONPATH=src $(PYTHON) $(PYTEST) tests
 	HYPOTHESIS_EXAMPLES=100 PYTHONPATH=src $(PYTHON) tests/run_engines.py -q -p no:cacheprovider \
-	  tests/test_differential.py tests/test_props.py tests/test_vectors.py
+	  tests/test_differential.py tests/test_props.py tests/test_vectors.py tests/test_sign.py
 
 test-quick: $(B)/.inplace vectors
 	HYPOTHESIS_EXAMPLES=50 PYTHONPATH=src $(PYTHON) $(PYTEST) tests

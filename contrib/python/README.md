@@ -1,7 +1,7 @@
 # cursed-crypto for Python
 
-Batch (multi-buffer) verification for [pyca/cryptography](https://cryptography.io)'s key objects, backed by
-cursed-crypto (this repository's `crypto/`). Import name `cursed_crypto`.
+Batch (multi-buffer) verification for [pyca/cryptography](https://cryptography.io)'s key objects, and batched
+constant-time Ed25519 signing, backed by cursed-crypto (this repository's `crypto/`). Import name `cursed_crypto`.
 
 It is a companion to pyca/cryptography, not a replacement. pyca/cryptography has no backend plug-in point: every
 `backend=` argument is ignored and `default_backend()` always returns the built-in OpenSSL backend (checked in
@@ -31,6 +31,10 @@ mac.verify(data, tag)                            # None, or InvalidSignature
 mac.verify_batch(datas, tags)                    # [True, False, ...]
 mac.digest_batch(datas)                          # [32-byte MAC, ...]
 cursed_crypto.sha256_batch(datas)                # [32-byte digest, ...]
+
+signer = cursed_crypto.Ed25519Signer(ed25519_private_key)   # build once per key, keep it
+signer.sign(data)                                # 64 bytes, identical to ed25519_private_key.sign(data)
+signer.sign_batch(datas)                         # [64-byte signature, ...], signed together
 ```
 
 ## Batches are per item
@@ -83,6 +87,21 @@ SHA-256 midstates live in the C object (cleared when it is freed); the key bytes
 to pyca. There is no streaming `update()`: pyca's `update()` / `finalize()` objects can't be batched, so the batch
 calls are one-shot.
 
+## Signing
+
+`Ed25519Signer(private_key)` signs with cursed-crypto's constant-time Ed25519 signer: no branch or memory address
+depends on the private key or the per-signature nonce (the library's README, Signing, has the evidence). Ed25519 is
+deterministic (RFC 8032), so every signature is byte-identical to pyca's `private_key.sign(data)`; the tests check
+that on RFC 8032's vectors, random keys and Hypothesis-generated messages.
+
+- **The key.** The signer holds its own copy of the key (about 30 KB with a table of multiples of the base point,
+  built in about 0.1 ms) and wipes it when the object is freed. The key leaves pyca through `private_bytes_raw()`,
+  whose `bytes` copy Python can't wipe; it is dropped at once. A key of the application's own subclass is used
+  through its own `sign`.
+- **The GIL** is released for every signature and batch.
+- **HS256 signing** is an HMAC of the signing input: `HMACSHA256(key).digest(data)` / `.digest_batch(datas)`, on the
+  same constant-time engines as `verify`.
+
 ## Building
 
 ```sh
@@ -92,14 +111,15 @@ make -C contrib/python PYTHON=build/venv/bin/python test
 ```
 
 `crypto/src/cursed_crypto.c` is compiled into the extension as one unit, as the library's Makefile builds it. On
-x86-64 Linux the committed assembly kernels are assembled with `-DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT`;
-elsewhere the build is portable C. Engines (AVX2, AVX-512, SHA-NI, NEON, ...) are picked at run time from the CPU.
-Nothing is downloaded at build time; the IFMA and s2n-bignum builds stay out. `CURSED_CRYPTO_PORTABLE=1` builds
+x86-64 Linux the committed assembly kernels are assembled with `-DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB
+-DJWT_OSSL_MONT -DJWT_ED25519_ASM` (the last one is s2n-bignum's vendored Ed25519 fixed-base kernel, for signing);
+elsewhere the build is portable C. Engines (AVX2, AVX-512, SHA-NI, NEON, ...) are picked at run time from the CPU. Nothing is downloaded at
+build time; the IFMA build and the fetched s2n-bignum kernels (`-DJWT_S2N`) stay out. `CURSED_CRYPTO_PORTABLE=1` builds
 without the assembly, `CURSED_CRYPTO_CFLAGS` adds compiler flags. Requires cryptography ≥ 42 (41 accepted other
 input types). Tested on CPython 3.12.
 
 Sdists and wheels carry `LICENSE` (MIT) and the vendored code's licences (OpenSSL, Firedancer, Intel ipsec-mb,
-fiat-crypto).
+fiat-crypto, s2n-bignum).
 
 ## Tests
 
