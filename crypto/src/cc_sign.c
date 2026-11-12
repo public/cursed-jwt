@@ -24,16 +24,15 @@
  * Checked by tests/test_ct.c (valgrind, the seed marked secret), tests/ct_trace.c (identical instruction and address
  * traces under two seeds, SDE / qemu) and tests/dudect_sign.c (fixed vs random seed). */
 
-#if defined(CC_S2N) && (defined(__x86_64__) || defined(__aarch64__))
-/* -DJWT_S2N: [n] B is s2n-bignum's edwards25519_scalarmulbase (formally verified; constant time: its table is read
- * with cmov / csel over whole blocks, and it returns the affine point, fully reduced, after its own constant-time
- * inversion).  On x86-64 it needs BMI2 + ADX; the _alt version (plain mul / adc) runs everywhere else.  The key then
- * keeps no table, and a batch needs no shared inversion. */
+#if defined(CC_ED25519_ASM) && !defined(CC_NO_ED25519_ASM) && defined(__x86_64__) && defined(__ELF__)
+/* -DJWT_ED25519_ASM (the Makefile's default on x86-64 Linux): [n] B is s2n-bignum's edwards25519_scalarmulbase
+ * (crypto/src/s2n/, vendored; formally verified; constant time: its table is read with cmov over whole blocks, and it
+ * returns the affine point, fully reduced, after its own constant-time inversion).  It needs BMI2 + ADX; the _alt
+ * version (plain mul / adc) runs on every other x86-64.  The key then keeps no table, and a batch needs no shared
+ * inversion.  -DJWT_NO_ED25519_ASM keeps the portable code below (the tests run both). */
 #define CC_SIGN_S2N 1
 void cc_s2n_edwards25519_scalarmulbase(uint64_t res[8], const uint64_t scalar[4]);
-#if defined(__x86_64__)
 void cc_s2n_edwards25519_scalarmulbase_alt(uint64_t res[8], const uint64_t scalar[4]);
-#endif
 #endif
 
 typedef uint64_t sg_fe[5]; /* fiat's 5 x 51-bit limbs */
@@ -199,12 +198,8 @@ static void sg_base_encode_s2n(uint8_t out[32], const uint8_t s[32]) {
         for (int j = 7; j >= 0; j--) v = v << 8 | s[8 * i + j];
         sc[i] = v;
     }
-#if defined(__x86_64__)
-    if (s2n_ok()) cc_s2n_edwards25519_scalarmulbase(res, sc); /* (a branch on the CPU, not on the data) */
+    if (cc_cpu() & CC_CPU_BMI2_ADX) cc_s2n_edwards25519_scalarmulbase(res, sc); /* (a branch on the CPU only) */
     else cc_s2n_edwards25519_scalarmulbase_alt(res, sc);
-#else
-    cc_s2n_edwards25519_scalarmulbase(res, sc);
-#endif
     for (int i = 0; i < 4; i++) /* y, little-endian, then the parity of x in the top bit */
         for (int j = 0; j < 8; j++) out[8 * i + j] = (uint8_t)(res[4 + i] >> (8 * j));
     out[31] |= (uint8_t)((res[0] & 1) << 7);

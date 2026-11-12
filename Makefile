@@ -14,7 +14,6 @@
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
 #   make sign-test    HS256 / EdDSA signing: RFC 8032 / 8037 / 7515 and pyca exact outputs, round trips, pyca checks
-#   make sign-test-s2n / test-ct-s2n / bench-sign-s2n   Ed25519 signing on s2n-bignum's fixed-base kernel (-DJWT_S2N)
 #   make sign-asan    the same tests under ASan + UBSan, with output buffers of exactly jwt_sign_size; and -DJWT_INPUT_PADDED
 #   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 #   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
@@ -37,15 +36,16 @@ ARCHFLAGS ?=
 # x86-64 Linux: batch 1 and leftover lanes use OpenSSL's extracted sha256 block function (crypto/src/sha256_x86_64_ossl.S,
 # ELF only), SHA-NI batches the generated 3/4-stream kernels (crypto/src/sha256_shani_mb.S) and zmm batches the generated
 # 16-lane kernel (crypto/src/sha256_x16_avx512.S), both with -DJWT_SHANI_MB, and RSA uses OpenSSL's extracted bn_mul_mont
-# (crypto/src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.
-# `make OSSL_SHA=` builds without either.
+# (crypto/src/bn_mont*_x86_64_ossl.S) where s2n-bignum can't run.  Ed25519 signing's fixed-base multiplication is
+# s2n-bignum's (crypto/src/s2n/, vendored; -DJWT_ED25519_ASM).  `make OSSL_SHA=` builds without any of them.
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
+ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o
 ifeq ($(OSSL_SHA),1)
 MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
-SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT
-SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ)
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM
+SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ) $(ED25519OBJ)
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
@@ -87,6 +87,9 @@ $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
+# s2n-bignum's constant-time Ed25519 fixed-base kernels (vendored, crypto/src/s2n/, MIT-0): Ed25519 signing's [n]B
+$(ED25519OBJ): $(B)/%.o: crypto/src/s2n/%.S crypto/src/s2n/_internal_s2n_bignum_x86.h | $(B)
+	$(CC) $(ASJCC) -c -DS2N_BN_HIDE_SYMBOLS=1 -D$*=cc_s2n_$* $< -o $@
 # Libraries: cursed-crypto (crypto/) and the JWT layer (src/jwt.c) are compiled as separate units, no LTO:
 #   build/libcursedcrypto.a  cursed-crypto alone (crypto/include/cursed_crypto.h)
 #   build/libcursedjwt.a     the JWT layer (-DJWT_EXTERNAL_CRYPTO) plus the same cursed-crypto objects, so linking it
@@ -161,8 +164,10 @@ $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
 sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
-sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
+sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv
 	./$(B)/test_sign $(B)/sign_vectors.txt
+	./$(B)/test_sign_portable $(B)/sign_vectors.txt | tail -1   # -DJWT_NO_ED25519_ASM: the portable Ed25519 signer
+	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: s2n-bignum's _alt kernel
 	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
 	./$(B)/test_sign emit $(SIGN_N) > $(B)/sign_emitted.txt
 	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
@@ -179,17 +184,19 @@ sign-test: $(B)/test_sign $(B)/sign_vectors.txt $(B)/pyenv
 #   make dudect-sign  the same for signing (HS256 and Ed25519, fixed vs random private key)
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
-test-ct: $(B)/test_ct
+test-ct: $(B)/test_ct $(B)/test_ct_portable
 	valgrind -q --error-exitcode=1 ./$(B)/test_ct key
 	valgrind -q --error-exitcode=1 ./$(B)/test_ct sign
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct_portable sign
 	@if valgrind -q --error-exitcode=1 ./$(B)/test_ct sign-control >/dev/null 2>&1; then \
 	  echo "test-ct: the sign-control run raised no memcheck error: the method is broken"; exit 1; \
 	  else echo "test-ct: sign-control flagged (as it must)"; fi
 $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 SDE ?= sde64
-test-ct-sde: $(B)/ct_trace
+test-ct-sde: $(B)/ct_trace $(B)/ct_trace_portable
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable sign_ed   # the portable Ed25519 signer
 # the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
 CROSS ?= aarch64-linux-gnu-
 QEMU ?= qemu-aarch64
@@ -238,8 +245,9 @@ compare: $(B)/tokens.json $(SRC) | $(B)
 # python3 with PyJWT and cryptography)
 $(B)/bench_sign: bench/bench_sign.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
-bench-sign: $(B)/bench_sign
+bench-sign: $(B)/bench_sign $(B)/bench_sign_portable
 	./$(B)/bench_sign
+	./$(B)/bench_sign_portable | sed -n '/EdDSA/,$$p'   # the portable Ed25519 signer
 compare-sign: $(B)/bench_sign $(SRC) | $(B)
 	./scripts/fetch-compare.sh
 	./$(B)/bench_sign
@@ -255,23 +263,16 @@ compare-sign: $(B)/bench_sign $(SRC) | $(B)
 	$(CC) -O3 -I$(B)/sodium/include bench/compare/sodium_sign.c $(B)/sodium/lib/libsodium.a -o $(B)/compare_sodium_sign
 	./$(B)/compare_sodium_sign
 
-# -DJWT_S2N signing: [n] B through s2n-bignum's edwards25519_scalarmulbase (BMI2 + ADX, or its _alt elsewhere)
-$(B)/test_sign_s2n: tests/test_sign.c $(SRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
-$(B)/test_ct_s2n: tests/test_ct.c $(SRC) $(B)/libs2n.a | $(B)
-	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
-$(B)/ct_trace_s2n: tests/ct_trace.c $(SRC) $(B)/libs2n.a | $(B)
-	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
-$(B)/bench_sign_s2n: bench/bench_sign.c $(SRC) $(B)/libs2n.a | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_S2N $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) $(B)/libs2n.a -o $@
-sign-test-s2n: $(B)/test_sign_s2n $(B)/sign_vectors.txt
-	./$(B)/test_sign_s2n $(B)/sign_vectors.txt | tail -1
-	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign_s2n $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: the _alt kernel
-test-ct-s2n: $(B)/test_ct_s2n $(B)/ct_trace_s2n
-	valgrind -q --error-exitcode=1 ./$(B)/test_ct_s2n sign
-	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_s2n "sign_ed"
-bench-sign-s2n: $(B)/bench_sign_s2n
-	./$(B)/bench_sign_s2n
+# the portable Ed25519 signer (fiat-crypto, no assembly) where the default build uses s2n-bignum's kernel:
+# -DJWT_NO_ED25519_ASM.  make sign-test, test-ct, test-ct-sde and bench-sign check it as well.
+$(B)/test_sign_portable: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+$(B)/test_ct_portable: tests/test_ct.c $(SRC) | $(B)
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+$(B)/ct_trace_portable: tests/ct_trace.c $(SRC) | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+$(B)/bench_sign_portable: bench/bench_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
@@ -321,11 +322,10 @@ fuzz:
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)
 S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
 S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
-             fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n \
-             curve25519/edwards25519_scalarmulbase
+             fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n
 # x86-64 only: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX
 S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt \
-  curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt curve25519/edwards25519_scalarmulbase_alt)
+  curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt)
 S2N := -DJWT_S2N $(B)/libs2n.a
 # each kernel's one global is renamed cc_s2n_<name> as it is assembled (the C side declares those names), so the
 # archive links next to AWS-LC or another copy of s2n-bignum, which carry the plain bignum_* / edwards25519_* names
@@ -457,4 +457,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: sign-test-s2n test-ct-s2n bench-sign-s2n sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

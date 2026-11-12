@@ -263,14 +263,22 @@ jwt_skey_free(sk);                                        // wipes the key
   key, the Ed25519 private key, its expanded scalar and nonce prefix, or the per-signature nonce (checked by valgrind
   and trace equivalence), and by design only integer additions, multiplications, shifts and logic touch them: no
   division and no table indexed by a secret. Variable-latency instructions are not checked mechanically; dudect on
-  three x86 CPUs found no timing difference. HS256 runs on the same constant-time HMAC engines as verification. Ed25519 signing is a path of
-  its own that shares no code with the (variable-time) verifier beyond fiat-crypto's field and scalar arithmetic and
-  SHA-512: a fixed-base multiplication that reads its table only through constant-time selects, complete addition
-  formulas, a fixed inversion chain, and scalar reduction in fiat's Montgomery arithmetic. The MAC and signature go
-  through a branch-free, table-free base64url encoder. What checks it is under [Constant time](#constant-time).
-- **Batching.** HS256 signing goes through the multi-buffer HMAC, so a batch gets verification's speed-up. An Ed25519
-  batch shares one field inversion (Montgomery's trick).
-- **Cost of an Ed25519 key:** about 30 KB (a table of multiples of the base point) and 82–115 µs to set up.
+  three x86 CPUs found no timing difference.
+- **How.** HS256 runs on the same constant-time HMAC engines as verification. Ed25519 signing is a path of its own that
+  shares no code with the (variable-time) verifier beyond fiat-crypto's field and scalar arithmetic and SHA-512:
+  - on x86-64 Linux, the fixed-base multiplication [r]B is s2n-bignum's formally verified, constant-time
+    `edwards25519_scalarmulbase` (vendored in `crypto/src/s2n/`; its BMI2 + ADX version, or `_alt` on CPUs or VMs
+    without them);
+  - elsewhere (or with `-DJWT_NO_ED25519_ASM`) it is portable C: a table read only through masked selects, complete
+    addition formulas and a fixed inversion chain, with one inversion shared per batch of 16;
+  - the scalars are reduced in fiat's Montgomery arithmetic;
+  - the MAC and signature go through a branch-free, table-free base64url encoder.
+
+  What checks it is under [Constant time](#constant-time); the tests run both Ed25519 paths.
+- **Batching.** HS256 signing goes through the multi-buffer HMAC, so a batch gets verification's speed-up. Ed25519
+  signatures are independent; the portable path shares one inversion per batch (16–19%).
+- **Cost of an Ed25519 key:** 6–11 µs to set up with s2n-bignum's kernel; the portable path adds a 30 KB table of
+  multiples of the base point and takes 81–114 µs.
 
 **Measured** (`make bench-sign`, `make compare-sign`; Vultr VMs, Ubuntu 24.04, gcc 13.3, OpenSSL 3.0.13; the claims
 set `{"sub":"123456","username":"alice","iat":1700000000,"exp":4102444800}`; ns per token, batch 1, batch 16 in
@@ -284,19 +292,22 @@ brackets):
 | jwt-cpp `create().sign()` | 2,666 | 2,946 | 5,224 |
 | golang-jwt v5 `SignedString` | 2,816 | 3,402 | 5,877 |
 | PyJWT 2.9 `jwt.encode` | 7,069 | 7,796 | 12,700 |
-| **EdDSA** cursed-jwt `jwt_sign_batch_pk`, whole token | **13,874** (11,200) | **16,227** (13,571) | **20,684** (17,187) |
-| Go `crypto/ed25519` `Sign`: the signature alone | 17,088 | 20,873 | 26,998 |
+| **EdDSA** cursed-jwt `jwt_sign_batch_pk`, whole token (x86-64 Linux: s2n-bignum kernel) | **7,587** (7,459) | **9,973** (9,847) | **12,987** (13,332) |
+| the same, portable C (`-DJWT_NO_ED25519_ASM`) | 13,266 (10,572) | 15,054 (12,527) | 19,350 (16,069) |
+| libsodium 1.0.20 `crypto_sign_detached`: the signature alone | 13,683 | 15,390 | 20,268 |
+| ed25519-dalek 2.1 `sign`: the signature alone | 14,450 | 15,950 | 20,095 |
+| Go `crypto/ed25519` `Sign`: the signature alone | 17,346 | 20,613 | 28,021 |
 | golang-jwt v5 `SignedString` | 19,841 | 23,404 | 32,273 |
 | pyca/cryptography `sign`: the signature alone | 22,378 | 30,138 | 37,301 |
-| ring 0.17 `sign`: the signature alone | 22,886 | 33,104 | 45,546 |
-| OpenSSL `EVP_DigestSign`: the signature alone | 27,048 | 36,196 | 47,108 |
+| ring 0.17 `sign`: the signature alone | 23,127 | 33,943 | 46,128 |
+| OpenSSL `EVP_DigestSign`: the signature alone | 27,018 | 36,186 | 47,474 |
 | PyJWT 2.9 `jwt.encode` | 28,496 | 37,716 | 49,375 |
 | jwt-cpp `create().sign()` | 29,478 | 39,276 | 51,302 |
 | jsonwebtoken 9.3 (Rust) `encode` | 46,050 | 67,096 | 90,798 |
 
-The other libraries serialise the claims themselves; cursed-jwt takes the JSON bytes and checks them. A batch of 16 HS256
-tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC. An Ed25519 batch shares one
-inversion per 16 signatures, worth 16–19%.
+The other libraries serialise the claims themselves; cursed-jwt takes the JSON bytes and checks them. Every Ed25519
+row signs the same 141-byte signing input; the Genoa and Cascade Lake VMs hide ADX, so they ran s2n-bignum's `_alt`
+kernel. A batch of 16 HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC.
 
 ## The crypto on its own
 
@@ -476,6 +487,7 @@ the sources into your own build, compile `src/jwt.c` (one unit) or `crypto/src/c
 |---|---|
 | `-DJWT_INPUT_PADDED` | every token has ≥ 64 readable bytes after it, which allows fixed-size tail loads |
 | `-DJWT_NO_SHAPE_JSON` | strict parser only |
+| `-DJWT_NO_ED25519_ASM` | Ed25519 signing in portable C even where the Makefile assembles s2n-bignum's fixed-base kernel (`-DJWT_ED25519_ASM`, set by the Makefile on x86-64 Linux with the other `.S` files: link `crypto/src/s2n/*.S` too) |
 | `JWT_USERNAME_MAX`, `JWT_TOKEN_MAX` | size limits |
 | `-DJWT_NO_PK` | leave out RS256 / ES256 / EdDSA (they're built by default, from fiat-crypto's arithmetic vendored in `crypto/src/fiat/`) |
 | `-DJWT_S2N` | s2n-bignum's formally verified asm kernels for P-256, Ed25519 and RSA-2048 (`scripts/fetch-s2n-bignum.sh`). On x86, its ADX-free P-256 / Ed25519 versions run where BMI2 + ADX are missing; RSA-2048 then uses `bn_mul_mont` |
