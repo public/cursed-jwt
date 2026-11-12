@@ -1171,7 +1171,19 @@ jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]) {
     k->canon = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9", k->sig_bytes = 64; /* {"alg":"EdDSA","typ":"JWT"} */
     return k;
 }
+jwt_skey_t *jwt_skey_es256(const uint8_t d[32]) {
+    jwt_skey_t *k = calloc(1, sizeof *k);
+    if (!k) return NULL;
+    if (!(k->cc = cc_skey_es256(d))) {
+        free(k);
+        return NULL;
+    }
+    k->canon = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9", k->sig_bytes = 64; /* {"alg":"ES256","typ":"JWT"} */
+    return k;
+}
 void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]) { cc_skey_public(k->cc, pub); }
+void jwt_skey_es256_public(const jwt_skey_t *k, uint8_t x[32], uint8_t y[32]) { cc_skey_es256_public(k->cc, x, y); }
+int jwt_skey_verify_after_sign(jwt_skey_t *k, int on) { return cc_skey_verify_after_sign(k->cc, on); }
 void jwt_skey_free(jwt_skey_t *k) {
     if (!k) return;
     cc_skey_free(k->cc);
@@ -1195,8 +1207,16 @@ int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, co
             if (L < 0) continue;
             msg[c] = (const uint8_t *)out[t], mlen[c] = L, sp[c] = sb[c], idx[c++] = t;
         }
-        if (c) cc_sign_batch(k->cc, c, msg, mlen, sp);
+        int faults = c ? cc_sign_batch(k->cc, c, msg, mlen, sp) : 0;
         for (int j = 0; j < c; j++) {
+            if (faults) { /* verify-after-sign zeroed this signature: no token */
+                uint8_t z = 0;
+                for (int b = 0; b < 64; b++) z |= sb[j][b];
+                if (!z) {
+                    out[idx[j]][0] = 0;
+                    continue;
+                }
+            }
             char *o = out[idx[j]] + mlen[j];
             *o++ = '.';
             o += jwt_b64url_encode(o, sb[j], k->sig_bytes);

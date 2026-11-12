@@ -42,10 +42,11 @@ ARCHFLAGS ?=
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
-ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o
+ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o $(B)/p256_scalarmulbase.o \
+              $(B)/p256_scalarmulbase_alt.o $(B)/bignum_modinv.o
 ifeq ($(OSSL_SHA),1)
 MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
-SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM -DJWT_ES256_ASM
 SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha512_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ) $(ED25519OBJ)
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
