@@ -277,7 +277,7 @@ jwt_skey_free(sk);                                        // wipes the key
   What checks it is under [Constant time](#constant-time); the tests run both Ed25519 paths.
 - **Batching.** HS256 signing goes through the multi-buffer HMAC, so a batch gets verification's speed-up. Ed25519
   signatures are independent; the portable path shares one inversion per batch (16–19%).
-- **Cost of an Ed25519 key:** 6–11 µs to set up with s2n-bignum's kernel; the portable path adds a 30 KB table of
+- **Cost of an Ed25519 key:** 6–10 µs to set up with s2n-bignum's kernel; the portable path adds a 30 KB table of
   multiples of the base point and takes 81–114 µs.
 
 **Measured** (`make bench-sign`, `make compare-sign`; Vultr VMs, Ubuntu 24.04, gcc 13.3, OpenSSL 3.0.13; the claims
@@ -292,7 +292,7 @@ brackets):
 | jwt-cpp `create().sign()` | 2,666 | 2,946 | 5,224 |
 | golang-jwt v5 `SignedString` | 2,816 | 3,402 | 5,877 |
 | PyJWT 2.9 `jwt.encode` | 7,069 | 7,796 | 12,700 |
-| **EdDSA** cursed-jwt `jwt_sign_batch_pk`, whole token (x86-64 Linux: s2n-bignum kernel) | **7,587** (7,459) | **9,973** (9,847) | **12,987** (13,332) |
+| **EdDSA** cursed-jwt `jwt_sign_batch_pk`, whole token (x86-64 Linux: s2n-bignum kernel) | **6,669** (6,514) | **8,921** (8,861) | **11,637** (11,464) |
 | the same, portable C (`-DJWT_NO_ED25519_ASM`) | 13,266 (10,572) | 15,054 (12,527) | 19,350 (16,069) |
 | libsodium 1.0.20 `crypto_sign_detached`: the signature alone | 13,683 | 15,390 | 20,268 |
 | ed25519-dalek 2.1 `sign`: the signature alone | 14,450 | 15,950 | 20,095 |
@@ -307,7 +307,9 @@ brackets):
 
 The other libraries serialise the claims themselves; cursed-jwt takes the JSON bytes and checks them. Every Ed25519
 row signs the same 141-byte signing input; the Genoa and Cascade Lake VMs hide ADX, so they ran s2n-bignum's `_alt`
-kernel. A batch of 16 HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC.
+kernel. The first EdDSA row is from a later run than the rest (same VM classes), after SHA-512 moved to OpenSSL's
+assembly and the scalar reduction to precomputed constants: 9–12% faster than the same kernel before. A batch of 16
+HS256 tokens costs 33–68% of 16 single calls per token: that is the multi-buffer HMAC.
 
 ## The crypto on its own
 
