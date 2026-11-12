@@ -96,7 +96,7 @@ x86-64 Linux the committed assembly kernels are assembled with `-DJWT_OSSL_SHA25
 elsewhere the build is portable C. Engines (AVX2, AVX-512, SHA-NI, NEON, ...) are picked at run time from the CPU.
 Nothing is downloaded at build time; the IFMA and s2n-bignum builds stay out. `CURSED_CRYPTO_PORTABLE=1` builds
 without the assembly, `CURSED_CRYPTO_CFLAGS` adds compiler flags. Requires cryptography ≥ 42 (41 accepted other
-input types).
+input types). Tested on CPython 3.12.
 
 Sdists and wheels carry `LICENSE` (MIT) and the vendored code's licences (OpenSSL, Firedancer, Intel ipsec-mb,
 fiat-crypto).

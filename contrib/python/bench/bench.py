@@ -97,7 +97,7 @@ def arms(alg, pub, pool):
             "pyca-pool": lambda S, M: list(pool.map(one, S, M)),
             "cc-single": lambda S, M: [cc_one(s, m) for s, m in zip(S, M)],
             "cc-batch": lambda S, M: v.verify_batch(M, S),
-            "cc-overhead": lambda S, M: [True for _ in cursed_crypto._native._overhead(M, S)[0]],
+            "cc-overhead": lambda S, M: cursed_crypto._native._overhead(M, S)[0],
         }
     if alg == "EdDSA":
         v = cursed_crypto.Ed25519Verifier(pub)
@@ -134,15 +134,16 @@ def arms(alg, pub, pool):
         "pyca-pool": lambda S, M: list(pool.map(one, S, M)),
         "cc-single": lambda S, M: [cc_one(s, m) for s, m in zip(S, M)],
         "cc-batch": lambda S, M: v.verify_batch(S, M),
-        "cc-overhead": lambda S, M: [True for _ in cursed_crypto._native._overhead(S, M)[0]],
+        "cc-overhead": lambda S, M: cursed_crypto._native._overhead(S, M)[0],
     }
 
 
-def measure(fn, batches, target_s):
+def measure(fn, batches, target_s, check=True):
     """ns per item: whole passes over the prepared batches until target_s has passed."""
     items = sum(len(b[0]) for b in batches)
-    for S, M in batches[:2]:  # warm-up, and every arm must accept everything
-        assert all(fn(S, M)), "a valid signature was rejected"
+    for S, M in batches[:2]:  # warm-up, and every verifying arm must accept everything
+        r = fn(S, M)
+        assert len(r) == len(S) and (all(r) or not check), "a valid signature was rejected"
     reps, t0 = 0, time.perf_counter_ns()
     while True:
         for S, M in batches:
@@ -182,7 +183,7 @@ def main():
             for r in range(a.rounds):
                 order = names[r % len(names) :] + names[: r % len(names)]
                 for pos, name in enumerate(order):
-                    ns = measure(fns[name], batches, a.target)
+                    ns = measure(fns[name], batches, a.target, check=name != "cc-overhead")
                     rows.setdefault((alg, name, size), []).append(ns)
                     print(f"{r}\t{pos}\t{alg}\t{name}\t{size}\t{a.threads}\t{ns:.1f}", flush=True)
     pool.shutdown()

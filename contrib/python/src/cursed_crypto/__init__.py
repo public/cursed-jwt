@@ -245,8 +245,8 @@ class HMACSHA256:
     only for those delegated items.  There is no streaming ``update()``: batches are one-shot."""
 
     def __init__(self, key: Buffer) -> None:
-        self._key = bytes(key)
-        hmac.HMAC(self._key, hashes.SHA256())  # pyca's own checks on the key (type), errors as pyca's
+        hmac.HMAC(key, hashes.SHA256())  # pyca's own checks on the key first, so errors are pyca's
+        self._key = memoryview(key).tobytes()
         self._k = _native.HMACKey(self._key)
 
     def _one(self, data: Buffer, signature: Buffer) -> bool:

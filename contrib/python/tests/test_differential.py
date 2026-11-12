@@ -361,8 +361,15 @@ def test_errors_match_pyca():
 def test_hmac_errors():
     with pytest.raises(TypeError):
         hmac.HMAC("str", hashes.SHA256())
-    with pytest.raises(TypeError):
-        cursed_crypto.HMACSHA256("str")
+    for bad in ("str", 5, [1, 2], None):  # bytes(5) would be five zero bytes: must raise as pyca does
+        with pytest.raises(TypeError):
+            hmac.HMAC(bad, hashes.SHA256())
+        with pytest.raises(TypeError):
+            cursed_crypto.HMACSHA256(bad)
+    k = bytearray(b"key")
+    h = cursed_crypto.HMACSHA256(memoryview(k))
+    k[0] = 0  # pyca copies the key at construction; so does HMACSHA256
+    assert h.digest(b"m") == cursed_crypto.HMACSHA256(b"key").digest(b"m")
     h = cursed_crypto.HMACSHA256(b"k")
     with pytest.raises(TypeError):
         h.verify_batch([b"a", "b"], [b"x" * 32, b"x" * 32])
