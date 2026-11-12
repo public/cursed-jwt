@@ -14,6 +14,7 @@
 #   make fuzz         libFuzzer in Docker, 10 s per harness (FUZZ_SECS=600 JOBS=6 for a real campaign)
 #   make test-hypothesis  property-based tests vs an independent Python model (Hypothesis; network for the venv)
 #   make sign-test    HS256 / EdDSA signing: RFC 8032 / 8037 / 7515 and pyca exact outputs, round trips, pyca checks
+#   make sign-test-s2n / test-ct-s2n / bench-sign-s2n   Ed25519 signing on s2n-bignum's fixed-base kernel (-DJWT_S2N)
 #   make sign-asan    the same tests under ASan + UBSan, with output buffers of exactly jwt_sign_size; and -DJWT_INPUT_PADDED
 #   make pk-test      RS256 / ES256 / EdDSA vs Wycheproof, NIST CAVP, RFC 7515/8032/8037, pyca (network)
 #   make pk-bench     RS256 / ES256 / EdDSA ns/token vs OpenSSL
@@ -249,6 +250,28 @@ compare-sign: $(B)/bench_sign $(SRC) | $(B)
 	@if command -v cargo >/dev/null; then (cd bench/compare/rust_sign && cargo run -q --release --target-dir ../../../$(B)/rust_sign); \
 	  else echo "jsonwebtoken: skipped (no cargo)"; fi
 	@$(PYTHON) bench/compare/sign_py.py 2>/dev/null || echo "PyJWT: skipped (needs python3 with PyJWT and cryptography)"
+	cd third_party/libsodium && [ -f ../../$(B)/sodium/lib/libsodium.a ] || { ./configure -q --disable-shared --enable-static \
+	  --prefix=$$PWD/../../$(B)/sodium >/dev/null && $(MAKE) -s >/dev/null && $(MAKE) -s install >/dev/null; }
+	$(CC) -O3 -I$(B)/sodium/include bench/compare/sodium_sign.c $(B)/sodium/lib/libsodium.a -o $(B)/compare_sodium_sign
+	./$(B)/compare_sodium_sign
+
+# -DJWT_S2N signing: [n] B through s2n-bignum's edwards25519_scalarmulbase (BMI2 + ADX, or its _alt elsewhere)
+$(B)/test_sign_s2n: tests/test_sign.c $(SRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
+$(B)/test_ct_s2n: tests/test_ct.c $(SRC) $(B)/libs2n.a | $(B)
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
+$(B)/ct_trace_s2n: tests/ct_trace.c $(SRC) $(B)/libs2n.a | $(B)
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_S2N $< $(X86SHA) $(B)/libs2n.a -o $@
+$(B)/bench_sign_s2n: bench/bench_sign.c $(SRC) $(B)/libs2n.a | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_S2N $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) $(B)/libs2n.a -o $@
+sign-test-s2n: $(B)/test_sign_s2n $(B)/sign_vectors.txt
+	./$(B)/test_sign_s2n $(B)/sign_vectors.txt | tail -1
+	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign_s2n $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: the _alt kernel
+test-ct-s2n: $(B)/test_ct_s2n $(B)/ct_trace_s2n
+	valgrind -q --error-exitcode=1 ./$(B)/test_ct_s2n sign
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_s2n "sign_ed"
+bench-sign-s2n: $(B)/bench_sign_s2n
+	./$(B)/bench_sign_s2n
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)
@@ -298,10 +321,11 @@ fuzz:
 # -DJWT_S2N: AWS s2n-bignum's verified asm for the P-256 field and RSA-2048 Montgomery kernels (fetched pinned)
 S2N_ARCH := $(if $(filter x86_64,$(UNAME_M)),x86,arm)
 S2N_FILES := p256/bignum_montmul_p256 p256/bignum_montsqr_p256 p256/bignum_add_p256 p256/bignum_sub_p256 \
-             fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n
+             fastmul/bignum_kmul_32_64 fastmul/bignum_ksqr_32_64 fastmul/bignum_emontredc_8n \
+             curve25519/edwards25519_scalarmulbase
 # x86-64 only: the ADX-free P-256 multiply / square, for CPUs (and VMs) that hide BMI2 / ADX
 S2N_FILES += $(if $(filter x86,$(S2N_ARCH)),p256/bignum_montmul_p256_alt p256/bignum_montsqr_p256_alt \
-  curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt)
+  curve25519/edwards25519_pepadd curve25519/edwards25519_pepadd_alt curve25519/edwards25519_scalarmulbase_alt)
 S2N := -DJWT_S2N $(B)/libs2n.a
 # each kernel's one global is renamed cc_s2n_<name> as it is assembled (the C side declares those names), so the
 # archive links next to AWS-LC or another copy of s2n-bignum, which carry the plain bignum_* / edwards25519_* names
@@ -433,4 +457,4 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8
+.PHONY: sign-test-s2n test-ct-s2n bench-sign-s2n sign-test sign-asan dudect-sign bench-sign compare-sign check-symbols test-ct test-ct-sde test-ct-qemu dudect mca mca-validate pk-test-ifma pk-bench-ifma fuzz fuzz-smoke test-hypothesis pk-test-fast pk-bench-fast pk-test pk-test-s2n pk-asan pk-bench pk-bench-s2n all test test-quick test-vectors compare asan bench avx512 licence example-check format lint hooks clean test-rsaz pk-test-rsaz pk-bench-rsaz pk-test-rsaz8 pk-test-es8

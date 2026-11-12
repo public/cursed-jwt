@@ -24,6 +24,18 @@
  * Checked by tests/test_ct.c (valgrind, the seed marked secret), tests/ct_trace.c (identical instruction and address
  * traces under two seeds, SDE / qemu) and tests/dudect_sign.c (fixed vs random seed). */
 
+#if defined(CC_S2N) && (defined(__x86_64__) || defined(__aarch64__))
+/* -DJWT_S2N: [n] B is s2n-bignum's edwards25519_scalarmulbase (formally verified; constant time: its table is read
+ * with cmov / csel over whole blocks, and it returns the affine point, fully reduced, after its own constant-time
+ * inversion).  On x86-64 it needs BMI2 + ADX; the _alt version (plain mul / adc) runs everywhere else.  The key then
+ * keeps no table, and a batch needs no shared inversion. */
+#define CC_SIGN_S2N 1
+void cc_s2n_edwards25519_scalarmulbase(uint64_t res[8], const uint64_t scalar[4]);
+#if defined(__x86_64__)
+void cc_s2n_edwards25519_scalarmulbase_alt(uint64_t res[8], const uint64_t scalar[4]);
+#endif
+#endif
+
 typedef uint64_t sg_fe[5]; /* fiat's 5 x 51-bit limbs */
 typedef struct {
     sg_fe X, Y, Z, T; /* extended: x = X/Z, y = Y/Z, xy = T/Z */
@@ -35,10 +47,12 @@ typedef uint64_t sg_sc[4]; /* a scalar mod L, 4 x 64-bit little-endian limbs (fi
 
 struct cc_skey {
     int alg;
+#ifndef CC_SIGN_S2N
     sg_niels tab[32][8]; /* tab[j][i] = (i + 1) 256^j B: public */
-    sg_sc a_m;           /* the secret scalar a mod L, Montgomery form */
-    uint8_t prefix[32];  /* the nonce key */
-    uint8_t pub[32];     /* A, encoded */
+#endif
+    sg_sc a_m;          /* the secret scalar a mod L, Montgomery form */
+    uint8_t prefix[32]; /* the nonce key */
+    uint8_t pub[32];    /* A, encoded */
 };
 
 /* ---- field helpers: fiat calls only ---- */
@@ -163,6 +177,28 @@ static void sg_encode(uint8_t out[32], const sg_p3 *P, const sg_fe zi) {
     cc_wipe(x, sizeof x), cc_wipe(y, sizeof y), cc_wipe(xb, sizeof xb);
 }
 
+#ifdef CC_SIGN_S2N
+/* out = the encoding of [s] B, for a scalar s given as 32 little-endian bytes */
+static void sg_base_encode_s2n(uint8_t out[32], const uint8_t s[32]) {
+    uint64_t sc[4], res[8];
+    for (int i = 0; i < 4; i++) {
+        uint64_t v = 0;
+        for (int j = 7; j >= 0; j--) v = v << 8 | s[8 * i + j];
+        sc[i] = v;
+    }
+#if defined(__x86_64__)
+    if (s2n_ok()) cc_s2n_edwards25519_scalarmulbase(res, sc); /* (a branch on the CPU, not on the data) */
+    else cc_s2n_edwards25519_scalarmulbase_alt(res, sc);
+#else
+    cc_s2n_edwards25519_scalarmulbase(res, sc);
+#endif
+    for (int i = 0; i < 4; i++) /* y, little-endian, then the parity of x in the top bit */
+        for (int j = 0; j < 8; j++) out[8 * i + j] = (uint8_t)(res[4 + i] >> (8 * j));
+    out[31] |= (uint8_t)((res[0] & 1) << 7);
+    cc_wipe(sc, sizeof sc), cc_wipe(res, sizeof res);
+}
+#endif
+
 /* ---- scalars mod L: fiat's Montgomery arithmetic ---- */
 /* x mod L, Montgomery form, for a 512-bit little-endian x: x = x0 + x1 2^252 + x2 2^504 with x0, x1 < 2^252 and
  * x2 < 2^8, all < L, so each is a valid fiat input. */
@@ -245,10 +281,12 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     cc_skey_t *k = calloc(1, sizeof *k);
     if (!k) return NULL;
     k->alg = CC_PK_ED25519;
+#ifndef CC_SIGN_S2N
     if (!sg_table(k->tab)) {
         free(k);
         return NULL;
     }
+#endif
     uint8_t h[64], a[64] = { 0 };
     cc_sha512(seed, 32, h);
     memcpy(a, h, 32);
@@ -257,12 +295,17 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     sg_sc_reduce(k->a_m, a); /* a mod L: [a] B = [a mod L] B, and S needs it reduced */
     uint8_t ar[32];
     sg_sc_bytes(ar, k->a_m);
+#ifdef CC_SIGN_S2N
+    sg_base_encode_s2n(k->pub, ar);
+#else
     sg_p3 A;
     sg_fe zi;
     sg_base_mul(&A, (const sg_niels(*)[8])k->tab, ar);
     sg_inv(zi, A.Z);
     sg_encode(k->pub, &A, zi);
-    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar), cc_wipe(&A, sizeof A), cc_wipe(zi, sizeof zi);
+    cc_wipe(&A, sizeof A), cc_wipe(zi, sizeof zi);
+#endif
+    cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar);
     return k;
 }
 void cc_skey_free(cc_skey_t *k) {
@@ -293,8 +336,13 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
             cc_sha512_final(&c, h);
             sg_sc_reduce(r_m[i], h);
             sg_sc_bytes(rb, r_m[i]);
+#ifdef CC_SIGN_S2N
+            sg_base_encode_s2n(sig[base + i], rb); /* R, the signature's first half */
+#else
             sg_base_mul(&R[i], (const sg_niels(*)[8])k->tab, rb);
+#endif
         }
+#ifndef CC_SIGN_S2N
         /* one inversion for the batch's Z (Montgomery's trick: multiplications only) */
         memcpy(pre[0], R[0].Z, sizeof(sg_fe));
         for (int i = 1; i < m; i++) SG_MUL(pre[i], pre[i - 1], R[i].Z);
@@ -304,6 +352,7 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
             else memcpy(zi, inv, sizeof zi);
             sg_encode(sig[base + i], &R[i], zi); /* R, the signature's first half */
         }
+#endif
         for (int i = 0; i < m; i++) { /* k = SHA-512(R || A || M) mod L, S = r + k a mod L */
             uint8_t *s = sig[base + i];
             sg_sc km, sm;

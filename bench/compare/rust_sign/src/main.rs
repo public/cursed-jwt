@@ -1,5 +1,6 @@
 // jsonwebtoken 9 signing: HS256 and EdDSA tokens of the claims set of bench/bench_sign.c (a serde struct, the common
-// usage), plus ring's raw Ed25519 sign.  ns/token, best of 5 passes.
+// usage), plus ring's and ed25519-dalek's raw Ed25519 sign.  ns/token, best of 5 passes.
+use ed25519_dalek::Signer;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::Serialize;
@@ -12,6 +13,9 @@ struct Claims {
     iat: u64,
     exp: u64,
 }
+
+// the signing input of bench/bench_sign.c's claims set under the EdDSA header
+const SI: &[u8] = b"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTYiLCJ1c2VybmFtZSI6ImFsaWNlIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQxMDI0NDQ4MDB9";
 
 fn best<F: FnMut()>(name: &str, mut f: F) {
     let mut b = f64::MAX;
@@ -54,7 +58,9 @@ fn main() {
     best("jsonwebtoken EdDSA encode", || {
         sink += encode(&he, &c, &ek).unwrap().len()
     });
-    best("ring Ed25519 sign (raw)", || sink += kp.sign(b"message").as_ref().len());
+    best("ring Ed25519 sign (raw)", || sink += kp.sign(SI).as_ref().len());
+    let dk = ed25519_dalek::SigningKey::from_bytes(&seed.clone().try_into().unwrap());
+    best("ed25519-dalek sign (raw)", || sink += dk.sign(SI).to_bytes().len());
     let _ = kp.public_key();
     if sink == 42 {
         println!();
