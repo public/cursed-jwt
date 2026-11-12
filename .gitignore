@@ -32,3 +32,7 @@ oom-*
 /rust/fuzz/corpus/
 /rust/fuzz/artifacts/
 /rust/fuzz/coverage/
+# contrib/python: sources copied in by setup.py, packaging output
+/contrib/python/vendor/
+/contrib/python/dist/
+*.egg-info/

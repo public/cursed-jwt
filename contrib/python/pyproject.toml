@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursed-crypto"
+version = "0.1.0"
+description = "Batch (multi-buffer) signature and HMAC verification for pyca/cryptography key objects, backed by cursed-crypto"
+readme = "README.md"
+license = "MIT"
+license-files = ["vendor/LICENSE", "vendor/licenses/*"]
+requires-python = ">=3.9"
+dependencies = ["cryptography>=42"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C",
+  "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Source = "https://github.com/public/cursed-jwt"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["cursed_crypto"]
+
+[tool.setuptools.package-data]
+cursed_crypto = ["py.typed"]

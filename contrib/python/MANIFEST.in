@@ -1,0 +1,6 @@
+graft vendor
+include src/cursed_crypto/_native.c
+include README.md Makefile
+graft tests
+graft bench
+global-exclude *.o *.so *.pyc __pycache__
