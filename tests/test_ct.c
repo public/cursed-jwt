@@ -16,6 +16,8 @@
  *            primitives on their own with their inputs secret: SHA-512, the reduction mod L of a 512-bit value (r),
  *            the fixed-base multiplication [r] B and the field inversion.  Only the outputs are declassified, to
  *            check them against a key built from the same bytes left public.  Expect 0 errors.
+ *            ES256: d marked secret through cc_skey_es256 and cc_sign_batch (RFC 6979, [k] G, k^-1, s), and the DRBG,
+ *            [k] G and k^-1 on their own with secret inputs; RFC 6979's retry bits are declassified (CC_DECLASSIFY).
  *   sign-control  the positive control for `sign`: the verify side's variable-time scalar reduction and signed-digit
  *            recoding (cc_ed25519.inc) on a secret scalar.  Memcheck must report errors here (make test-ct checks
  *            that it does), which shows that the sign path's clean run is not an artifact of the set-up.
@@ -28,9 +30,11 @@
  *   valgrind --error-exitcode=1 ./build/test_ct key
  *   valgrind ./build/test_ct token 2>&1 | grep -A3 'depends on uninitialised'
  * Without valgrind the client requests are no-ops, and the test only checks the MACs. */
+#include <valgrind/memcheck.h>
+/* ES256's RFC 6979 retry bits are public by the algorithm (cc_sign_es256.inc): the signer declassifies them here */
+#define CC_DECLASSIFY(p, n) VALGRIND_MAKE_MEM_DEFINED(p, n)
 #include "jwt.c"
 #include <stdio.h>
-#include <valgrind/memcheck.h>
 
 static uint32_t mac_ref[17][8], mac_got[17][8];
 static uint8_t msgbuf[17][320];
@@ -123,6 +127,55 @@ static int sign_hs(const uint8_t *secret, size_t slen) {
     printf("  sign: HS256 jwt_sign_batch %d runs, %s\n", runs, bad ? "TOKEN MISMATCH" : "tokens match");
     return bad;
 }
+/* ES256: d secret through key setup ([d] G), then batches of 1..9 signatures (RFC 6979 on d, [k] G, k^-1, s); then
+ * the primitives with secret inputs: the DRBG, [k] G and k^-1 mod n */
+static int sign_es(void) {
+    uint8_t d[32], sig[9][64], ref[9][64], *sp[9], *rp[9], qx[32], qy[32], rx[32], ry[32];
+    const uint8_t *mp[9];
+    int bad = 0, runs = 0;
+    for (int t = 0; t < 2; t++) {
+        for (int i = 0; i < 32; i++) d[i] = (uint8_t)(i * 37 + 11 * t + 1);
+        d[0] &= 0x7f;
+        cc_skey_t *kp = cc_skey_es256(d);
+        VALGRIND_MAKE_MEM_UNDEFINED(d, 32); /* the private key is secret from here on */
+        cc_skey_t *ks = cc_skey_es256(d);
+        VALGRIND_MAKE_MEM_UNDEFINED(ks->es_dm, sizeof ks->es_dm), VALGRIND_MAKE_MEM_UNDEFINED(ks->es_d, 32);
+        cc_skey_es256_public(ks, qx, qy), cc_skey_es256_public(kp, rx, ry);
+        VALGRIND_MAKE_MEM_DEFINED(qx, 32), VALGRIND_MAKE_MEM_DEFINED(qy, 32);
+        bad += memcmp(qx, rx, 32) != 0 || memcmp(qy, ry, 32) != 0;
+        for (int n = 1; n <= 9; n += 4) {
+            for (int i = 0; i < n; i++)
+                sp[i] = sig[i], rp[i] = ref[i], mp[i] = msgbuf[i], ml[i] = (n * 23 + i * 41) % 301;
+            cc_sign_batch(kp, n, mp, ml, rp);
+            cc_sign_batch(ks, n, mp, ml, sp);
+            VALGRIND_MAKE_MEM_DEFINED(sig, sizeof sig); /* the signatures are output */
+            for (int i = 0; i < n; i++) bad += memcmp(sig[i], ref[i], 64) != 0;
+            runs++;
+        }
+        cc_skey_free(ks), cc_skey_free(kp);
+    }
+    /* the primitives on their own */
+    uint64_t k[4], k2[4], ki[4], ki2[4];
+    uint8_t x1[32], y1[32], x2[32], y2[32], h[32], dd[32];
+    for (int t = 0; t < 4; t++) {
+        for (int i = 0; i < 32; i++) h[i] = (uint8_t)(i * 13 + t), dd[i] = (uint8_t)(i * 7 + 3 * t + 1);
+        dd[0] &= 0x7f;
+        es_drbg g, g2;
+        es_drbg_init(&g2, dd, h), es_drbg_next(&g2, k2, 0); /* public copy */
+        VALGRIND_MAKE_MEM_UNDEFINED(dd, 32);
+        es_drbg_init(&g, dd, h), es_drbg_next(&g, k, 0); /* the RFC 6979 DRBG on a secret d */
+        es_base_mul(x1, y1, k);                          /* [k] G of a secret k */
+        es_inv_n(ki, k);                                 /* k^-1 mod n of a secret k */
+        es_base_mul(x2, y2, k2), es_inv_n(ki2, k2);
+        VALGRIND_MAKE_MEM_DEFINED(x1, 32), VALGRIND_MAKE_MEM_DEFINED(y1, 32), VALGRIND_MAKE_MEM_DEFINED(ki, 32);
+        bad += memcmp(x1, x2, 32) != 0 || memcmp(y1, y2, 32) != 0 || memcmp(ki, ki2, 32) != 0;
+        runs++;
+    }
+    printf("  sign: ES256 cc_skey_es256 + cc_sign_batch + DRBG / [k] G / k^-1 %d runs, %s\n", runs,
+           bad ? "MISMATCH" : "outputs match");
+    return bad;
+}
+
 static int sign_ed(void) {
     uint8_t seed[32], pub[32], pubref[32], sig[17][64], ref[17][64], *sp[17], *rp[17];
     const uint8_t *mp[17];
@@ -228,6 +281,11 @@ int main(int argc, char **argv) {
         sc_reduce512(kk, h); /* verify-side: variable time, so it must be flagged on a secret */
         ed_recode(d, kk);
         VALGRIND_MAKE_MEM_DEFINED(d, sizeof d);
+        int16_t pd[P256_NW]; /* and the ES256 verifier's signed-digit recoding of a secret scalar */
+        VALGRIND_MAKE_MEM_UNDEFINED(kk, sizeof kk);
+        p256_recode(pd, kk);
+        VALGRIND_MAKE_MEM_DEFINED(pd, sizeof pd);
+        d[0] ^= pd[0];
         printf("test_ct sign-control: done (memcheck must have reported errors above)\n");
         return d[0] == 12345;
     }
@@ -239,6 +297,7 @@ int main(int argc, char **argv) {
         for (size_t slen = 0; slen <= 130; slen += 65) bad += sign_hs(secret, slen);
 #ifndef JWT_NO_PK
         bad += sign_ed();
+        bad += sign_es();
 #endif
         printf("test_ct sign: %s (memcheck reports any secret-dependent branch or address above)\n",
                bad ? "FAIL" : "outputs OK");

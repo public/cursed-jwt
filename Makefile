@@ -205,7 +205,7 @@ $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 SDE ?= sde64
 test-ct-sde: $(B)/ct_trace $(B)/ct_trace_portable
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
-	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable sign_ed   # the portable Ed25519 signer
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable "sign_ed sign_es"   # the portable signers
 # the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
 CROSS ?= aarch64-linux-gnu-
 QEMU ?= qemu-aarch64

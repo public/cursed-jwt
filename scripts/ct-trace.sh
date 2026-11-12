@@ -10,7 +10,7 @@ set -eu
 if [ "$1" = --qemu ]; then
   MODE=qemu QEMU="$2" EXECLOG="$3" BIN="$4"
   shift 4
-  ENGINES="${1:-scalar neon sha2_1 sha2_2 sha2 verify sign_hs sign_ed}"
+  ENGINES="${1:-scalar neon sha2_1 sha2_2 sha2 verify sign_hs sign_ed sign_es}"
   NM="${NM:-aarch64-linux-gnu-nm}"
   # execlog prints each pc as 0x%x; nm pads to 16 digits
   BEGIN="0x$("$NM" "$BIN" | awk '$3=="ct_trace_begin"{print $1}' | sed 's/^0*//')"
@@ -21,7 +21,7 @@ if [ "$1" = --qemu ]; then
   fi
 else
   MODE=sde SDE="$1" BIN="$2"
-  ENGINES="${3:-scalar ossl avx2 shani_1 shani_2 shani_4 avx512 zmm shani_4r x16 shani_x16 verify sign_hs sign_ed}"
+  ENGINES="${3:-scalar ossl avx2 shani_1 shani_2 shani_4 avx512 zmm shani_4r x16 shani_x16 verify sign_hs sign_ed sign_es}"
 fi
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -66,7 +66,7 @@ for e in $ENGINES; do
     continue
   }
   case $e in
-    sign_ed) ns="1 3" ;; # ~1M instructions per signature with key setup: batch 3 already covers the batched inversion
+    sign_ed | sign_es) ns="1 3" ;; # ~1M instructions per signature with key setup: batch 3 already covers the batched inversion
     *) ns="1 3 16" ;;
   esac
   for n in $ns; do
