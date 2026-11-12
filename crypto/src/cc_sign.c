@@ -212,6 +212,7 @@ static int sg_table(sg_niels tab[32][8]) {
     sg_set(den, 121666), sg_inv(den, den);
     SG_MUL(d2, num, den);
     sg_p3 base, pts[8];
+    memset(&base, 0, sizeof base); /* (every field is set below; for static analysers) */
     fiat_25519_from_bytes(base.X, bx), fiat_25519_from_bytes(base.Y, by);
     sg_set(base.Z, 1), SG_MUL(base.T, base.X, base.Y);
     sg_fe z[256], pre[256], inv, zi, x, y;
@@ -280,6 +281,7 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
         int m = n - base < CH ? n - base : CH;
         sg_p3 R[CH];
         sg_sc r_m[CH];
+        memset(R, 0, sizeof R); /* (m >= 1 entries are set below; for static analysers) */
         sg_fe pre[CH], inv, zi;
         uint8_t h[64], rb[32];
         cc_sha512_ctx c;
