@@ -1,6 +1,7 @@
 # cursed-jwt
 #   make              build/libcursedjwt.a + build/libcursedcrypto.a + build/verify (no dependencies; see Libraries)
 #   make JCC=1        the same, for Intel Skylake .. Cascade Lake only (JCC-erratum-safe code; see JCC below)
+#   make TUNED=1      the same plus the opt-in tuned kernels (README.md, Options; see TUNED below)
 #   make test         differential test vs OpenSSL (needs libcrypto: Homebrew openssl@3 / libssl-dev)
 #   make test-quick   the same with fewer random iterations (CI)
 #   make test-vectors + RFC 4231, NIST CAVP, Wycheproof, RFC 7515 and pyca/cryptography vectors (network)
