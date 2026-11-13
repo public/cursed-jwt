@@ -686,9 +686,44 @@ static void mont_sqr_om(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
     cc_ossl_bn_mul_mont(r, a, a, k->n, &k->n0, k->nl);
 }
 #endif
+#if defined(CC_TUNED_RSA_IPP) && defined(__x86_64__) && defined(__ELF__)
+/* -DCC_TUNED_RSA_IPP (opt-in: make TUNED=1 or TUNED_RSA_IPP=1): Intel Cryptography Primitives' (ippcp) schoolbook
+ * multiply / square followed by a separate Montgomery reduction, for RSA-2048 on BMI2 CPUs without ADX (mulx with
+ * add/adc chains), extracted from ippcp's k0 build (crypto/src/ippcp_mont_k0.asm).  Other sizes keep bn_mul_mont:
+ * only 2048 bits was measured.  As in ippcp, leaving the Montgomery domain
+ * is a bare reduction instead of a multiplication by 1.  Taken only where s2n-bignum and OpenSSL's mulx/adx paths
+ * can't run (BMI2 without ADX: many cloud VMs hide ADX); RSA verify there is about 5% faster than OpenSSL's
+ * bn_mul_mont (README.md, Options). */
+#define CC_HAVE_IPP_MONT 1
+void cc_ipp_mul_school(uint64_t *r, const uint64_t *a, int na, const uint64_t *b, int nb);
+void cc_ipp_sqr_school(uint64_t *r, const uint64_t *a, int na);
+void cc_ipp_mont_red(uint64_t *r, uint64_t *prod, const uint64_t *m, int nm, uint64_t m0);
+static void mont_mul_ipp(uint64_t *r, const uint64_t *a, const uint64_t *b, const rsa_key_t *k) {
+    uint64_t t[2 * RSA_MAXL];
+    cc_ipp_mul_school(t, a, k->nl, b, k->nl);
+    cc_ipp_mont_red(r, t, k->n, k->nl, k->n0);
+}
+static void mont_sqr_ipp(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
+    uint64_t t[2 * RSA_MAXL];
+    cc_ipp_sqr_school(t, a, k->nl);
+    cc_ipp_mont_red(r, t, k->n, k->nl, k->n0);
+}
+static void mont_red_ipp(uint64_t *r, const uint64_t *a, const rsa_key_t *k) {
+    uint64_t t[2 * RSA_MAXL] = { 0 };
+    memcpy(t, a, sizeof(uint64_t) * k->nl);
+    cc_ipp_mont_red(r, t, k->n, k->nl, k->n0);
+}
+static int ipp_mont_ok(void) { /* BMI2 (implied by CC_CPU_AVX2) without ADX */
+    unsigned f = cc_cpu();
+    return (f & CC_CPU_AVX2) && !(f & CC_CPU_BMI2_ADX);
+}
+#endif
 static mont_ops_t mont_for(const rsa_key_t *k) {
 #ifdef CC_S2N
     if (k->nl == 32 && s2n_ok()) return (mont_ops_t){ mont_mul_s2n, mont_sqr_s2n };
+#endif
+#ifdef CC_HAVE_IPP_MONT
+    if (k->nl == 32 && ipp_mont_ok()) return (mont_ops_t){ mont_mul_ipp, mont_sqr_ipp }; /* RSA-2048: measured */
 #endif
 #ifdef CC_HAVE_OSSL_MONT
     if (k->nl % 4 == 0) return (mont_ops_t){ mont_mul_om, mont_sqr_om }; /* every RSA size we accept (256..512 B) */
@@ -1064,7 +1099,11 @@ static int rsa_one(const rsa_key_t *k, mont_ops_t mo, const uint64_t *s, const u
     uint64_t sr[RSA_MAXL], x[RSA_MAXL], one[RSA_MAXL] = { 1 };
     mo.mul(sr, s, k->r2, k);
     rsa_pow(x, sr, k->e, k, mo);
-    mo.mul(x, x, one, k);
+#ifdef CC_HAVE_IPP_MONT
+    if (mo.mul == mont_mul_ipp) mont_red_ipp(x, x, k); /* ippcp's kernels: a bare reduction */
+    else
+#endif
+        mo.mul(x, x, one, k);
     uint64_t d = 0;
     for (int j = 0; j < k->nl; j++) d |= x[j] ^ em[j];
     return d == 0;

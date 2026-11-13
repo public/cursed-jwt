@@ -55,10 +55,21 @@ endif
 # TUNED=1: every opt-in tuned kernel (README.md, Options), each measured faster on the CPUs its row names and taken at
 # run time only where the CPU can run it; the defaults stay as they are.  TUNED_<KERNEL>=1 enables one alone and
 # TUNED_<KERNEL>=0 drops one from TUNED=1 (for bisecting); each sets -DCC_TUNED_<KERNEL>.
+#   TUNED_RSA_IPP  ippcp's mulx Montgomery kernels for RSA on x86-64 with BMI2 but no ADX (crypto/src/ippcp_mont_k0.asm,
+#                  scripts/extract-ippcp-mont.sh); assembling it needs NASM ($(NASM))
 #   TUNED_ES256_NISTZ  OpenSSL's ecp_nistz256 for ES256 signing's [k] G on x86-64 without ADX
 #                      (crypto/src/ecp_nistz256_x86_64_ossl.S, scripts/extract-openssl-nistz256.sh)
 ifeq ($(TUNED),1)
+TUNED_RSA_IPP ?= 1
 TUNED_ES256_NISTZ ?= 1
+endif
+NASM ?= nasm
+ifeq ($(TUNED_RSA_IPP)-$(OSSL_SHA),1-1)
+MONTOBJ += $(B)/ippcp_mont_k0.o
+SHAOBJ += $(B)/ippcp_mont_k0.o
+SHAFLAG += -DCC_TUNED_RSA_IPP
+X86MONT += -DCC_TUNED_RSA_IPP $(B)/ippcp_mont_k0.o
+X86SHA := $(SHAFLAG) $(SHAOBJ)
 endif
 ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
 SHAOBJ += $(B)/ecp_nistz256_x86_64_ossl.o
@@ -107,6 +118,8 @@ $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont5_x86_64_ossl.o: crypto/src/bn_mont5_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
+$(B)/ippcp_mont_k0.o: crypto/src/ippcp_mont_k0.asm | $(B)
+	$(NASM) -f elf64 $< -o $@
 # s2n-bignum's constant-time Ed25519 fixed-base kernels (vendored, crypto/src/s2n/, MIT-0): Ed25519 signing's [n]B
 $(ED25519OBJ): $(B)/%.o: crypto/src/s2n/%.S crypto/src/s2n/_internal_s2n_bignum_x86.h | $(B)
 	$(CC) $(ASJCC) -c -DS2N_BN_HIDE_SYMBOLS=1 -D$*=cc_s2n_$* $< -o $@

@@ -447,6 +447,54 @@ static void es8_lanes(const jwt_pkey_t *k, rv_t *v, int n) {
 }
 #endif
 
+#if defined(CC_HAVE_IPP_MONT) && defined(CC_HAVE_OSSL_MONT)
+/* -DCC_TUNED_RSA_IPP: ippcp's multiply / square / reduction against OpenSSL's bn_mul_mont (the default kernel), exact
+ * outputs, for every RSA size accepted (32..64 limbs, 4-limb steps) plus small sizes: random operands and moduli,
+ * all-ones and sparse moduli, operands 0, 1, n - 1, and both n - 1 */
+static void test_ipp_mont(void) {
+    static const int sizes[] = { 32, 36, 40, 44, 48, 52, 56, 60, 64, 4, 8, 16, 24 };
+    int bad = 0, n_checks = 0;
+    for (size_t si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+        rsa_key_t k;
+        memset(&k, 0, sizeof k);
+        k.nl = sizes[si];
+        for (int it = 0; it < 300; it++) {
+            for (int j = 0; j < k.nl; j++) k.n[j] = (uint64_t)rnd() << 32 | rnd();
+            if (it % 7 == 0) memset(k.n, 0xff, sizeof(uint64_t) * k.nl);
+            if (it % 11 == 0) memset(k.n + 1, 0, sizeof(uint64_t) * (k.nl - 2));
+            k.n[0] |= 1, k.n[k.nl - 1] |= 1ull << 63;
+            uint64_t inv = 1;
+            for (int i = 0; i < 6; i++) inv *= 2 - k.n[0] * inv;
+            k.n0 = -inv;
+            for (int c = 0; c < 6; c++) {
+                uint64_t a[RSA_MAXL], b[RSA_MAXL], r1[RSA_MAXL], r2[RSA_MAXL], one[RSA_MAXL] = { 1 };
+                for (int j = 0; j < k.nl; j++)
+                    a[j] = (uint64_t)rnd() << 32 | rnd(), b[j] = (uint64_t)rnd() << 32 | rnd();
+                a[k.nl - 1] >>= 1, b[k.nl - 1] >>= 1; /* < n: n's top bit is set */
+                switch ((it + c) % 6) {
+                    case 0: memset(a, 0, sizeof a); break;
+                    case 1: memset(a, 0, sizeof a), a[0] = 1; break;
+                    case 2: memcpy(a, k.n, sizeof a), a[0] -= 1; break; /* n - 1 (n odd) */
+                    case 3: memcpy(a, k.n, sizeof a), a[0] -= 1, memcpy(b, a, sizeof b); break;
+                    default: break;
+                }
+                mont_mul_om(r1, a, b, &k), mont_mul_ipp(r2, a, b, &k);
+                bad += memcmp(r1, r2, sizeof(uint64_t) * k.nl) != 0;
+                mont_sqr_om(r1, a, &k), mont_sqr_ipp(r2, a, &k);
+                bad += memcmp(r1, r2, sizeof(uint64_t) * k.nl) != 0;
+                mont_mul_om(r1, a, one, &k), mont_red_ipp(r2, a, &k);
+                bad += memcmp(r1, r2, sizeof(uint64_t) * k.nl) != 0;
+                n_checks += 3;
+            }
+        }
+    }
+    CHECK(bad == 0, "ippcp Montgomery kernels: %d of %d differ from bn_mul_mont", bad, n_checks);
+    printf("  ippcp Montgomery kernels (TUNED_RSA_IPP): %d mul / sqr / reduction checks vs bn_mul_mont%s\n", n_checks,
+           ipp_mont_ok() ? ", and the RSA path uses them on this CPU"
+                         : " (this CPU has ADX: RSA takes another kernel)");
+}
+#endif
+
 int main(int argc, char **argv) {
     printf("  cpu features 0x%x", jwt_cpu_features());
 #ifdef JWT_CRYPTO_MB
@@ -467,6 +515,9 @@ int main(int argc, char **argv) {
 #endif
     printf("\n");
     test_arith();
+#if defined(CC_HAVE_IPP_MONT) && defined(CC_HAVE_OSSL_MONT)
+    test_ipp_mont();
+#endif
 #ifdef CC_ED_S2N
     test_r43();
 #endif
