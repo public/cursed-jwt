@@ -45,6 +45,22 @@
   - Modifications: type and attribute definitions in place of Firedancer's `fd_util` headers, a target pragma
     around the file. Used for EdDSA comb additions on AVX-512 IFMA CPUs with FAST_ZMM (`-DJWT_S2N`, x86-64).
 
+- **OpenSSL `ecp_nistz256` for x86-64**: `crypto/src/ecp_nistz256_x86_64_ossl.S`.
+  - Copyright 2014-2025 The OpenSSL Project Authors; Copyright (c) 2014, Intel Corporation; Copyright (c) 2015
+    CloudFlare, Inc.; originally written by Shay Gueron and Vlad Krasnov. Apache License 2.0, full text in
+    [licenses/OpenSSL-LICENSE.txt](licenses/OpenSSL-LICENSE.txt).
+  - Generated from OpenSSL 3.6.0 (commit `7b371d8`) `crypto/ec/asm/ecp_nistz256-x86_64.pl` and the generator table in
+    `crypto/ec/ecp_nistz256_table.c` by `scripts/extract-openssl-nistz256.sh`, which fetches them pinned and
+    SHA-256-checked.
+  - **Modifications:**
+    - symbols renamed: `ecp_nistz256_*` → `cc_ossl_ecp_nistz256_*` (hidden), `OPENSSL_ia32cap_P` →
+      `cc_ossl_ia32cap_P`, filled by `crypto/src/cc_sha256.c` from CPUID;
+    - a `.note.GNU-stack` section added;
+    - nothing else. The window loop that calls it (`nz_base_mul` in `crypto/src/cc_sign_es256.inc`) follows OpenSSL's
+      `ecp_nistz256_points_mul` for the generator, with the final inversion done by s2n-bignum's `bignum_modinv`.
+  - Used only when built with `make TUNED=1` or `TUNED_ES256_NISTZ=1` (`-DCC_TUNED_ES256_NISTZ`), for ES256 signing on
+    x86-64 CPUs without ADX.
+
 - **s2n-bignum's `edwards25519_scalarmulbase` for x86-64** (https://github.com/awslabs/s2n-bignum, commit
   `3306729`): `crypto/src/s2n/edwards25519_scalarmulbase.S`, `edwards25519_scalarmulbase_alt.S` and
   `_internal_s2n_bignum_x86.h`.

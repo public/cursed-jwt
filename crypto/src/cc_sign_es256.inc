@@ -159,12 +159,90 @@ static void es_select(es_pt *Q, const uint64_t *row, int8_t d) {
     for (int w = 0; w < 4; w++) Q->Y[w] ^= (Q->Y[w] ^ ny[w]) & mn;
     cc_wipe(acc, sizeof acc), cc_wipe(ny, sizeof ny);
 }
+#if defined(CC_ES256_S2N) && defined(CC_TUNED_ES256_NISTZ)
+/* -DCC_TUNED_ES256_NISTZ (opt-in: make TUNED=1 or TUNED_ES256_NISTZ=1), for x86-64 CPUs without ADX: [k] G as
+ * OpenSSL's ecp_nistz256_points_mul does it for the generator (crypto/src/ecp_nistz256_x86_64_ossl.S): 37 Booth-recoded
+ * 7-bit windows of k, each reading its whole 64-point row of OpenSSL's table (gather_w7: every entry loaded, masks
+ * select one) and added by ecp_nistz256_point_add_affine, then 1 / Z by s2n-bignum's bignum_modinv (constant-time
+ * divsteps, as for k^-1) instead of OpenSSL's Fermat chain.  No branch or address depends on k.  The additions are not
+ * complete, but for k in [1, n) the running sum never equals the table point added (as in OpenSSL); the identity
+ * (a zero digit) is handled by the assembly with masks.  About 26% faster than s2n's p256_scalarmulbase_alt with the
+ * blocksize-4 table on Cascade Lake (README.md, Options). */
+#define CC_ES256_NISTZ 1
+typedef struct {
+    uint64_t X[4], Y[4], Z[4];
+} nz_pt;
+typedef struct {
+    uint64_t X[4], Y[4];
+} nz_apt;
+void cc_ossl_ecp_nistz256_gather_w7(nz_apt *v, const nz_apt *tbl, int idx);
+void cc_ossl_ecp_nistz256_neg(uint64_t r[4], const uint64_t a[4]);
+void cc_ossl_ecp_nistz256_point_add_affine(nz_pt *r, const nz_pt *a, const nz_apt *b);
+void cc_ossl_ecp_nistz256_mul_mont(uint64_t r[4], const uint64_t a[4], const uint64_t b[4]);
+void cc_ossl_ecp_nistz256_sqr_mont(uint64_t r[4], const uint64_t a[4]);
+void cc_ossl_ecp_nistz256_to_mont(uint64_t r[4], const uint64_t a[4]);
+void cc_ossl_ecp_nistz256_from_mont(uint64_t r[4], const uint64_t a[4]);
+extern const nz_apt cc_ossl_ecp_nistz256_precomputed[37][64];
+static const uint64_t ES_P[4] = { 0xffffffffffffffffull, 0x00000000ffffffffull, 0x0000000000000000ull,
+                                  0xffffffff00000001ull };
+static unsigned nz_booth7(unsigned in) { /* OpenSSL's _booth_recode_w7: arithmetic only */
+    unsigned s = ~((in >> 7) - 1), d = (1u << 8) - in - 1;
+    d = (d & s) | (in & ~s);
+    d = (d >> 1) + (d & 1);
+    return (d << 1) + (s & 1);
+}
+static void nz_neg_if(uint64_t y[4], unsigned neg) { /* y = -y mod p if neg (0 or 1), by masks */
+    uint64_t t[4], m = es_mask(neg);
+    cc_ossl_ecp_nistz256_neg(t, y);
+    for (int i = 0; i < 4; i++) y[i] ^= (y[i] ^ t[i]) & m;
+    cc_wipe(t, sizeof t);
+}
+static void nz_base_mul(uint64_t res[8], const uint64_t k[4]) {
+    uint8_t s[33];
+    nz_pt p;
+    nz_apt t;
+    for (int i = 0; i < 32; i++) s[i] = (uint8_t)(k[i / 8] >> (8 * (i % 8)));
+    s[32] = 0;
+    unsigned w = nz_booth7((unsigned)(s[0] << 1) & 0xff), idx = 7;
+    cc_ossl_ecp_nistz256_gather_w7((nz_apt *)&p, cc_ossl_ecp_nistz256_precomputed[0], (int)(w >> 1));
+    nz_neg_if(p.Y, w & 1);
+    /* the table encodes the identity as (0, 0); in Jacobian form it is Z = 0, so Z = R (one) unless X = Y = 0 */
+    uint64_t acc = 0;
+    for (int i = 0; i < 4; i++) acc |= p.X[i] | p.Y[i];
+    uint64_t one = es_mask((~acc & (acc - 1)) >> 63 ^ 1); /* all ones unless acc == 0 */
+    for (int i = 0; i < 4; i++) p.Z[i] = ES_ONE_M[i] & one;
+    for (int i = 1; i < 37; i++) {
+        unsigned off = (idx - 1) / 8; /* public: the window's position */
+        w = ((unsigned)s[off] | (unsigned)s[off + 1] << 8) >> ((idx - 1) % 8) & 0xff;
+        idx += 7;
+        w = nz_booth7(w);
+        cc_ossl_ecp_nistz256_gather_w7(&t, cc_ossl_ecp_nistz256_precomputed[i], (int)(w >> 1));
+        nz_neg_if(t.Y, w & 1);
+        cc_ossl_ecp_nistz256_point_add_affine(&p, &p, &t);
+    }
+    uint64_t zp[4], zi[4], z2[4], tm[12];
+    cc_ossl_ecp_nistz256_from_mont(zp, p.Z);
+    cc_s2n_bignum_modinv(4, zi, zp, ES_P, tm); /* Z != 0: k in [1, n) */
+    cc_ossl_ecp_nistz256_to_mont(zi, zi);
+    cc_ossl_ecp_nistz256_sqr_mont(z2, zi);
+    cc_ossl_ecp_nistz256_mul_mont(res, p.X, z2);
+    cc_ossl_ecp_nistz256_mul_mont(z2, z2, zi);
+    cc_ossl_ecp_nistz256_mul_mont(res + 4, p.Y, z2);
+    cc_ossl_ecp_nistz256_from_mont(res, res), cc_ossl_ecp_nistz256_from_mont(res + 4, res + 4);
+    cc_wipe(s, sizeof s), cc_wipe(&p, sizeof p), cc_wipe(&t, sizeof t), cc_wipe(zp, sizeof zp), cc_wipe(zi, sizeof zi),
+        cc_wipe(z2, sizeof z2), cc_wipe(tm, sizeof tm), cc_wipe(&w, sizeof w);
+}
+#endif
 /* x, y (big-endian bytes) of [k] G for k < n given as 4 little-endian limbs */
 static void es_base_mul(uint8_t x[32], uint8_t y[32], const uint64_t k[4]) {
 #ifdef CC_ES256_S2N
     uint64_t res[8];
     if (cc_cpu() & CC_CPU_BMI2_ADX) cc_s2n_p256_scalarmulbase(res, k, 4, CC_P256_GTAB); /* (a CPU branch) */
+#ifdef CC_ES256_NISTZ
+    else nz_base_mul(res, k);
+#else
     else cc_s2n_p256_scalarmulbase_alt(res, k, 4, CC_P256_GTAB);
+#endif
     es_limbs_to_be(x, res), es_limbs_to_be(y, res + 4);
     cc_wipe(res, sizeof res);
 #else

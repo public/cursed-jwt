@@ -455,6 +455,46 @@ static void roundtrip_es(void) {
            MAXB);
 }
 
+#ifdef CC_ES256_NISTZ
+/* -DCC_TUNED_ES256_NISTZ: OpenSSL ecp_nistz256's [k] G (nz_base_mul) against s2n-bignum's p256_scalarmulbase_alt,
+ * exact affine outputs: random k, single bits, k = 1..300, n - 1..n - 300, Booth-window extremes (every 7-bit window
+ * 0x3f, 0x40, 0x7f or 0x00), all-ones and alternating limbs reduced below n */
+static void nistz_kernel_check(void) {
+    int bad = 0, cnt = 0;
+    uint64_t k[4], r1[8], r2[8];
+    for (int it = 0; it < 20000; it++) {
+        int c = it % 10;
+        for (int j = 0; j < 4; j++) k[j] = (uint64_t)rnd() << 32 | rnd();
+        if (c == 1 && it / 10 < 256) memset(k, 0, 32), k[(it / 10) / 64] = 1ull << ((it / 10) % 64);
+        if (c == 2 && it / 10 < 300) memset(k, 0, 32), k[0] = (uint64_t)(it / 10 + 1);
+        if (c == 3 && it / 10 < 300) { /* n - 1 - j */
+            uint64_t b = (uint64_t)(it / 10 + 1);
+            for (int j = 0; j < 4; j++) {
+                uint64_t v = ES_N[j] - b;
+                b = ES_N[j] < b;
+                k[j] = v;
+            }
+        }
+        if (c == 4) { /* every 7-bit window the same pattern */
+            static const unsigned pat[4] = { 0x3f, 0x40, 0x7f, 0x00 };
+            unsigned p = pat[(it / 10) % 4];
+            memset(k, 0, 32);
+            for (int b = 0; b < 256; b++)
+                if (p >> (b % 7) & 1) k[b / 64] |= 1ull << (b % 64);
+        }
+        if (c == 5) memset(k, (it / 10) % 2 ? 0xff : 0x55, 32);
+        for (int t = 0; t < 2 && !es_in_range(k); t++) es_sub_n_once(k, k); /* < 2^256 < 2n: one subtraction */
+        if (!es_in_range(k)) continue;                                      /* k = 0 or n: not a nonce */
+        cc_s2n_p256_scalarmulbase_alt(r1, k, 4, CC_P256_GTAB);
+        nz_base_mul(r2, k);
+        bad += memcmp(r1, r2, 64) != 0, cnt++;
+    }
+    CHECK(bad == 0, "ecp_nistz256 [k] G: %d of %d differ from s2n-bignum's", bad, cnt);
+    printf("ecp_nistz256 [k] G: %d scalars, %s s2n-bignum's p256_scalarmulbase_alt\n", cnt,
+           bad ? "MISMATCH vs" : "equal to");
+}
+#endif
+
 #ifdef JWT_OPENSSL
 /* RS256 (libcrypto): batches through jwt_verify_batch_pk under the key's own n and e, 2048- and 4096-bit keys */
 static void roundtrip_rs(void) {
@@ -578,6 +618,9 @@ int main(int argc, char **argv) {
     roundtrip_rs();
 #endif
     p256_table_check();
+#ifdef CC_ES256_NISTZ
+    nistz_kernel_check();
+#endif
     printf("test_sign: %d checks, %d failures\n", checks, fails);
     return fails != 0;
 }

@@ -1,6 +1,7 @@
 # cursed-jwt
 #   make              build/libcursedjwt.a + build/libcursedcrypto.a + build/verify (no dependencies; see Libraries)
 #   make JCC=1        the same, for Intel Skylake .. Cascade Lake only (JCC-erratum-safe code; see JCC below)
+#   make TUNED=1      the same plus the opt-in tuned kernels (README.md, Options; see TUNED below)
 #   make test         differential test vs OpenSSL (needs libcrypto: Homebrew openssl@3 / libssl-dev)
 #   make test-quick   the same with fewer random iterations (CI)
 #   make test-vectors + RFC 4231, NIST CAVP, Wycheproof, RFC 7515 and pyca/cryptography vectors (network)
@@ -51,6 +52,19 @@ SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha512_x86_64_ossl.o $(B)/sha256_shani_
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
 endif
+# TUNED=1: every opt-in tuned kernel (README.md, Options), each measured faster on the CPUs its row names and taken at
+# run time only where the CPU can run it; the defaults stay as they are.  TUNED_<KERNEL>=1 enables one alone and
+# TUNED_<KERNEL>=0 drops one from TUNED=1 (for bisecting); each sets -DCC_TUNED_<KERNEL>.
+#   TUNED_ES256_NISTZ  OpenSSL's ecp_nistz256 for ES256 signing's [k] G on x86-64 without ADX
+#                      (crypto/src/ecp_nistz256_x86_64_ossl.S, scripts/extract-openssl-nistz256.sh)
+ifeq ($(TUNED),1)
+TUNED_ES256_NISTZ ?= 1
+endif
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+SHAOBJ += $(B)/ecp_nistz256_x86_64_ossl.o
+SHAFLAG += -DCC_TUNED_ES256_NISTZ
+X86SHA := $(SHAFLAG) $(SHAOBJ)
+endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
 ifneq ($(SSLDIR),)
 SSLINC := -I$(SSLDIR)/include
@@ -86,6 +100,8 @@ $(B)/sha512_x86_64_ossl.o: crypto/src/sha512_x86_64_ossl.S | $(B)
 $(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_x16_avx512.o: crypto/src/sha256_x16_avx512.S | $(B)
+	$(CC) $(ASJCC) -c $< -o $@
+$(B)/ecp_nistz256_x86_64_ossl.o: crypto/src/ecp_nistz256_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
@@ -207,6 +223,9 @@ SDE ?= sde64
 test-ct-sde: $(B)/ct_trace $(B)/ct_trace_portable
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable "sign_ed sign_es"   # the portable signers
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+	SDECPU=-hsw scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace "sign_es"   # Haswell, no ADX: the ecp_nistz256 [k] G
+endif
 # the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
 CROSS ?= aarch64-linux-gnu-
 QEMU ?= qemu-aarch64
