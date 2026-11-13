@@ -155,7 +155,8 @@ void cc_skey_free(cc_skey_t *k);                          /* constant time; wipe
 int cc_skey_alg(const cc_skey_t *k);                      /* CC_PK_* */
 int cc_skey_sig_bytes(const cc_skey_t *k);                /* 64 for Ed25519 */
 void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]); /* the public key, as cc_pkey_ed25519 takes it */
-/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes; ES256 r || s.  Returns the number
+/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes; ES256 r || s; RS256 the
+ * cc_skey_sig_bytes(k)-byte integer (a libcrypto failure gives zeros and counts in the return value).  Returns the number
  * of signatures verify-after-sign rejected (zeroed), 0 without it.
  * constant time (tests: test_ct sign, the sign_ed traces of test-ct-sde / test-ct-qemu, dudect_sign ed) */
 int cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
@@ -169,6 +170,15 @@ void cc_skey_es256_public(const cc_skey_t *k, uint8_t x[32], uint8_t y[32]); /* 
  * (cc_verify_batch, about 1x the cost of signing; the key grows by the verifier's 528 KB tables) before it is released.
  * A signature that fails (a computation fault) is zeroed, and cc_sign_batch returns how many did; 0 otherwise. */
 int cc_skey_verify_after_sign(cc_skey_t *k, int on);
+/* RS256 (RSASSA-PKCS1-v1_5 with SHA-256), delegated to OpenSSL's libcrypto: only in a -DCC_OPENSSL (-DJWT_OPENSSL)
+ * build, linked with -lcrypto; NULL in any other build.  The key is an RSA private key of 2048 to 4096 bits, DER
+ * (PKCS#8 or PKCS#1) or PEM; NULL if it is anything else.  Signatures are the modulus' length (cc_skey_sig_bytes),
+ * byte-identical to OpenSSL's (PKCS#1 v1.5 is deterministic).  Timing and fault checks are libcrypto's (CRT with
+ * blinding, constant-time exponentiation, the result checked against the public key); this library's constant-time
+ * tests don't cover it.  cc_skey_rs256_public gives n and e big-endian, as cc_pkey_rs256 takes them: it returns n's
+ * length, or -1 (no RS256 key, or n / e longer than ncap / ecap). */
+cc_skey_t *cc_skey_rs256(const uint8_t *key, size_t len);
+int cc_skey_rs256_public(const cc_skey_t *k, uint8_t *n, size_t ncap, uint8_t *e, size_t ecap, size_t *elen);
 
 #ifdef __cplusplus
 }
