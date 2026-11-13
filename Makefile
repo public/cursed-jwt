@@ -189,8 +189,9 @@ $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
 sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
-sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv-sign
+sign-test: $(B)/test_sign $(B)/test_sign_openssl $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv-sign
 	./$(B)/test_sign $(B)/sign_vectors.txt
+	./$(B)/test_sign_openssl $(B)/sign_vectors.txt | tail -1   # -DJWT_OPENSSL: RS256 signing too
 	./$(B)/test_sign_portable $(B)/sign_vectors.txt | tail -1   # -DJWT_NO_ED25519_ASM: the portable Ed25519 signer
 	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: s2n-bignum's _alt kernel
 	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
@@ -295,6 +296,8 @@ compare-sign: $(B)/bench_sign $(SRC) | $(B)
 
 # the portable Ed25519 signer (fiat-crypto, no assembly) where the default build uses s2n-bignum's kernel:
 # -DJWT_NO_ED25519_ASM.  make sign-test, test-ct, test-ct-sde and bench-sign check it as well.
+$(B)/test_sign_openssl: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_OPENSSL $(SSLINC) $< $(X86SHA) $(SSLLIB) -lcrypto -o $@
 $(B)/test_sign_portable: tests/test_sign.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/test_ct_portable: tests/test_ct.c $(SRC) | $(B)
