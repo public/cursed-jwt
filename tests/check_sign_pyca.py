@@ -12,8 +12,19 @@ import hashlib
 import hmac
 import json
 import sys
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
+
+DET = ec.ECDSA(hashes.SHA256(), deterministic_signing=True)  # cryptography >= 43
+
+
+def es_check(d, msg, sig):
+    """pyca verifies r || s under d's public key, and its own RFC 6979 signature is the same"""
+    sk = ec.derive_private_key(int.from_bytes(d, "big"), ec.SECP256R1())
+    r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+    sk.public_key().verify(encode_dss_signature(r, s), msg, ec.ECDSA(hashes.SHA256()))
+    assert decode_dss_signature(sk.sign(msg, DET)) == (r, s), "differs from pyca's deterministic ECDSA"
 
 
 def unb64u(s):
@@ -38,7 +49,7 @@ def claims(tok, alg, uid, user):
 
 
 def main():
-    n = {"hs": 0, "ed": 0, "edraw": 0}
+    n = {"hs": 0, "ed": 0, "edraw": 0, "es": 0, "esraw": 0}
     for line in sys.stdin:
         f = line.split()
         if f[0] == "hs":
@@ -56,13 +67,19 @@ def main():
             msg, sig = hx(f[2]), hx(f[3])
             sk.public_key().verify(sig, msg)
             assert sk.sign(msg) == sig, "differs from pyca's signature: " + line
+        elif f[0] == "es":
+            si, sig = claims(f[2], "ES256", f[3], f[4])
+            es_check(hx(f[1]), si, sig)
+        elif f[0] == "esraw":
+            es_check(hx(f[1]), hx(f[2]), hx(f[3]))
         else:
             raise SystemExit("unknown line: " + line)
         n[f[0]] += 1
     assert all(n.values()), n
     print(
-        f"pyca/cryptography + hmac: {n['hs']} HS256 tokens, {n['ed']} EdDSA tokens and {n['edraw']} raw Ed25519 "
-        "signatures verified; every Ed25519 signature equals pyca's"
+        f"pyca/cryptography + hmac: {n['hs']} HS256 tokens, {n['ed']} EdDSA and {n['es']} ES256 tokens, "
+        f"{n['edraw']} raw Ed25519 and {n['esraw']} raw ES256 signatures verified; every Ed25519 and ES256 "
+        "signature equals pyca's (RFC 6979 for ES256)"
     )
 
 

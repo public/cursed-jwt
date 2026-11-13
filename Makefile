@@ -43,10 +43,11 @@ ARCHFLAGS ?=
 ifeq ($(UNAME_M)-$(shell uname -s),x86_64-Linux)
 OSSL_SHA ?= 1
 endif
-ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o
+ED25519OBJ := $(B)/edwards25519_scalarmulbase.o $(B)/edwards25519_scalarmulbase_alt.o $(B)/p256_scalarmulbase.o \
+              $(B)/p256_scalarmulbase_alt.o $(B)/bignum_modinv.o
 ifeq ($(OSSL_SHA),1)
 MONTOBJ := $(B)/bn_mont_x86_64_ossl.o $(B)/bn_mont5_x86_64_ossl.o
-SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM
+SHAFLAG := -DJWT_OSSL_SHA256 -DJWT_OSSL_SHA512 -DJWT_SHANI_MB -DJWT_OSSL_MONT -DJWT_ED25519_ASM -DJWT_ES256_ASM
 SHAOBJ := $(B)/sha256_x86_64_ossl.o $(B)/sha512_x86_64_ossl.o $(B)/sha256_shani_mb.o $(B)/sha256_x16_avx512.o $(MONTOBJ) $(ED25519OBJ)
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 X86MONT := -DJWT_OSSL_MONT $(MONTOBJ)
@@ -56,8 +57,11 @@ endif
 # TUNED_<KERNEL>=0 drops one from TUNED=1 (for bisecting); each sets -DCC_TUNED_<KERNEL>.
 #   TUNED_RSA_IPP  ippcp's mulx Montgomery kernels for RSA on x86-64 with BMI2 but no ADX (crypto/src/ippcp_mont_k0.asm,
 #                  scripts/extract-ippcp-mont.sh); assembling it needs NASM ($(NASM))
+#   TUNED_ES256_NISTZ  OpenSSL's ecp_nistz256 for ES256 signing's [k] G on x86-64 without ADX
+#                      (crypto/src/ecp_nistz256_x86_64_ossl.S, scripts/extract-openssl-nistz256.sh)
 ifeq ($(TUNED),1)
 TUNED_RSA_IPP ?= 1
+TUNED_ES256_NISTZ ?= 1
 endif
 NASM ?= nasm
 ifeq ($(TUNED_RSA_IPP)-$(OSSL_SHA),1-1)
@@ -65,6 +69,11 @@ MONTOBJ += $(B)/ippcp_mont_k0.o
 SHAOBJ += $(B)/ippcp_mont_k0.o
 SHAFLAG += -DCC_TUNED_RSA_IPP
 X86MONT += -DCC_TUNED_RSA_IPP $(B)/ippcp_mont_k0.o
+X86SHA := $(SHAFLAG) $(SHAOBJ)
+endif
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+SHAOBJ += $(B)/ecp_nistz256_x86_64_ossl.o
+SHAFLAG += -DCC_TUNED_ES256_NISTZ
 X86SHA := $(SHAFLAG) $(SHAOBJ)
 endif
 SSLDIR := $(shell brew --prefix openssl@3 2>/dev/null)
@@ -102,6 +111,8 @@ $(B)/sha512_x86_64_ossl.o: crypto/src/sha512_x86_64_ossl.S | $(B)
 $(B)/sha256_shani_mb.o: crypto/src/sha256_shani_mb.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/sha256_x16_avx512.o: crypto/src/sha256_x16_avx512.S | $(B)
+	$(CC) $(ASJCC) -c $< -o $@
+$(B)/ecp_nistz256_x86_64_ossl.o: crypto/src/ecp_nistz256_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
 $(B)/bn_mont_x86_64_ossl.o: crypto/src/bn_mont_x86_64_ossl.S | $(B)
 	$(CC) $(ASJCC) -c $< -o $@
@@ -176,9 +187,14 @@ check-symbols: $(B)/libcursedcrypto.a $(B)/libcursedjwt.a
 SIGN_N ?= 300
 $(B)/test_sign: tests/test_sign.c $(SRC) | $(B)
 	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
-$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv
+# signing's vectors need pyca/cryptography >= 43 (deterministic ECDSA): python3's own if it has it, else a venv
+$(B)/pyenv-sign: | $(B)
+	@if $(PYTHON) -c "from cryptography.hazmat.primitives import hashes; from cryptography.hazmat.primitives.asymmetric import ec; ec.ECDSA(hashes.SHA256(), deterministic_signing=True)" 2>/dev/null; \
+	  then echo $(PYTHON) > $@; \
+	  else $(PYTHON) -m venv $(B)/venv-sign && $(B)/venv-sign/bin/pip -q install "cryptography>=43" && echo $(B)/venv-sign/bin/python > $@; fi
+$(B)/sign_vectors.txt: tests/make_sign_vectors.py scripts/fetch-vectors.sh $(B)/pyenv-sign
 	./scripts/fetch-vectors.sh
-	$$(cat $(B)/pyenv) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
+	$$(cat $(B)/pyenv-sign) -I tests/make_sign_vectors.py third_party/vectors $(SIGN_N) 1 > $@
 $(B)/asan_sign: tests/test_sign.c $(SRC) | $(B)
 	$(CC) $(SAN) $(ARCHFLAGS) $(WARN) $(INC) $< $(X86SHA) -o $@
 $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
@@ -186,13 +202,14 @@ $(B)/test_sign_padded: tests/test_sign.c $(SRC) | $(B)
 sign-asan: $(B)/asan_sign $(B)/test_sign_padded $(B)/sign_vectors.txt
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/asan_sign $(B)/sign_vectors.txt | tail -1
 	ASAN_OPTIONS=detect_leaks=1 ./$(B)/test_sign_padded $(B)/sign_vectors.txt | tail -1   # -DJWT_INPUT_PADDED: JWT_SIGN_SLACK
-sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv
+sign-test: $(B)/test_sign $(B)/test_sign_openssl $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pyenv-sign
 	./$(B)/test_sign $(B)/sign_vectors.txt
+	./$(B)/test_sign_openssl $(B)/sign_vectors.txt | tail -1   # -DJWT_OPENSSL: RS256 signing too
 	./$(B)/test_sign_portable $(B)/sign_vectors.txt | tail -1   # -DJWT_NO_ED25519_ASM: the portable Ed25519 signer
 	JWT_CPU_MASK=0xfffffffb ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # BMI2/ADX masked: s2n-bignum's _alt kernel
 	JWT_CPU_MASK=0 ./$(B)/test_sign $(B)/sign_vectors.txt | tail -1   # every CPU feature masked: the portable engines
 	./$(B)/test_sign emit $(SIGN_N) > $(B)/sign_emitted.txt
-	$$(cat $(B)/pyenv) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
+	$$(cat $(B)/pyenv-sign) -I tests/check_sign_pyca.py < $(B)/sign_emitted.txt
 # constant-time checks of the HS256 secret-key path (tests/test_ct.c, tests/dudect_hmac.c):
 #   make test-ct   valgrind memcheck with the key marked secret: any key-dependent branch or address in jwt_key_init
 #                  or an HMAC engine this CPU runs fails it (deterministic; needs valgrind and its memcheck.h); then
@@ -203,7 +220,7 @@ sign-test: $(B)/test_sign $(B)/test_sign_portable $(B)/sign_vectors.txt $(B)/pye
 #                  built; needs a qemu built with --enable-plugins and its contrib execlog plugin
 #   make dudect    statistical timing tests (dudect) for the engines valgrind can't run (SHA-NI, AVX-512): run on a
 #                  quiet machine; |t| > 10 is a leak. The first line is a deliberately leaky control and must say LEAK.
-#   make dudect-sign  the same for signing (HS256 and Ed25519, fixed vs random private key)
+#   make dudect-sign  the same for signing (HS256, Ed25519 and ES256, fixed vs random private key)
 $(B)/test_ct: tests/test_ct.c $(SRC) | $(B)
 	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h $< $(X86SHA) -o $@
 test-ct: $(B)/test_ct $(B)/test_ct_portable
@@ -218,7 +235,10 @@ $(B)/ct_trace: tests/ct_trace.c $(SRC) | $(B)
 SDE ?= sde64
 test-ct-sde: $(B)/ct_trace $(B)/ct_trace_portable
 	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace
-	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable sign_ed   # the portable Ed25519 signer
+	scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace_portable "sign_ed sign_es"   # the portable signers
+ifeq ($(TUNED_ES256_NISTZ)-$(OSSL_SHA),1-1)
+	SDECPU=-hsw scripts/ct-trace.sh $(SDE) ./$(B)/ct_trace "sign_es"   # Haswell, no ADX: the ecp_nistz256 [k] G
+endif
 # the AArch64 engines (NEON, SHA2) from an x86-64 machine: a static cross build, traced by qemu-aarch64's execlog plugin
 CROSS ?= aarch64-linux-gnu-
 QEMU ?= qemu-aarch64
@@ -243,6 +263,8 @@ dudect-sign: $(B)/dudect_sign
 	for b in 1 16; do ./$(B)/dudect_sign aa-hs $$b 1000000; ./$(B)/dudect_sign hs $$b 1000000; done
 	for b in 1 8; do ./$(B)/dudect_sign aa-ed $$b 100000; ./$(B)/dudect_sign ed $$b 100000; done
 	./$(B)/dudect_sign edkey 1 100000
+	for b in 1 8; do ./$(B)/dudect_sign aa-es $$b 100000; ./$(B)/dudect_sign es $$b 100000; done
+	./$(B)/dudect_sign eskey 1 100000
 test-quick: $(B)/test_jwt $(B)/tokens.json example-check check-symbols
 	JWT_TEST_QUICK=1 ./$(B)/test_jwt $(B)/tokens.json
 asan: $(B)/asan_jwt $(B)/tokens.json
@@ -287,14 +309,16 @@ compare-sign: $(B)/bench_sign $(SRC) | $(B)
 
 # the portable Ed25519 signer (fiat-crypto, no assembly) where the default build uses s2n-bignum's kernel:
 # -DJWT_NO_ED25519_ASM.  make sign-test, test-ct, test-ct-sde and bench-sign check it as well.
+$(B)/test_sign_openssl: tests/test_sign.c $(SRC) | $(B)
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_OPENSSL $(SSLINC) $< $(X86SHA) $(SSLLIB) -lcrypto -o $@
 $(B)/test_sign_portable: tests/test_sign.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/test_ct_portable: tests/test_ct.c $(SRC) | $(B)
-	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) -O2 -g $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/ct_trace_portable: tests/ct_trace.c $(SRC) | $(B)
-	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM $< $(X86SHA) -o $@
+	$(CC) -O2 $(ARCHFLAGS) $(WARN) $(INC) -include stdarg.h -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $< $(X86SHA) -o $@
 $(B)/bench_sign_portable: bench/bench_sign.c $(SRC) | $(B)
-	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
+	$(CC) $(CFLAGS) $(ARCHFLAGS) $(WARN) $(INC) -DJWT_NO_ED25519_ASM -DJWT_NO_ES256_ASM $(SSLINC) $< $(SSLLIB) -lcrypto $(X86SHA) -o $@
 
 AVX512 := -march=cascadelake -DJWT_AVX512
 avx512: tests/test_jwt.c bench/bench_jwt.c $(SRC) | $(B)

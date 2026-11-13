@@ -7,7 +7,10 @@
  *                   every key)
  *   edkey           cc_skey_ed25519 from a 32-byte seed, then cc_skey_free (SHA-512, reduction, [a] B, encoding)
  *   hs BATCH        jwt_key_init then jwt_sign_batch of BATCH payloads (the dispatched HMAC and the encoder)
- *   aa-ed / aa-hs BATCH   A/A negative controls: both classes the same fixed key, from two separate pools
+ *   es BATCH        ES256 cc_sign_batch of BATCH 100-byte messages: d (big-endian and Montgomery form) copied into
+ *                   one working key before each sample (RFC 6979, [k] G, k^-1, s all follow from it)
+ *   eskey           cc_skey_es256 from a 32-byte d (top bit cleared), then cc_skey_free ([d] G)
+ *   aa-ed / aa-hs / aa-es BATCH   A/A negative controls: both classes the same fixed key, from two separate pools
  *   control         positive control: an early-exit 32-byte compare, mismatch at byte 0 or byte 31; must say LEAK
  *   vt-control      positive control in Ed25519 terms: [s] B with the verify side's variable-time comb (signed digits,
  *                   zero digits skipped, the table indexed by the digit) on a fixed vs random s; must say LEAK
@@ -51,7 +54,13 @@ typedef struct {
 static int test, batch;
 static edsec_t edfix[POOL], edrand[POOL], edfix2[POOL], *edpool[2];
 static key32_t kfix[POOL], krand[POOL], kfix2[POOL], *kpool[2];
-static cc_skey_t *kw; /* the working signing key */
+typedef struct {
+    uint64_t dm[4];
+    uint8_t d[32];
+} essec_t;
+static essec_t esfix[POOL], esrand[POOL], esfix2[POOL], *espool[2];
+static cc_skey_t *kwe; /* the working ES256 key */
+static cc_skey_t *kw;  /* the working signing key */
 static uint8_t seedcur[32], cmpa[32], cmpb0[32], cmpb1[32], cmpcur[32];
 static uint8_t msgs[MAXB][100], sig[MAXB][64], *sp[MAXB];
 static const uint8_t *mp[MAXB];
@@ -85,7 +94,13 @@ static void prepare(int c, int i) {
         case 1:
         case 2:
         case 4: memcpy(seedcur, kpool[c][i & (POOL - 1)].b, 32); break; /* edkey, hs, vt-control */
-        default: memcpy(cmpcur, c ? cmpb1 : cmpb0, 32); break;          /* control */
+        case 5: {                                                       /* es */
+            const essec_t *e = &espool[c][i & (POOL - 1)];
+            memcpy(kwe->es_dm, e->dm, sizeof kwe->es_dm), memcpy(kwe->es_d, e->d, 32);
+            break;
+        }
+        case 6: memcpy(seedcur, kpool[c][i & (POOL - 1)].b, 32), seedcur[0] &= 0x7f; break; /* eskey */
+        default: memcpy(cmpcur, c ? cmpb1 : cmpb0, 32); break;                              /* control */
     }
 }
 static void op(void) {
@@ -120,8 +135,22 @@ static void op(void) {
 #endif
             break;
         }
+        case 5: cc_sign_batch(kwe, batch, mp, ml, sp); break;
+        case 6: {
+            cc_skey_t *k = cc_skey_es256(seedcur);
+            sink = k->es_qx[0];
+            cc_skey_free(k);
+            break;
+        }
         default: sink = leaky_eq(cmpa, cmpcur); break;
     }
+}
+static void es_secrets(essec_t *o, const uint8_t d32[32]) {
+    uint8_t d[32];
+    memcpy(d, d32, 32), d[0] &= 0x7f;
+    cc_skey_t *k = cc_skey_es256(d);
+    memcpy(o->dm, k->es_dm, sizeof o->dm), memcpy(o->d, k->es_d, 32);
+    cc_skey_free(k);
 }
 
 static void ed_secrets(edsec_t *o, const uint8_t seed[32]) {
@@ -142,6 +171,8 @@ int main(int argc, char **argv) {
            : !strcmp(base, "hs")         ? 2
            : !strcmp(base, "vt-control") ? 4
            : !strcmp(base, "control")    ? 3
+           : !strcmp(base, "es")         ? 5
+           : !strcmp(base, "eskey")      ? 6
                                          : -1;
     if (test < 0) return fprintf(stderr, "unknown test %s\n", t), 2;
 #ifdef CC_ED_S2N
@@ -151,12 +182,22 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 32; i++) seed[i] = (uint8_t)rnd();
     edsec_t fixs;
     ed_secrets(&fixs, seed);
+    essec_t fixe;
+    es_secrets(&fixe, seed);
     key32_t fixk;
     memcpy(fixk.b, seed, 32);
     for (int r = 0; r < POOL; r++) {
         edfix[r] = edfix2[r] = fixs, kfix[r] = kfix2[r] = fixk;
         for (int i = 0; i < 32; i++) krand[r].b[i] = (uint8_t)rnd();
         ed_secrets(&edrand[r], krand[r].b);
+        esfix[r] = esfix2[r] = fixe;
+        es_secrets(&esrand[r], krand[r].b);
+    }
+    espool[0] = esfix, espool[1] = aa ? esfix2 : esrand;
+    {
+        uint8_t d[32];
+        memcpy(d, seed, 32), d[0] &= 0x7f;
+        kwe = cc_skey_es256(d);
     }
     edpool[0] = edfix, edpool[1] = aa ? edfix2 : edrand;
     kpool[0] = kfix, kpool[1] = aa ? kfix2 : krand;

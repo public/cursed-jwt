@@ -4,8 +4,13 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -48,8 +53,19 @@ func main() {
 		s, _ := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims).SignedString(priv)
 		sink += len(s)
 	})
+	d := new(big.Int).SetBytes(seed)
+	ek := new(ecdsa.PrivateKey)
+	ek.Curve, ek.D = elliptic.P256(), d
+	ek.X, ek.Y = elliptic.P256().ScalarBaseMult(d.Bytes())
+	best("Go crypto/ecdsa SignASN1 (random k)", func() {
+		h := sha256Sum(si)
+		s, _ := ecdsa.SignASN1(rand.Reader, ek, h[:])
+		sink += len(s)
+	})
 	best("Go crypto/ed25519 Sign (raw)", func() {
 		sink += len(ed25519.Sign(priv, si))
 	})
 	_ = sink
 }
+
+func sha256Sum(b []byte) [32]byte { return sha256.Sum256(b) }

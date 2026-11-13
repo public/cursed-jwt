@@ -11,6 +11,7 @@
 #   Wycheproof ecdsa_secp256r1_sha256_test.json                                       (same commit)
 #   NIST CAVP  186-4ecdsatestvectors.zip SigVer.rsp [P-256,SHA-256]; 186-3rsatestvectors.zip SigVer15_186-3.rsp
 #   Wycheproof ed25519_test.json; RFC 8032 section 7.1 (Ed25519 test vectors); RFC 8037 A.4 (the EdDSA JWS)
+# and, for signing (make sign-test): RFC 6979 A.2.5 (deterministic ECDSA P-256)
 set -e
 cd "$(dirname "$0")/.."
 V=third_party/vectors
@@ -45,3 +46,4 @@ get 186-3rsatestvectors.zip https://csrc.nist.gov/CSRC/media/Projects/Cryptograp
 get ed25519_test.json https://raw.githubusercontent.com/C2SP/wycheproof/d17cc89fa5c8f4f4d378b5385ebf75da5d0926c9/testvectors_v1/ed25519_test.json ea80ffebac085e21cb9d3e903e7fa2b448d96702da5b31f061d0b83b430b74b3
 get rfc8032.txt https://www.rfc-editor.org/rfc/rfc8032.txt ed63657ff389301282b169b0abde9b5dd2c7e4d524fdfa5da6ff3094fc93c4c3
 get rfc8037.txt https://www.rfc-editor.org/rfc/rfc8037.txt f14347f9d8eead78ef6e7a1ea3d795d35d664033095a76a80fcd567904aaedaa
+get rfc6979.txt https://www.rfc-editor.org/rfc/rfc6979.txt 456e8f17558fdbd206f968b96fc6f1b4a71ea331ab30ad17f711ab3adaa7d701

@@ -14,10 +14,12 @@
  *                       cc_tag_eq32 and cc_hmac_sha256_verify (no key- or MAC-dependent branch or memory address;
  *                       checked by `make test-ct`, `test-ct-sde` and `test-ct-qemu`)
  *                       cc_sha512_* and cc_sha512 (no data-dependent operation at all; checked by `make test-ct`)
- *                       signing: cc_skey_ed25519, cc_sign_batch and cc_skey_free (no branch or memory address
- *                       depends on the private key, the expanded scalar, the nonce prefix or the per-signature nonce;
- *                       checked by `make test-ct`, `test-ct-sde`, `test-ct-qemu` and `make dudect-sign`).  Signing
- *                       shares no code with verification beyond fiat-crypto's field and scalar operations and SHA-512.
+ *                       signing: cc_skey_ed25519, cc_skey_es256, cc_sign_batch and cc_skey_free (no branch or memory
+ *                       address depends on the private key, Ed25519's expanded scalar and nonce prefix, or the
+ *                       per-signature nonce (ES256: k, k^-1, the RFC 6979 state; only its ~2^-32 retries branch, on
+ *                       a declassified bit); checked by `make test-ct`, `test-ct-sde`, `test-ct-qemu` and `make
+ *                       dudect-sign`).  Signing shares no code with verification beyond fiat-crypto's field and scalar
+ *                       operations and the hashes (verify-after-sign calls the verifier on the public result).
  *   variable time       signature verification (cc_pkey_*, cc_verify_batch): its inputs, the public key, the
  *                       message and the signature, are all public, as in every other library's verify
  */
@@ -153,9 +155,30 @@ void cc_skey_free(cc_skey_t *k);                          /* constant time; wipe
 int cc_skey_alg(const cc_skey_t *k);                      /* CC_PK_* */
 int cc_skey_sig_bytes(const cc_skey_t *k);                /* 64 for Ed25519 */
 void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]); /* the public key, as cc_pkey_ed25519 takes it */
-/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes.
+/* sig[i] receives the signature of msg[i] (len[i] bytes): Ed25519 R || S, 64 bytes; ES256 r || s; RS256 the
+ * cc_skey_sig_bytes(k)-byte integer (a libcrypto failure gives zeros and counts in the return value).  Returns the number
+ * of signatures verify-after-sign rejected (zeroed), 0 without it.
  * constant time (tests: test_ct sign, the sign_ed traces of test-ct-sde / test-ct-qemu, dudect_sign ed) */
-void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
+int cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig);
+/* ES256 (ECDSA P-256 with SHA-256; RFC 6979 deterministic nonces, so no random numbers): the private key d, 32 bytes
+ * big-endian, 1 <= d < n (NULL otherwise, or if out of memory); the public point is derived.  Signatures are r || s,
+ * 32 bytes big-endian each (JWS).  constant time (tests: test_ct sign, the sign_es traces of test-ct-sde /
+ * test-ct-qemu, dudect_sign es) */
+cc_skey_t *cc_skey_es256(const uint8_t d[32]);
+void cc_skey_es256_public(const cc_skey_t *k, uint8_t x[32], uint8_t y[32]); /* as cc_pkey_es256 takes it */
+/* Verify-after-sign (ES256 only; -1 for Ed25519 or out of memory): every signature is checked with the public key
+ * (cc_verify_batch, about 1x the cost of signing; the key grows by the verifier's 528 KB tables) before it is released.
+ * A signature that fails (a computation fault) is zeroed, and cc_sign_batch returns how many did; 0 otherwise. */
+int cc_skey_verify_after_sign(cc_skey_t *k, int on);
+/* RS256 (RSASSA-PKCS1-v1_5 with SHA-256), delegated to OpenSSL's libcrypto: only in a -DCC_OPENSSL (-DJWT_OPENSSL)
+ * build, linked with -lcrypto; NULL in any other build.  The key is an RSA private key of 2048 to 4096 bits, DER
+ * (PKCS#8 or PKCS#1) or PEM; NULL if it is anything else.  Signatures are the modulus' length (cc_skey_sig_bytes),
+ * byte-identical to OpenSSL's (PKCS#1 v1.5 is deterministic).  Timing and fault checks are libcrypto's (CRT with
+ * blinding, constant-time exponentiation, the result checked against the public key); this library's constant-time
+ * tests don't cover it.  cc_skey_rs256_public gives n and e big-endian, as cc_pkey_rs256 takes them: it returns n's
+ * length, or -1 (no RS256 key, or n / e longer than ncap / ecap). */
+cc_skey_t *cc_skey_rs256(const uint8_t *key, size_t len);
+int cc_skey_rs256_public(const cc_skey_t *k, uint8_t *n, size_t ncap, uint8_t *e, size_t ecap, size_t *elen);
 
 #ifdef __cplusplus
 }

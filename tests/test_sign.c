@@ -77,6 +77,12 @@ static void sign_hs_one(const uint8_t *key, int kl, const uint8_t *pl, int pn, c
     const char *p = (const char *)pl;
     jwt_sign_batch(&k, 1, &p, &pn, &out, ol);
 }
+static void sign_es_one(const uint8_t *d, const uint8_t *pl, int pn, char *out, int *ol) {
+    jwt_skey_t *k = jwt_skey_es256(d);
+    const char *p = (const char *)pl;
+    jwt_sign_batch_pk(k, 1, &p, &pn, &out, ol);
+    jwt_skey_free(k);
+}
 static void sign_ed_one(const uint8_t *seed, const uint8_t *pl, int pn, char *out, int *ol) {
     jwt_skey_t *k = jwt_skey_ed25519(seed);
     const char *p = (const char *)pl;
@@ -88,9 +94,12 @@ static void vectors(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) perror(path), exit(2);
     int counts[16] = { 0 };
-    static const char *kinds[] = { "ed", "edjws", "hsjws", "edtok", "hstok", "refuse", "sha512", "sc", "b64" };
+    static const char *kinds[] = { "ed", "edjws", "hsjws", "edtok", "hstok", "refuse", "sha512",
+                                   "sc", "b64",   "es",    "estok", "rs",    "rsjws",  "rstok" };
+    int rs_skipped = 0;
+    enum { NK = (int)(sizeof kinds / sizeof kinds[0]) };
     while (fgets(line, sizeof line, f)) {
-        char kind[16], src[64], *f3 = NULL, *f4 = NULL, *f5 = NULL, *f6 = NULL;
+        char kind[16], src[64], *f3 = NULL, *f4 = NULL, *f5 = NULL, *f6 = NULL, *f7 = NULL, *f8 = NULL;
         line[strcspn(line, "\n")] = 0;
         char *save, *t = strtok_r(line, " ", &save);
         if (!t) continue;
@@ -98,8 +107,9 @@ static void vectors(const char *path) {
         snprintf(src, sizeof src, "%s", strtok_r(NULL, " ", &save));
         f3 = strtok_r(NULL, " ", &save), f4 = f3 ? strtok_r(NULL, " ", &save) : NULL;
         f5 = f4 ? strtok_r(NULL, " ", &save) : NULL, f6 = f5 ? strtok_r(NULL, " ", &save) : NULL;
+        f7 = f6 ? strtok_r(NULL, " ", &save) : NULL, f8 = f7 ? strtok_r(NULL, " ", &save) : NULL;
         int ki = 0;
-        while (ki < 9 && strcmp(kind, kinds[ki])) ki++;
+        while (ki < NK && strcmp(kind, kinds[ki])) ki++;
         counts[ki]++;
         if (!strcmp(kind, "ed")) { /* seed pub msg sig */
             uint8_t sig[64], pub[32], *sp = sig, ok = 0;
@@ -146,6 +156,78 @@ static void vectors(const char *path) {
             else sign_hs_one(A, kl, C, pn, tokbuf, &ol);
             CHECK(ol == (int)strlen(f5) && !strcmp(tokbuf, f5), "%s: token (len %d)\n  got  %s\n  want %s", src, ol,
                   tokbuf, f5);
+        } else if (!strcmp(kind, "es")) { /* d x y msg k sig */
+            uint8_t d[32], x[32], y[32], gx[32], gy[32], sig[64], want[64], kk[32], *sp = sig, ok = 0;
+            unhex(f3, d), unhex(f4, x), unhex(f5, y);
+            int ml = unhex(f6, C);
+            unhex(f8, want);
+            cc_skey_t *k = cc_skey_es256(d);
+            CHECK(k != NULL, "%s: key refused", src);
+            if (!k) continue;
+            cc_skey_es256_public(k, gx, gy);
+            CHECK(!memcmp(gx, x, 32) && !memcmp(gy, y, 32), "%s: public key", src);
+            const uint8_t *mp = C;
+            cc_sign_batch(k, 1, &mp, &ml, &sp);
+            CHECK(!memcmp(sig, want, 64), "%s: signature differs from the vector", src);
+            if (strcmp(f7, "-")) { /* the RFC 6979 nonce itself */
+                uint8_t hb[1][32], h[32];
+                uint64_t z[4], kl[4];
+                es_drbg g;
+                cc_sha256_bytes(1, &mp, &ml, hb);
+                es_be_to_limbs(z, hb[0]), es_sub_n_once(z, z), es_limbs_to_be(h, z);
+                es_drbg_init(&g, d, h);
+                es_drbg_next(&g, kl, 0);
+                es_limbs_to_be(kk, kl);
+                uint8_t wk[32];
+                unhex(f7, wk);
+                CHECK(!memcmp(kk, wk, 32), "%s: RFC 6979 nonce k", src);
+            }
+            cc_pkey_t *pk = cc_pkey_es256(x, y);
+            const uint8_t *s2 = sig;
+            int sl = 64;
+            cc_verify_batch(pk, 1, &mp, &ml, &s2, &sl, &ok);
+            CHECK(ok == 1, "%s: our verifier rejects the signature", src);
+            cc_pkey_free(pk), cc_skey_free(k);
+        } else if (!strcmp(kind, "estok")) { /* d payload token */
+            int pn = unhex(f4, C), ol = -2;
+            unhex(f3, A);
+            sign_es_one(A, C, pn, tokbuf, &ol);
+            CHECK(ol == (int)strlen(f5) && !strcmp(tokbuf, f5), "%s: token (len %d)\n  got  %s\n  want %s", src, ol,
+                  tokbuf, f5);
+        } else if (!strcmp(kind, "rs") || !strcmp(kind, "rsjws") || !strcmp(kind, "rstok")) { /* key ... */
+            static uint8_t der[4096];
+            int kl = unhex(f3, der), ml = unhex(f4, C);
+            jwt_skey_t *k = jwt_skey_rs256(der, (size_t)kl);
+#ifdef JWT_OPENSSL
+            CHECK(k != NULL, "%s: RS256 key refused", src);
+#else
+            CHECK(k == NULL, "%s: an RS256 key without -DJWT_OPENSSL", src);
+            rs_skipped++;
+#endif
+            if (!k) continue;
+            if (kind[2] == 't') { /* rstok: the whole token */
+                int ol = -2;
+                const char *pl = (const char *)C;
+                char *op = tokbuf;
+                jwt_sign_batch_pk(k, 1, &pl, &ml, &op, &ol);
+                CHECK(ol == (int)strlen(f5) && !strcmp(tokbuf, f5), "%s: token\n  got  %s\n  want %s", src, tokbuf, f5);
+            } else {
+                static uint8_t sig[512], want[512];
+                uint8_t *sp = sig;
+                const uint8_t *mp = C;
+                cc_sign_batch(k->cc, 1, &mp, &ml, &sp);
+                int sb = k->sig_bytes;
+                if (kind[2] == 'j') { /* rsjws: signing input -> token */
+                    memcpy(tokbuf, C, (size_t)ml);
+                    tokbuf[ml] = '.';
+                    int tl = ml + 1 + jwt_b64url_encode(tokbuf + ml + 1, sig, sb);
+                    tokbuf[tl] = 0;
+                    CHECK(!strcmp(tokbuf, f5), "%s: token\n  got  %s\n  want %s", src, tokbuf, f5);
+                } else {
+                    CHECK(unhex(f5, want) == sb && !memcmp(sig, want, (size_t)sb), "%s: signature differs", src);
+                }
+            }
+            jwt_skey_free(k);
         } else if (!strcmp(kind, "refuse")) {
             int pn = unhex(f3, C), o1 = 0, o2 = 0;
             uint8_t seed[32] = { 7 };
@@ -155,6 +237,9 @@ static void vectors(const char *path) {
             tokbuf[0] = 'x';
             sign_ed_one(seed, C, pn, tokbuf, &o2);
             CHECK(o2 == -1 && tokbuf[0] == 'x', "%s: EdDSA issued a token for a refused payload", src);
+            tokbuf[0] = 'x', o2 = 0;
+            sign_es_one(seed, C, pn, tokbuf, &o2);
+            CHECK(o2 == -1 && tokbuf[0] == 'x', "%s: ES256 issued a token for a refused payload", src);
         } else if (!strcmp(kind, "sha512")) {
             int ml = unhex(f3, A);
             uint8_t want[64], got[64];
@@ -193,9 +278,10 @@ static void vectors(const char *path) {
     }
     fclose(f);
     printf("vectors:");
-    for (int i = 0; i < 9; i++) printf(" %s %d", kinds[i], counts[i]);
+    for (int i = 0; i < NK; i++) printf(" %s %d", kinds[i], counts[i]);
+    if (rs_skipped) printf(" (RS256: %d checked to be refused without -DJWT_OPENSSL)", rs_skipped);
     printf("\n");
-    CHECK(counts[0] >= 5 && counts[1] == 1 && counts[2] == 1, "the RFC vectors are missing");
+    CHECK(counts[0] >= 5 && counts[1] == 1 && counts[2] == 1 && counts[9] >= 2, "the RFC vectors are missing");
 }
 
 /* ---- round trips ---- */
@@ -318,6 +404,150 @@ static void roundtrip_ed(void) {
     printf("round trip EdDSA: batch 1..%d, verified by jwt_verify_batch_pk, batch == single\n", MAXB);
 }
 
+static void roundtrip_es(void) {
+    uint8_t d[32], x[32], y[32];
+    for (int i = 0; i < 32; i++) d[i] = (uint8_t)rnd();
+    d[0] &= 0x7f; /* < n */
+    jwt_skey_t *k = jwt_skey_es256(d);
+    jwt_skey_es256_public(k, x, y);
+    jwt_pkey_t *pk = jwt_pkey_es256(x, y);
+    CHECK(k && pk, "ES256 keys");
+    static jwt_result_t res[MAXB];
+    for (int n = 1; n <= MAXB; n++) {
+        make_payloads(n);
+        const char *pp[MAXB], *tp[MAXB];
+        for (int i = 0; i < n; i++) pp[i] = pls[i], tp[i] = obuf[i];
+        CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n, "es n=%d: not all issued", n);
+        jwt_verify_batch_pk(pk, n, tp, ol, 1800000000, res);
+        check_results("es", n, res);
+        exact_size(n, NULL, k);
+        for (int i = 0; i < n; i++) { /* deterministic: signing alone gives the same token */
+            int o;
+            char *op = ref[i];
+            jwt_sign_batch_pk(k, 1, &pp[i], &pnl[i], &op, &o);
+            CHECK(o == ol[i] && !strcmp(ref[i], obuf[i]), "es n=%d i=%d: batch vs single", n, i);
+        }
+    }
+    /* verify-after-sign: the same tokens with it on; with a corrupted key (a simulated fault) none is issued */
+    CHECK(jwt_skey_verify_after_sign(k, 1) == 0, "verify-after-sign on");
+    make_payloads(MAXB);
+    const char *pp[MAXB];
+    for (int i = 0; i < MAXB; i++) pp[i] = pls[i];
+    CHECK(jwt_sign_batch_pk(k, MAXB, pp, pnl, outs, ol) == MAXB, "es with verify-after-sign: not all issued");
+    k->cc->es_dm[0] ^= 1;
+    CHECK(jwt_sign_batch_pk(k, MAXB, pp, pnl, outs, ol) == 0 && ol[0] == -1 && obuf[0][0] == 0 && ol[MAXB - 1] == -1,
+          "es fault: a token was issued");
+    k->cc->es_dm[0] ^= 1;
+    CHECK(jwt_skey_verify_after_sign(k, 0) == 0, "verify-after-sign off");
+    uint8_t seed[32] = { 1 };
+    jwt_skey_t *ek = jwt_skey_ed25519(seed);
+    CHECK(jwt_skey_verify_after_sign(ek, 1) == -1, "verify-after-sign is ES256 only");
+    jwt_skey_free(ek);
+    /* d out of range: 0, n, 2^256 - 1 */
+    static const uint8_t n_be[32] = { 0xff, 0xff, 0xff, 0xff, 0,    0,    0,    0,    0xff, 0xff, 0xff,
+                                      0xff, 0xff, 0xff, 0xff, 0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17,
+                                      0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51 };
+    uint8_t z[32] = { 0 }, f[32];
+    memset(f, 0xff, 32);
+    CHECK(!jwt_skey_es256(z) && !jwt_skey_es256(n_be) && !jwt_skey_es256(f), "ES256 keys out of range accepted");
+    jwt_pkey_free(pk), jwt_skey_free(k);
+    printf("round trip ES256: batch 1..%d, verified by jwt_verify_batch_pk, batch == single, verify-after-sign\n",
+           MAXB);
+}
+
+#ifdef CC_ES256_NISTZ
+/* -DCC_TUNED_ES256_NISTZ: OpenSSL ecp_nistz256's [k] G (nz_base_mul) against s2n-bignum's p256_scalarmulbase_alt,
+ * exact affine outputs: random k, single bits, k = 1..300, n - 1..n - 300, Booth-window extremes (every 7-bit window
+ * 0x3f, 0x40, 0x7f or 0x00), all-ones and alternating limbs reduced below n */
+static void nistz_kernel_check(void) {
+    int bad = 0, cnt = 0;
+    uint64_t k[4], r1[8], r2[8];
+    for (int it = 0; it < 20000; it++) {
+        int c = it % 10;
+        for (int j = 0; j < 4; j++) k[j] = (uint64_t)rnd() << 32 | rnd();
+        if (c == 1 && it / 10 < 256) memset(k, 0, 32), k[(it / 10) / 64] = 1ull << ((it / 10) % 64);
+        if (c == 2 && it / 10 < 300) memset(k, 0, 32), k[0] = (uint64_t)(it / 10 + 1);
+        if (c == 3 && it / 10 < 300) { /* n - 1 - j */
+            uint64_t b = (uint64_t)(it / 10 + 1);
+            for (int j = 0; j < 4; j++) {
+                uint64_t v = ES_N[j] - b;
+                b = ES_N[j] < b;
+                k[j] = v;
+            }
+        }
+        if (c == 4) { /* every 7-bit window the same pattern */
+            static const unsigned pat[4] = { 0x3f, 0x40, 0x7f, 0x00 };
+            unsigned p = pat[(it / 10) % 4];
+            memset(k, 0, 32);
+            for (int b = 0; b < 256; b++)
+                if (p >> (b % 7) & 1) k[b / 64] |= 1ull << (b % 64);
+        }
+        if (c == 5) memset(k, (it / 10) % 2 ? 0xff : 0x55, 32);
+        for (int t = 0; t < 2 && !es_in_range(k); t++) es_sub_n_once(k, k); /* < 2^256 < 2n: one subtraction */
+        if (!es_in_range(k)) continue;                                      /* k = 0 or n: not a nonce */
+        cc_s2n_p256_scalarmulbase_alt(r1, k, 4, CC_P256_GTAB);
+        nz_base_mul(r2, k);
+        bad += memcmp(r1, r2, 64) != 0, cnt++;
+    }
+    CHECK(bad == 0, "ecp_nistz256 [k] G: %d of %d differ from s2n-bignum's", bad, cnt);
+    printf("ecp_nistz256 [k] G: %d scalars, %s s2n-bignum's p256_scalarmulbase_alt\n", cnt,
+           bad ? "MISMATCH vs" : "equal to");
+}
+#endif
+
+#ifdef JWT_OPENSSL
+/* RS256 (libcrypto): batches through jwt_verify_batch_pk under the key's own n and e, 2048- and 4096-bit keys */
+static void roundtrip_rs(void) {
+    static jwt_result_t res[MAXB];
+    for (int bits = 2048; bits <= 4096; bits += 2048) {
+        EVP_PKEY *gen = EVP_RSA_gen((unsigned)bits);
+        unsigned char *der = NULL;
+        int dl = i2d_PrivateKey(gen, &der);
+        jwt_skey_t *k = jwt_skey_rs256(der, (size_t)dl);
+        uint8_t nb[512], eb[16];
+        size_t el = 0;
+        int nl = jwt_skey_rs256_public(k, nb, sizeof nb, eb, sizeof eb, &el);
+        jwt_pkey_t *pk = jwt_pkey_rs256(nb, (size_t)nl, eb, el);
+        CHECK(k && pk && k->sig_bytes == bits / 8, "RS256 %d keys", bits);
+        for (int n = 1; n <= 17; n += 8) {
+            make_payloads(n);
+            const char *pp[MAXB], *tp[MAXB];
+            for (int i = 0; i < n; i++) pp[i] = pls[i], tp[i] = obuf[i];
+            CHECK(jwt_sign_batch_pk(k, n, pp, pnl, outs, ol) == n, "rs n=%d: not all issued", n);
+            jwt_verify_batch_pk(pk, n, tp, ol, 1800000000, res);
+            check_results("rs", n, res);
+            exact_size(n, NULL, k);
+        }
+        jwt_pkey_free(pk), jwt_skey_free(k), OPENSSL_free(der), EVP_PKEY_free(gen);
+    }
+    printf("round trip RS256 (libcrypto): 2048 and 4096 bits, batch 1, 9, 17, verified by jwt_verify_batch_pk\n");
+}
+#endif
+
+/* the static P-256 table (cc_p256_table.inc) recomputed with the signer's own point arithmetic */
+static void p256_table_check(void) {
+    int bad = 0;
+    es_pt base, acc;
+    static const uint64_t one[4] = { 1 };
+    memcpy(base.X, CC_P256_GTAB, 32), memcpy(base.Y, CC_P256_GTAB + 4, 32), memcpy(base.Z, ES_ONE_M, 32);
+    for (int i = 0; i < 65; i++) {
+        memset(&acc, 0, sizeof acc), memcpy(acc.Y, ES_ONE_M, 32);
+        for (int j = 1; j <= 8; j++) {
+            es_add(&acc, &acc, &base);
+            es_fe zi, ax, ay;
+            static const uint64_t pm2[4] = { 0xfffffffffffffffdull, 0x00000000ffffffffull, 0, 0xffffffff00000001ull };
+            es_fe_pow(zi, acc.Z, pm2);
+            fiat_p256_mul(ax, acc.X, zi), fiat_p256_mul(ay, acc.Y, zi);
+            bad += memcmp(ax, CC_P256_GTAB + 64 * i + 8 * (j - 1), 32) != 0;
+            bad += memcmp(ay, CC_P256_GTAB + 64 * i + 8 * (j - 1) + 4, 32) != 0;
+        }
+        for (int t = 0; t < 4; t++) es_add(&base, &base, &base); /* 16 base */
+    }
+    (void)one;
+    CHECK(bad == 0, "the static P-256 table: %d entries differ", bad);
+    printf("P-256 table: 520 entries recomputed, %s\n", bad ? "MISMATCH" : "all equal");
+}
+
 /* ---- tokens for pyca ---- */
 static void emit(int n) {
     uint8_t key[64], seed[32], pub[32], msg[400], sig[64];
@@ -355,6 +585,25 @@ static void emit(int n) {
         for (int j = 0; j < 64; j++) printf("%02x", sig[j]);
         printf("\n");
         jwt_skey_free(sk);
+        uint8_t d[32], qx[32], qy[32];
+        for (int j = 0; j < 32; j++) d[j] = (uint8_t)rnd();
+        d[0] &= 0x7f;
+        jwt_skey_t *es = jwt_skey_es256(d);
+        jwt_skey_es256_public(es, qx, qy);
+        jwt_sign_batch_pk(es, 1, &pp, &pnl[0], outs, &o);
+        printf("es ");
+        for (int j = 0; j < 32; j++) printf("%02x", d[j]);
+        printf(" %s %d %s\n", obuf[0], uids[0], users[0][0] ? users[0] : "-");
+        cc_sign_batch(es->cc, 1, &mp, &ml, &sp);
+        printf("esraw ");
+        for (int j = 0; j < 32; j++) printf("%02x", d[j]);
+        printf(" ");
+        for (int j = 0; j < ml; j++) printf("%02x", msg[j]);
+        printf("%s ", ml ? "" : "-");
+        for (int j = 0; j < 64; j++) printf("%02x", sig[j]);
+        printf("\n");
+        (void)qx, (void)qy;
+        jwt_skey_free(es);
     }
 }
 
@@ -364,6 +613,14 @@ int main(int argc, char **argv) {
     if (argc > 1) vectors(argv[1]);
     roundtrip_hs();
     roundtrip_ed();
+    roundtrip_es();
+#ifdef JWT_OPENSSL
+    roundtrip_rs();
+#endif
+    p256_table_check();
+#ifdef CC_ES256_NISTZ
+    nistz_kernel_check();
+#endif
     printf("test_sign: %d checks, %d failures\n", checks, fails);
     return fails != 0;
 }

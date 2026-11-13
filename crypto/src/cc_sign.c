@@ -52,6 +52,14 @@ struct cc_skey {
     sg_sc a_m;          /* the secret scalar a mod L, Montgomery form */
     uint8_t prefix[32]; /* the nonce key */
     uint8_t pub[32];    /* A, encoded */
+    /* ES256 (cc_sign_es256.inc) */
+    uint8_t es_d[32];             /* d, big-endian (RFC 6979's int2octets(d)) */
+    uint64_t es_dm[4];            /* d R mod n (fiat's p256_scalar Montgomery form) */
+    uint8_t es_qx[32], es_qy[32]; /* the public point */
+    cc_pkey_t *vk;                /* the public key, when verify-after-sign is on */
+    /* RS256 (cc_sign_rs256.inc, -DJWT_OPENSSL): libcrypto's key */
+    void *rs_pkey;
+    int rs_bytes; /* the modulus' bytes: the signature's length */
 };
 
 /* ---- field helpers: fiat calls only ---- */
@@ -320,17 +328,24 @@ cc_skey_t *cc_skey_ed25519(const uint8_t seed[32]) {
     cc_wipe(h, sizeof h), cc_wipe(a, sizeof a), cc_wipe(ar, sizeof ar);
     return k;
 }
+/* RS256 (delegated to libcrypto under -DJWT_OPENSSL) */
+#include "cc_sign_rs256.inc"
+
 void cc_skey_free(cc_skey_t *k) {
     if (!k) return;
+    cc_pkey_free(k->vk);
+    if (k->alg == CC_PK_RS256) rs_free(k); /* (libcrypto clears its own key material) */
     cc_wipe(k, sizeof *k);
     free(k);
 }
 int cc_skey_alg(const cc_skey_t *k) { return k->alg; }
-int cc_skey_sig_bytes(const cc_skey_t *k) { return k->alg == CC_PK_ED25519 ? 64 : 0; }
+int cc_skey_sig_bytes(const cc_skey_t *k) {
+    return k->alg == CC_PK_RS256 ? k->rs_bytes : k->alg == CC_PK_ED25519 || k->alg == CC_PK_ES256 ? 64 : 0;
+}
 void cc_skey_public(const cc_skey_t *k, uint8_t pub[32]) { memcpy(pub, k->pub, 32); }
 
 /* ---- signing ---- */
-void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig) {
+static void ed_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig) {
     enum { CH = 16 };
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH;
@@ -382,4 +397,14 @@ void cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const i
         cc_wipe(R, sizeof R), cc_wipe(r_m, sizeof r_m), cc_wipe(pre, sizeof pre), cc_wipe(inv, sizeof inv),
             cc_wipe(zi, sizeof zi), cc_wipe(h, sizeof h), cc_wipe(rb, sizeof rb);
     }
+}
+
+/* ---------------------------------------------------------------------------------- ES256 */
+#include "cc_sign_es256.inc"
+
+int cc_sign_batch(const cc_skey_t *k, int n, const uint8_t *const *msg, const int *len, uint8_t *const *sig) {
+    if (k->alg == CC_PK_ES256) return es_sign_batch(k, n, msg, len, sig);
+    if (k->alg == CC_PK_RS256) return rs_sign_batch(k, n, msg, len, sig);
+    ed_sign_batch(k, n, msg, len, sig);
+    return 0;
 }

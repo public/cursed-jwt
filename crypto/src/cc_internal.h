@@ -38,6 +38,12 @@
 #if defined(JWT_ED25519_ASM) && !defined(CC_ED25519_ASM)
 #define CC_ED25519_ASM 1
 #endif
+#if defined(JWT_ES256_ASM) && !defined(CC_ES256_ASM)
+#define CC_ES256_ASM 1
+#endif
+#if defined(JWT_NO_ES256_ASM) && !defined(CC_NO_ES256_ASM)
+#define CC_NO_ES256_ASM 1
+#endif
 #if defined(JWT_NO_ED25519_ASM) && !defined(CC_NO_ED25519_ASM)
 #define CC_NO_ED25519_ASM 1
 #endif
