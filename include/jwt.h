@@ -201,7 +201,15 @@ void jwt_pk_verify_raw(const jwt_pkey_t *k, int n, const uint8_t *const *msg, co
 typedef struct jwt_skey jwt_skey_t;
 /* jwt_skey_ed25519, jwt_sign_batch_pk and jwt_skey_free: constant time in the private key (cc_sign_batch's tests) */
 jwt_skey_t *jwt_skey_ed25519(const uint8_t seed[32]);       /* NULL only if out of memory */
-void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]); /* for jwt_pkey_ed25519 / the JWK "x" */
+void jwt_skey_public(const jwt_skey_t *k, uint8_t pub[32]); /* Ed25519: for jwt_pkey_ed25519 / the JWK "x" */
+/* ES256 (ECDSA P-256, RFC 6979 deterministic nonces): d, 32 bytes big-endian (the JWK "d"); NULL unless 1 <= d < n.
+ * jwt_sign_batch_pk then issues {"alg":"ES256","typ":"JWT"} tokens with r || s.  Constant time in d and the nonce. */
+jwt_skey_t *jwt_skey_es256(const uint8_t d[32]);
+void jwt_skey_es256_public(const jwt_skey_t *k, uint8_t x[32], uint8_t y[32]); /* for jwt_pkey_es256 / "x", "y" */
+/* ES256: check every signature with the public key before issuing it (a fault defence; costs about one verify per
+ * token and the verifier's 528 KB of tables).  A token whose signature fails gets out_len[i] = -1 (out[i] is then "").
+ * 0, or -1 for an Ed25519 key or out of memory. */
+int jwt_skey_verify_after_sign(jwt_skey_t *k, int on);
 void jwt_skey_free(jwt_skey_t *k);
 int jwt_sign_size_pk(const jwt_skey_t *k, int payload_len);
 int jwt_sign_batch_pk(const jwt_skey_t *k, int n, const char *const *payload, const int *payload_len, char *const *out,

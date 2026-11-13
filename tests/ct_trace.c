@@ -13,7 +13,9 @@
  * ENGINE "sign_hs" is HS256 signing: jwt_key_init and jwt_sign_batch (payload checks, the dispatched HMAC, the
  * base64url encoder) of BATCH fixed payloads.  ENGINE "sign_ed" is Ed25519 signing: cc_skey_ed25519 from a 32-byte
  * seed (SHA-512, the scalar reduction, [a] B, the encoding of A), cc_sign_batch of BATCH fixed messages and
- * cc_skey_free.  The two keys / seeds differ in every byte.
+ * cc_skey_free.  ENGINE "sign_es" is ES256 signing: cc_skey_es256 (d = the key's first 32 bytes, top bit cleared),
+ * cc_sign_batch of BATCH fixed messages (RFC 6979, [k] G, k^-1) and cc_skey_free.  The two keys / seeds differ in
+ * every byte.
  *
  *   ct_trace ENGINE KEY BATCH          (prints the first MAC word)
  *   make test-ct-sde SDE=/path/to/sde64
@@ -67,7 +69,7 @@ int main(int argc, char **argv) {
         { "sha2", jwt_hmac_sha2 },
 #endif
     };
-    if (!strcmp(e, "sign_hs") || !strcmp(e, "sign_ed")) {
+    if (!strcmp(e, "sign_hs") || !strcmp(e, "sign_ed") || !strcmp(e, "sign_es")) {
         static char pl[32][200], out[32][400];
         static const char *pp[32];
         static char *op[32];
@@ -87,6 +89,16 @@ int main(int argc, char **argv) {
             jwt_sign_batch(&k, n, pp, pn, op, on);
             SSC_MARK(0x222);
             printf("%s\n", out[0]);
+        } else if (e[6] == 's') {
+#ifndef JWT_NO_PK
+            key[0] &= 0x7f; /* d < n */
+            SSC_MARK(0x111);
+            cc_skey_t *sk = cc_skey_es256(key);
+            cc_sign_batch(sk, n, mp, ml, sp);
+            cc_skey_free(sk);
+            SSC_MARK(0x222);
+            printf("%02x%02x\n", sig[0][0], sig[0][63]);
+#endif
         } else {
 #ifndef JWT_NO_PK
             SSC_MARK(0x111);

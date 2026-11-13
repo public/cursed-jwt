@@ -9,7 +9,9 @@
  *                built on OpenSSL calls it per token */
 #include "jwt.c"
 
+#include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/obj_mac.h>
 #include <openssl/core_names.h>
 #include <openssl/hmac.h>
 #include <openssl/params.h>
@@ -106,6 +108,46 @@ int main(int argc, char **argv) {
         } while ((t1 = now_ns()) - t0 < secs * 1e9);
         printf("  %-34s      %9.1f ns/key\n", "jwt_skey_ed25519 (key setup)", (t1 - t0) / (double)it);
     }
+    /* ES256: the same claims and signing input under {"alg":"ES256",...} lengths alike; OpenSSL 3.0 signs with a random
+     * nonce (deterministic nonces need 3.2), so its cell is the same work but not the same output */
+    printf("ES256 (ECDSA P-256)\n");
+    uint8_t d[32];
+    for (int i = 0; i < 32; i++) d[i] = (uint8_t)(i * 11 + 5);
+    d[0] &= 0x7f;
+    jwt_skey_t *es = jwt_skey_es256(d);
+    for (int b = 1; b <= B; b += B - 1) {
+        CELL("cursed-jwt jwt_sign_batch_pk", b, sink += (unsigned)jwt_sign_batch_pk(es, b, pp, pn, op, on));
+        CELL("raw cc_sign_batch", b, (cc_sign_batch(es->cc, b, mp, ml, sp), sink += sig[0][0]));
+    }
+    {
+        EC_KEY *eck = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+        BIGNUM *bd = BN_bin2bn(d, 32, NULL);
+        EC_POINT *q = EC_POINT_new(EC_KEY_get0_group(eck));
+        EC_POINT_mul(EC_KEY_get0_group(eck), q, bd, NULL, NULL, NULL);
+        EC_KEY_set_private_key(eck, bd), EC_KEY_set_public_key(eck, q);
+        EVP_PKEY *ep = EVP_PKEY_new();
+        EVP_PKEY_assign_EC_KEY(ep, eck);
+        uint8_t der[80];
+        EVP_MD_CTX *mc2 = EVP_MD_CTX_new();
+        CELL("OpenSSL EVP_DigestSign (random k)", 1, {
+            size_t dl = sizeof der;
+            EVP_MD_CTX_reset(mc2);
+            EVP_DigestSignInit(mc2, NULL, EVP_sha256(), NULL, ep);
+            EVP_DigestSign(mc2, der, &dl, (const uint8_t *)si, (size_t)sil);
+            sink += der[4];
+        });
+        EVP_MD_CTX_free(mc2), EVP_PKEY_free(ep), EC_POINT_free(q), BN_free(bd);
+    }
+    {
+        long it = 0;
+        double t0 = now_ns(), t1;
+        do {
+            jwt_skey_free(jwt_skey_es256(d));
+            it++;
+        } while ((t1 = now_ns()) - t0 < secs * 1e9);
+        printf("  %-34s      %9.1f ns/key\n", "jwt_skey_es256 (key setup)", (t1 - t0) / (double)it);
+    }
+    jwt_skey_free(es);
     EVP_MD_CTX_free(mc), EVP_PKEY_free(ek), jwt_skey_free(sk);
     return 0;
 }

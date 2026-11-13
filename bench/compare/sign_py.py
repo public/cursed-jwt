@@ -7,7 +7,8 @@ import hmac
 import time
 
 import jwt
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
 CLAIMS = {"sub": "123456", "username": "alice", "iat": 1700000000, "exp": 4102444800}
 KEY = b"bench-secret-0123456789abcdef0123"
@@ -32,3 +33,10 @@ best("PyJWT jwt.encode HS256", lambda: jwt.encode(CLAIMS, KEY, algorithm="HS256"
 best("PyJWT jwt.encode EdDSA", lambda: jwt.encode(CLAIMS, sk, algorithm="EdDSA"))
 best("Python hmac (raw, signing input)", lambda: hmac.new(KEY, SI, hashlib.sha256).digest())
 best("pyca Ed25519 sign (raw)", lambda: sk.sign(SI))
+ek = ec.derive_private_key(int.from_bytes(SEED, "big") >> 1, ec.SECP256R1())
+best("pyca ECDSA P-256 sign (random k)", lambda: ek.sign(SI, ec.ECDSA(hashes.SHA256())))
+try:
+    det = ec.ECDSA(hashes.SHA256(), deterministic_signing=True)
+    best("pyca ECDSA P-256 sign (RFC 6979)", lambda: ek.sign(SI, det))
+except TypeError:
+    print("  pyca deterministic ECDSA: needs cryptography >= 43")
